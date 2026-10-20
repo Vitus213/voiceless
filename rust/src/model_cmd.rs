@@ -1,4 +1,4 @@
-//! `syllune model` subcommands backed by the integrity-checked manager.
+//! `voiceless model` subcommands backed by the integrity-checked manager.
 
 use crate::models::{default_cache_dir, default_data_dir, HttpDownloader, ModelManager};
 

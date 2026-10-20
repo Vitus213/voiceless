@@ -3,8 +3,10 @@ use std::io::Write;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use syllune::models::{ArchiveType, CheckReport, Downloader, ModelError, ModelManager, ModelSpec};
 use tempfile::tempdir;
+use voiceless::models::{
+    ArchiveType, CheckReport, Downloader, ModelError, ModelManager, ModelSpec,
+};
 
 struct FixtureDownloader {
     bytes: Vec<u8>,
@@ -282,7 +284,7 @@ fn reinstall_after_corruption_repairs_payload() {
 
 #[test]
 fn streaming_paraformer_catalog_entry_pins_supply_chain_fields() {
-    let spec = syllune::models::streaming_paraformer_spec();
+    let spec = voiceless::models::streaming_paraformer_spec();
     assert!(spec.url.starts_with("https://"));
     assert!(spec.sha256_sri.starts_with("sha256-"));
     assert!(spec.size_bytes > 0);

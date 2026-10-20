@@ -600,11 +600,11 @@ fn unique_suffix() -> String {
 }
 
 pub fn default_data_dir() -> PathBuf {
-    xdg_dir("XDG_DATA_HOME", ".local/share").join("syllune")
+    xdg_dir("XDG_DATA_HOME", ".local/share").join("voiceless")
 }
 
 pub fn default_cache_dir() -> PathBuf {
-    xdg_dir("XDG_CACHE_HOME", ".cache").join("syllune")
+    xdg_dir("XDG_CACHE_HOME", ".cache").join("voiceless")
 }
 
 /// Retained WAV recordings from successful streaming sessions.
@@ -613,7 +613,7 @@ pub fn default_audio_dir() -> PathBuf {
 }
 
 pub fn default_config_dir() -> PathBuf {
-    xdg_dir("XDG_CONFIG_HOME", ".config").join("syllune")
+    xdg_dir("XDG_CONFIG_HOME", ".config").join("voiceless")
 }
 
 fn xdg_dir(variable: &str, fallback: &str) -> PathBuf {

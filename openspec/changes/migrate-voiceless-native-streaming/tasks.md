@@ -1,6 +1,6 @@
 ## 1. Rust 云端真流式 tracer bullet
 
-- [x] 1.1 [Requirement: 原生 Rust CLI 分发；Scenario: 无 Python 环境运行核心 CLI] RED：为原生 `syllune --help`、`doctor` 和核心子命令清单写 Rust CLI 行为测试，并让 Nix 包在无 Python 闭包下失败；GREEN：建立提交 `Cargo.lock` 的 Rust package、clap 入口和 `rustPlatform.buildRustPackage`，以最小可运行 `doctor` 闭合安装路径，Sherpa 使用 shared feature 与 `SHERPA_ONNX_LIB_DIR`，不得在构建期下载库；REFACTOR：收敛命令错误和退出码。验证：`nix develop -c cargo test --test cli_identity`、`nix build -L`。
+- [x] 1.1 [Requirement: 原生 Rust CLI 分发；Scenario: 无 Python 环境运行核心 CLI] RED：为原生 `voiceless --help`、`doctor` 和核心子命令清单写 Rust CLI 行为测试，并让 Nix 包在无 Python 闭包下失败；GREEN：建立提交 `Cargo.lock` 的 Rust package、clap 入口和 `rustPlatform.buildRustPackage`，以最小可运行 `doctor` 闭合安装路径，Sherpa 使用 shared feature 与 `SHERPA_ONNX_LIB_DIR`，不得在构建期下载库；REFACTOR：收敛命令错误和退出码。验证：`nix develop -c cargo test --test cli_identity`、`nix build -L`。
 
 - [x] 1.2 [Requirement: 严格配置与后端选择；Scenario: 未知配置在采集前失败；Scenario: 配置文件权限过宽；Requirement: 破坏性实时配置切换；Scenario: 旧实时配置被拒绝] RED：以临时 XDG 根覆盖默认、完整、未知键、非法 endpoint/model/VAD/timeout、宽权限密钥文件和旧 `cloud-vad`/`sensevoice-vad`/`final_backend`；GREEN：实现严格 TOML、0600 密钥门禁和 `cloud-realtime`/`local-streaming` 枚举，保证错误发生在 capture/transport 构造前；REFACTOR：让密钥使用 redacted 类型，禁止 Debug/Display 泄漏。验证：`nix develop -c cargo test --test config_contract`。
 
@@ -18,21 +18,21 @@
 
 ## 3. 显式本地流式后端与核心数据 CLI
 
-- [x] 3.1 [Requirement: 显式本地流式后端；Scenario: 断网使用本地后端；Scenario: 本地模型不可用；Requirement: 核心数据工作流迁移；Scenario: 显式检查发现模型损坏] RED：先固定上游模型 URL、字节数、SRI、允许/必需成员和许可证，再覆盖安装/check 损坏失效、断网 local partial/confirmed/final、零云端连接和缺模型/provider 错误不回退；GREEN：移植安全 ModelManager，使用 shared `sherpa-onnx` OnlineRecognizer/OnlineStream 实现 `local-streaming`；REFACTOR：daemon 复用 recognizer 但会话流隔离。验证：`nix develop -c cargo test --test model_manager --test local_streaming`；真实冒烟：`SYLLUNE_REAL_LOCAL_ASR=1 nix develop -c cargo test --test real_local_asr -- --ignored`。
+- [x] 3.1 [Requirement: 显式本地流式后端；Scenario: 断网使用本地后端；Scenario: 本地模型不可用；Requirement: 核心数据工作流迁移；Scenario: 显式检查发现模型损坏] RED：先固定上游模型 URL、字节数、SRI、允许/必需成员和许可证，再覆盖安装/check 损坏失效、断网 local partial/confirmed/final、零云端连接和缺模型/provider 错误不回退；GREEN：移植安全 ModelManager，使用 shared `sherpa-onnx` OnlineRecognizer/OnlineStream 实现 `local-streaming`；REFACTOR：daemon 复用 recognizer 但会话流隔离。验证：`nix develop -c cargo test --test model_manager --test local_streaming`；真实冒烟：`VOICELESS_REAL_LOCAL_ASR=1 nix develop -c cargo test --test real_local_asr -- --ignored`。
 
 - [x] 3.2 [Requirement: 原生 Rust CLI 分发；Scenario: 无 Python 环境运行核心 CLI；Requirement: 核心数据工作流迁移] RED：为 `transcribe`、`record`、`model`、`doctor`、`mode`、`history` 的成功/错误/JSON 形状写 CLI 集成测试，并针对已实现 batch cloud 与本地后端建立 fixture；GREEN：逐命令迁移现有可观察行为，不迁入 GTK controller/view；REFACTOR：复用配置、模型、provider、事件和退出码边界，删除只为 Python 结构存在的抽象。验证：`nix develop -c cargo test --test cli_workflows`。
 
 ## 4. Headless 热键与 clean cutover
 
-- [x] 4.1 [Requirement: Headless 快捷键会话控制；Scenario: 第二次快捷键激活正常停止；Scenario: 会话结束前重复开始] RED：以 fake Portal/D-Bus 和会话协调器覆盖 idle→recording→finalizing→idle、第二次激活 Stop、并发 Start 拒绝、Cancel 和一次注入；GREEN：用 zbus 移植 GlobalShortcuts 与公开控制总线到 `syllune daemon`；REFACTOR：快捷键层只发送命令，不拥有 capture/backend。验证：`nix develop -c cargo test --test daemon_shortcuts`。
+- [x] 4.1 [Requirement: Headless 快捷键会话控制；Scenario: 第二次快捷键激活正常停止；Scenario: 会话结束前重复开始] RED：以 fake Portal/D-Bus 和会话协调器覆盖 idle→recording→finalizing→idle、第二次激活 Stop、并发 Start 拒绝、Cancel 和一次注入；GREEN：用 zbus 移植 GlobalShortcuts 与公开控制总线到 `voiceless daemon`；REFACTOR：快捷键层只发送命令，不拥有 capture/backend。验证：`nix develop -c cargo test --test daemon_shortcuts`。
 
-- [x] 4.2 [Requirement: Syllune 唯一对外身份；Scenario: 新 CLI 和系统集成可识别；Requirement: 干净的持久化状态边界；Scenario: 仅存在旧状态目录时首次启动；Scenario: 用户需要迁移既有数据；Requirement: GUI 入口被移除；Scenario: GUI 入口被移除] RED：对 flake、Home Manager、desktop/D-Bus/Portal 元数据、新旧 XDG 隔离和迁移说明写安装级测试；GREEN：完成 Syllune 标识切换，删除 Python `src/`、Python tests/pyproject、GTK/Adwaita 入口和旧别名，旧 XDG 保持不变；REFACTOR：清除废弃资源、模型引用和 Python/Nix 依赖。验证：`nix develop -c cargo test --test identity_cutover`、`nix flake check -L`、`nix build -L`。
+- [x] 4.2 [Requirement: Voiceless 唯一对外身份；Scenario: 新 CLI 和系统集成可识别；Requirement: 干净的持久化状态边界；Scenario: 仅存在旧状态目录时首次启动；Scenario: 用户需要迁移既有数据；Requirement: GUI 入口被移除；Scenario: GUI 入口被移除] RED：对 flake、Home Manager、desktop/D-Bus/Portal 元数据、新旧 XDG 隔离和迁移说明写安装级测试；GREEN：完成 Voiceless 标识切换，删除 Python `src/`、Python tests/pyproject、GTK/Adwaita 入口和旧别名，旧 XDG 保持不变；REFACTOR：清除废弃资源、模型引用和 Python/Nix 依赖。验证：`nix develop -c cargo test --test identity_cutover`、`nix flake check -L`、`nix build -L`。
 
 ## 5. 真实质量与端到端延迟门禁
 
-- [x] 5.1 [Requirement: 实时识别质量门禁；Scenario: 云端实时质量基准；Scenario: 本地后端单独报告] RED：用确定性假结果验证 dev/test 隔离、逐样本错误、失败数、模型/provider/语料版本和 CER 聚合，确保云端与本地报告不可合并；GREEN：将现有语料重放为实时 32ms PCM，生成版本化 JSON 报告并对 `cloud-realtime` 执行 CER ≤0.02 门禁；REFACTOR：共享规范化/CER 逻辑，不共享后端结论。验证：`nix develop -c cargo test --test benchmark_contract`；真实门禁：`SYLLUNE_REAL_CLOUD_ASR=1 nix develop -c cargo run --release -- benchmark asr --split test --backend cloud-realtime --enforce`。
+- [x] 5.1 [Requirement: 实时识别质量门禁；Scenario: 云端实时质量基准；Scenario: 本地后端单独报告] RED：用确定性假结果验证 dev/test 隔离、逐样本错误、失败数、模型/provider/语料版本和 CER 聚合，确保云端与本地报告不可合并；GREEN：将现有语料重放为实时 32ms PCM，生成版本化 JSON 报告并对 `cloud-realtime` 执行 CER ≤0.02 门禁；REFACTOR：共享规范化/CER 逻辑，不共享后端结论。验证：`nix develop -c cargo test --test benchmark_contract`；真实门禁：`VOICELESS_REAL_CLOUD_ASR=1 nix develop -c cargo run --release -- benchmark asr --split test --backend cloud-realtime --enforce`。
 
-- [x] 5.2 [Requirement: 目标环境端到端延迟门禁；Scenario: 真实云端和 Wayland 基准通过；Scenario: 非 quick 模式不冒充低延迟结果；Scenario: 环境不足时运行确定性测试] RED：用可控 clock 证明 start/first-partial/stop/tail-sent/finish-sent/final/injection 时间戳、quick/non-quick 分组、p50/p95/p99 和 skip 状态；GREEN：实现至少 100 次真实云端 + Wayland 注入基准，门禁 first partial p95 ≤1.0s、stop→final p50 ≤0.6s、stop→inject p99 ≤1.0s，缺环境时只输出 unverified/skip；REFACTOR：基准采集不改变稳定 RecognitionEvent JSON。验证：`nix develop -c cargo test --test latency_benchmark_contract`；真实门禁：`SYLLUNE_REAL_E2E=1 nix develop -c cargo run --release -- benchmark latency --backend cloud-realtime --mode quick --trials 100 --inject --enforce`。
+- [x] 5.2 [Requirement: 目标环境端到端延迟门禁；Scenario: 真实云端和 Wayland 基准通过；Scenario: 非 quick 模式不冒充低延迟结果；Scenario: 环境不足时运行确定性测试] RED：用可控 clock 证明 start/first-partial/stop/tail-sent/finish-sent/final/injection 时间戳、quick/non-quick 分组、p50/p95/p99 和 skip 状态；GREEN：实现至少 100 次真实云端 + Wayland 注入基准，门禁 first partial p95 ≤1.0s、stop→final p50 ≤0.6s、stop→inject p99 ≤1.0s，缺环境时只输出 unverified/skip；REFACTOR：基准采集不改变稳定 RecognitionEvent JSON。验证：`nix develop -c cargo test --test latency_benchmark_contract`；真实门禁：`VOICELESS_REAL_E2E=1 nix develop -c cargo run --release -- benchmark latency --backend cloud-realtime --mode quick --trials 100 --inject --enforce`。
 
 ## 6. 完成验证
 

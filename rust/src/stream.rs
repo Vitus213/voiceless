@@ -195,7 +195,7 @@ fn modes_path() -> std::path::PathBuf {
             std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned()))
                 .join(".config")
         });
-    root.join("syllune").join("modes.json")
+    root.join("voiceless").join("modes.json")
 }
 
 struct PipelineProcessor {
@@ -275,7 +275,7 @@ fn resolve_managed_model(options: &StreamOptions) -> Result<std::path::PathBuf, 
         Ok(Some(_payload)) => {}
         Ok(None) => {
             let _ = sink.emit(OutputEvent::Error(format!(
-                "local-streaming has no installed model; run `syllune model install {}`",
+                "local-streaming has no installed model; run `voiceless model install {}`",
                 spec.id
             )));
             let _ = sink.emit(OutputEvent::Completed);

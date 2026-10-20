@@ -5,9 +5,9 @@ use common::{
     RecordingSink, ScriptedTransport,
 };
 use std::time::Duration;
-use syllune::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
-use syllune::realtime::RealtimeEvent;
 use tokio::sync::mpsc;
+use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
+use voiceless::realtime::RealtimeEvent;
 
 fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
     events

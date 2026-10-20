@@ -4,11 +4,11 @@
 
 ### Requirement: 完整且有界的低延迟音频输入
 
-Syllune SHALL 默认以 16 kHz、单声道 PCM16 和 32 ms 采集块处理实时语音，并把每个完整音频块按采集顺序恰好交付一次。非空且 PCM16 对齐的 EOF 或停止尾帧 MUST 在后端完成信号之前交付；奇数字节尾帧 MUST 产生可诊断错误且不得注入文本。实时传输积压 MUST 有固定上限；超过上限或传输截止时间时 MUST 使会话失败，而不是丢弃、重排音频或无限增长内存。
+Voiceless SHALL 默认以 16 kHz、单声道 PCM16 和 32 ms 采集块处理实时语音，并把每个完整音频块按采集顺序恰好交付一次。非空且 PCM16 对齐的 EOF 或停止尾帧 MUST 在后端完成信号之前交付；奇数字节尾帧 MUST 产生可诊断错误且不得注入文本。实时传输积压 MUST 有固定上限；超过上限或传输截止时间时 MUST 使会话失败，而不是丢弃、重排音频或无限增长内存。
 
 #### Scenario: 默认实时采集块
 
-- **WHEN** 用户使用默认 capture 配置启动 `syllune stream`
+- **WHEN** 用户使用默认 capture 配置启动 `voiceless stream`
 - **THEN** 采集和后端输入 MUST 使用 16 kHz、单声道 PCM16 及 32 ms 块
 
 #### Scenario: 对齐尾帧先于完成信号

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use syllune::processing::{ChatProcessor, HttpPoster, ProcessingError};
+use voiceless::processing::{ChatProcessor, HttpPoster, ProcessingError};
 
 struct ScriptedPoster {
     status: u16,
@@ -131,22 +131,22 @@ fn non_success_status_and_empty_content_are_errors() {
 
 #[test]
 fn none_provider_is_never_built_from_config() {
-    let config = syllune::config::ProcessingConfig::default();
-    assert!(syllune::processing::from_config(&config)
+    let config = voiceless::config::ProcessingConfig::default();
+    assert!(voiceless::processing::from_config(&config)
         .expect("build")
         .is_none());
 }
 
 #[test]
 fn direct_api_key_is_used_as_the_bearer() {
-    use syllune::config::ProcessingConfig;
+    use voiceless::config::ProcessingConfig;
 
     let config = ProcessingConfig {
         provider: "openai-compatible".to_owned(),
         api_key: "sk-direct".to_owned(),
         ..Default::default()
     };
-    let processor = syllune::processing::from_config(&config)
+    let processor = voiceless::processing::from_config(&config)
         .expect("build")
         .expect("provider configured");
 

@@ -1,4 +1,4 @@
-//! `syllune history` subcommands backed by the SQLite store.
+//! `voiceless history` subcommands backed by the SQLite store.
 
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
     let store = match HistoryStore::open(default_data_dir().join("history.sqlite3")) {
         Ok(store) => store,
         Err(error) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
     };
@@ -29,7 +29,7 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
                 "next_cursor": page.next_cursor,
             }),
             Err(error) => {
-                eprintln!("Syllune: {error}");
+                eprintln!("Voiceless: {error}");
                 return 1;
             }
         },
@@ -42,14 +42,14 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
             match deleted {
                 Ok(count) => serde_json::json!({ "deleted": count }),
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     return 1;
                 }
             }
         }
         "export" => {
             let Some(destination) = args.destination.as_ref() else {
-                eprintln!("Syllune: history export requires --destination");
+                eprintln!("Voiceless: history export requires --destination");
                 return 1;
             };
             match store.export_csv(destination) {
@@ -57,7 +57,7 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
                     serde_json::json!({ "exported": count, "path": destination.display().to_string() })
                 }
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     return 1;
                 }
             }
@@ -65,19 +65,19 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
         "totals" => match store.totals() {
             Ok(totals) => serde_json::to_value(&totals).expect("serialize totals"),
             Err(error) => {
-                eprintln!("Syllune: {error}");
+                eprintln!("Voiceless: {error}");
                 return 1;
             }
         },
         "usage" => match store.usage(args.days) {
             Ok(summary) => summary,
             Err(error) => {
-                eprintln!("Syllune: {error}");
+                eprintln!("Voiceless: {error}");
                 return 1;
             }
         },
         other => {
-            eprintln!("Syllune: unknown history action: {other}");
+            eprintln!("Voiceless: unknown history action: {other}");
             return 1;
         }
     };

@@ -1,5 +1,5 @@
-use syllune::realtime::RealtimeEvent;
-use syllune::session::{RecognitionSession, SessionAction, SessionState, SessionUpdate};
+use voiceless::realtime::RealtimeEvent;
+use voiceless::session::{RecognitionSession, SessionAction, SessionState, SessionUpdate};
 
 #[test]
 fn normal_stop_flushes_one_authoritative_transcript_and_one_injection() {
@@ -67,8 +67,8 @@ fn errors_and_cancellation_never_expose_injection_text() {
 mod common;
 
 use common::{entries, new_log, FakeCapture, RecordingInjector, RecordingSink, ScriptedTransport};
-use syllune::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
 use tokio::sync::mpsc;
+use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
 
 fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
     events

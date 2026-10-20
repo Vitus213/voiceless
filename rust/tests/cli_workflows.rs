@@ -1,8 +1,11 @@
 use std::process::Command;
 
-fn syllune() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_syllune"));
-    command.env("HOME", std::env::temp_dir().join("syllune-cli-tests-home"));
+fn voiceless() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_voiceless"));
+    command.env(
+        "HOME",
+        std::env::temp_dir().join("voiceless-cli-tests-home"),
+    );
     command
 }
 
@@ -15,7 +18,7 @@ fn json_lines(stdout: &str) -> Vec<serde_json::Value> {
 
 #[test]
 fn doctor_reports_dependency_checks_and_exits_zero_when_tools_exist() {
-    let output = syllune().arg("doctor").output().expect("run doctor");
+    let output = voiceless().arg("doctor").output().expect("run doctor");
     let stdout = String::from_utf8(output.stdout).expect("UTF-8");
     assert!(stdout.contains("pw-record"), "{stdout}");
     assert!(stdout.contains("wtype"), "{stdout}");
@@ -23,7 +26,7 @@ fn doctor_reports_dependency_checks_and_exits_zero_when_tools_exist() {
 
 #[test]
 fn model_list_outputs_catalog_entries_with_supply_chain_fields() {
-    let output = syllune()
+    let output = voiceless()
         .args(["model", "list", "--json"])
         .output()
         .expect("run model list");
@@ -39,7 +42,7 @@ fn model_list_outputs_catalog_entries_with_supply_chain_fields() {
 
 #[test]
 fn model_check_unknown_id_fails_with_nonzero_exit() {
-    let output = syllune()
+    let output = voiceless()
         .args(["model", "check", "no-such-model"])
         .output()
         .expect("run model check");
@@ -48,7 +51,7 @@ fn model_check_unknown_id_fails_with_nonzero_exit() {
 
 #[test]
 fn mode_list_returns_json_array_with_quick_first() {
-    let output = syllune()
+    let output = voiceless()
         .args(["mode", "list"])
         .output()
         .expect("run mode list");
@@ -62,7 +65,7 @@ fn mode_list_returns_json_array_with_quick_first() {
 #[test]
 fn mode_add_update_remove_roundtrip_via_cli() {
     let dir = tempfile::tempdir().expect("temporary root");
-    let mut add = syllune();
+    let mut add = voiceless();
     add.args([
         "mode",
         "add",
@@ -78,21 +81,21 @@ fn mode_add_update_remove_roundtrip_via_cli() {
         serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).expect("JSON");
     let id = added["id"].as_str().expect("mode id").to_owned();
 
-    let mut update = syllune();
+    let mut update = voiceless();
     update
         .args(["mode", "update", "--id", &id, "--name", "CLI模式改名"])
         .env("XDG_CONFIG_HOME", dir.path());
     let output = update.output().expect("mode update");
     assert!(output.status.success(), "{output:?}");
 
-    let mut remove = syllune();
+    let mut remove = voiceless();
     remove
         .args(["mode", "remove", "--id", &id])
         .env("XDG_CONFIG_HOME", dir.path());
     let output = remove.output().expect("mode remove");
     assert!(output.status.success(), "{output:?}");
 
-    let mut list = syllune();
+    let mut list = voiceless();
     list.args(["mode", "list"])
         .env("XDG_CONFIG_HOME", dir.path());
     let output = list.output().expect("mode list");
@@ -103,7 +106,7 @@ fn mode_add_update_remove_roundtrip_via_cli() {
 
 #[test]
 fn mode_remove_builtin_is_rejected() {
-    let output = syllune()
+    let output = voiceless()
         .args(["mode", "remove", "--id", "quick"])
         .output()
         .expect("run mode remove quick");
@@ -113,7 +116,7 @@ fn mode_remove_builtin_is_rejected() {
 #[test]
 fn history_list_and_totals_have_stable_json_shape() {
     let dir = tempfile::tempdir().expect("temporary root");
-    let mut list = syllune();
+    let mut list = voiceless();
     list.args(["history", "list", "--limit", "5"])
         .env("XDG_DATA_HOME", dir.path());
     let output = list.output().expect("history list");
@@ -123,7 +126,7 @@ fn history_list_and_totals_have_stable_json_shape() {
     assert!(page["records"].is_array());
     assert!(page.get("next_cursor").is_some());
 
-    let mut totals = syllune();
+    let mut totals = voiceless();
     totals
         .args(["history", "totals"])
         .env("XDG_DATA_HOME", dir.path());
@@ -136,19 +139,19 @@ fn history_list_and_totals_have_stable_json_shape() {
 
 #[test]
 fn transcribe_missing_file_fails_with_diagnostic() {
-    let output = syllune()
+    let output = voiceless()
         .args(["transcribe", "/nonexistent/file.wav"])
         .output()
         .expect("run transcribe");
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).expect("UTF-8");
-    assert!(stderr.contains("Syllune"), "{stderr}");
+    assert!(stderr.contains("Voiceless"), "{stderr}");
 }
 
 #[test]
 fn stream_rejects_unknown_mode_before_capture() {
     let dir = tempfile::tempdir().expect("temporary root");
-    let output = syllune()
+    let output = voiceless()
         .args([
             "stream",
             "--backend",

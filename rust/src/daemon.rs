@@ -4,7 +4,7 @@
 //! only forwards commands to the session runner.
 //!
 //! Activation sources: XDG Desktop Portal GlobalShortcuts (best effort,
-//! requires a compositor portal backend), the `dev.syllune.Daemon` D-Bus
+//! requires a compositor portal backend), the `dev.voiceless.Daemon` D-Bus
 //! control bus, and compositor bindings that call either.
 
 use futures_util::StreamExt;
@@ -104,7 +104,7 @@ impl<R: SessionRunner> Gateway<R> {
         let code = match finished.await {
             Ok(Ok(code)) => code,
             Ok(Err(message)) => {
-                eprintln!("Syllune: session failed: {message}");
+                eprintln!("Voiceless: session failed: {message}");
                 1
             }
             Err(_) => 1,
@@ -124,7 +124,7 @@ impl<R: SessionRunner> Gateway<R> {
     }
 }
 
-/// Production runner: executes one `syllune stream` session per activation
+/// Production runner: executes one `voiceless stream` session per activation
 /// through the shared coordinator, controlled exclusively via the gateway
 /// channel.
 pub struct StreamRunner {
@@ -145,12 +145,12 @@ impl SessionRunner for StreamRunner {
     }
 }
 
-pub const BUS_NAME: &str = "dev.syllune.Daemon";
-pub const OBJECT_PATH: &str = "/dev/syllune/Daemon";
+pub const BUS_NAME: &str = "dev.voiceless.Daemon";
+pub const OBJECT_PATH: &str = "/dev/voiceless/Daemon";
 
 /// D-Bus control interface. Activate maps to the gateway hotkey semantics;
 /// Cancel force-stops.
-#[zbus::interface(name = "dev.syllune.Daemon.Controller")]
+#[zbus::interface(name = "dev.voiceless.Daemon.Controller")]
 impl ControllerInterface {
     fn activate(&self) -> zbus::fdo::Result<String> {
         self.commands
@@ -212,13 +212,13 @@ where
     // compositor bindings over the control bus above.
     tokio::spawn(portal_shortcut_listener(command_tx.clone()));
 
-    println!("Syllune daemon listening on {BUS_NAME}");
+    println!("Voiceless daemon listening on {BUS_NAME}");
     loop {
         tokio::select! {
             command = command_rx.recv() => match command {
                 Some(DaemonCommand::Activate) => match gateway.activate() {
                     Ok(outcome) => println!("activate: {outcome:?}"),
-                    Err(message) => eprintln!("Syllune: {message}"),
+                    Err(message) => eprintln!("Voiceless: {message}"),
                 },
                 Some(DaemonCommand::Cancel) => gateway.cancel().await,
                 None => break,
@@ -238,13 +238,13 @@ const TOGGLE_SHORTCUT_ID: &str = "toggle";
 /// Register a single global shortcut through the XDG Desktop Portal and
 /// forward activations to the daemon command channel. Never fatal: compositors
 /// without a GlobalShortcuts backend (or broken ones, e.g. GNOME 48) simply
-/// skip portal binding and keep working through `dev.syllune.Daemon`.
+/// skip portal binding and keep working through `dev.voiceless.Daemon`.
 async fn portal_shortcut_listener(commands: mpsc::Sender<DaemonCommand>) {
     let portal = match GlobalShortcuts::new().await {
         Ok(portal) => portal,
         Err(error) => {
             eprintln!(
-                "Syllune: GlobalShortcuts portal unavailable ({error}); use compositor bindings on {BUS_NAME}"
+                "Voiceless: GlobalShortcuts portal unavailable ({error}); use compositor bindings on {BUS_NAME}"
             );
             return;
         }
@@ -252,11 +252,11 @@ async fn portal_shortcut_listener(commands: mpsc::Sender<DaemonCommand>) {
     let session = match portal.create_session().await {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("Syllune: cannot create GlobalShortcuts session: {error}");
+            eprintln!("Voiceless: cannot create GlobalShortcuts session: {error}");
             return;
         }
     };
-    let shortcut = NewShortcut::new(TOGGLE_SHORTCUT_ID, "开始或停止 Syllune 语音输入");
+    let shortcut = NewShortcut::new(TOGGLE_SHORTCUT_ID, "开始或停止 Voiceless 语音输入");
     match portal.bind_shortcuts(&session, &[shortcut], None).await {
         Ok(request) => match request.response() {
             Ok(bound) => {
@@ -264,26 +264,26 @@ async fn portal_shortcut_listener(commands: mpsc::Sender<DaemonCommand>) {
                     bound.shortcuts().iter().map(|entry| entry.id()).collect();
                 if bound_ids.is_empty() {
                     eprintln!(
-                        "Syllune: portal bound no shortcuts; configure them in your compositor or use {BUS_NAME}"
+                        "Voiceless: portal bound no shortcuts; configure them in your compositor or use {BUS_NAME}"
                     );
                     return;
                 }
-                println!("Syllune: portal shortcuts bound: {bound_ids:?}");
+                println!("Voiceless: portal shortcuts bound: {bound_ids:?}");
             }
             Err(error) => {
-                eprintln!("Syllune: portal shortcut binding rejected: {error}");
+                eprintln!("Voiceless: portal shortcut binding rejected: {error}");
                 return;
             }
         },
         Err(error) => {
-            eprintln!("Syllune: cannot bind GlobalShortcuts: {error}");
+            eprintln!("Voiceless: cannot bind GlobalShortcuts: {error}");
             return;
         }
     }
     let mut activated = match portal.receive_activated().await {
         Ok(stream) => stream,
         Err(error) => {
-            eprintln!("Syllune: cannot subscribe to GlobalShortcuts: {error}");
+            eprintln!("Voiceless: cannot subscribe to GlobalShortcuts: {error}");
             return;
         }
     };

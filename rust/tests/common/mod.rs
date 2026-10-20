@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use syllune::coordinator::{
+use tokio::sync::mpsc;
+use voiceless::coordinator::{
     AudioCapture, BackendTransport, ControlCommand, EventSink, HistoryEntry, HistoryRecorder,
     InjectionResult, OutputEvent, TextInjector, TextProcessor,
 };
-use syllune::realtime::RealtimeEvent;
-use tokio::sync::mpsc;
+use voiceless::realtime::RealtimeEvent;
 
 pub type Log = Arc<Mutex<Vec<String>>>;
 

@@ -1,7 +1,7 @@
 use std::fs;
 
-use syllune::modes::{builtin_modes, prompt_table, render_template, ModesError, ModesRepository};
 use tempfile::tempdir;
+use voiceless::modes::{builtin_modes, prompt_table, render_template, ModesError, ModesRepository};
 
 #[test]
 fn open_seeds_builtins_and_keeps_quick_first() {

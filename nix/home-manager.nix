@@ -6,34 +6,34 @@ self:
   ...
 }:
 let
-  cfg = config.programs.syllune;
+  cfg = config.programs.voiceless;
   toml = pkgs.formats.toml { };
 in
 {
-  options.programs.syllune = {
+  options.programs.voiceless = {
     enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "是否启用 Syllune 语音输入。";
+      description = "是否启用 Voiceless 语音输入。";
     };
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.system}.syllune;
-      defaultText = lib.literalExpression "syllune.packages.${pkgs.system}.syllune";
-      description = "要安装的 Syllune 软件包。";
+      default = self.packages.${pkgs.system}.voiceless;
+      defaultText = lib.literalExpression "voiceless.packages.${pkgs.system}.voiceless";
+      description = "要安装的 Voiceless 软件包。";
     };
 
     settings = lib.mkOption {
       type = toml.type;
       default = { };
-      description = "写入 syllune/config.toml 的配置。";
+      description = "写入 voiceless/config.toml 的配置。";
     };
 
     service.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "是否启动常驻的 Syllune headless daemon 用户服务。";
+      description = "是否启动常驻的 Voiceless headless daemon 用户服务。";
     };
 
     service.mode = lib.mkOption {
@@ -63,13 +63,13 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
-    xdg.configFile."syllune/config.toml" = lib.mkIf (cfg.settings != { }) {
-      source = toml.generate "syllune-config.toml" cfg.settings;
+    xdg.configFile."voiceless/config.toml" = lib.mkIf (cfg.settings != { }) {
+      source = toml.generate "voiceless-config.toml" cfg.settings;
     };
 
-    systemd.user.services.syllune = lib.mkIf cfg.service.enable {
+    systemd.user.services.voiceless = lib.mkIf cfg.service.enable {
       Unit = {
-        Description = "Syllune headless 语音输入 daemon";
+        Description = "Voiceless headless 语音输入 daemon";
         After = [ "graphical-session.target" ];
         PartOf = [ "graphical-session.target" ];
       };
@@ -85,7 +85,7 @@ in
     };
 
     wayland.windowManager.sway.extraConfig = lib.mkIf cfg.shortcuts.sway.enable ''
-      bindsym ${cfg.shortcuts.sway.toggleKey} exec ${pkgs.systemd}/bin/busctl --user call dev.syllune.Daemon /dev/syllune/Daemon dev.syllune.Daemon.Controller Activate
+      bindsym ${cfg.shortcuts.sway.toggleKey} exec ${pkgs.systemd}/bin/busctl --user call dev.voiceless.Daemon /dev/voiceless/Daemon dev.voiceless.Daemon.Controller Activate
     '';
   };
 }

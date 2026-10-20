@@ -1,4 +1,4 @@
 schema: spec-driven
 created: 2026-07-26
-goal: Deliver the approved native Rust Syllune CLI with true realtime cloud ASR,
+goal: Deliver the approved native Rust Voiceless CLI with true realtime cloud ASR,
   an explicit local streaming backend, and a measured sub-second stop-to-output path

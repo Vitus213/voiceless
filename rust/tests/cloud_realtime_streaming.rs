@@ -1,8 +1,8 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use syllune::realtime::{RealtimeEvent, RealtimeSession};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+use voiceless::realtime::{RealtimeEvent, RealtimeSession};
 
 #[tokio::test]
 async fn streams_pcm_and_exposes_partial_and_final_events() {

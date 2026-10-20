@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use std::sync::Arc;
-use syllune::batch::{load_wav_pcm16, BatchError, BatchPoster, CloudBatchClient};
 use tempfile::tempdir;
+use voiceless::batch::{load_wav_pcm16, BatchError, BatchPoster, CloudBatchClient};
 
 fn write_wav(path: &std::path::Path, samples: &[i16]) {
     let mut file = std::fs::File::create(path).expect("create wav");

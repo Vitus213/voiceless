@@ -1,15 +1,15 @@
-//! Contract tests for `syllune history serve`: embedded console page,
+//! Contract tests for `voiceless history serve`: embedded console page,
 //! JSON endpoints, audio streaming with Range support and id validation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use syllune::capture::wav_header;
-use syllune::coordinator::HistoryEntry;
-use syllune::history::HistoryStore;
-use syllune::history_web::{serve_listener, CONSOLE_PAGE};
 use tempfile::tempdir;
 use tokio::net::TcpListener;
+use voiceless::capture::wav_header;
+use voiceless::coordinator::HistoryEntry;
+use voiceless::history::HistoryStore;
+use voiceless::history_web::{serve_listener, CONSOLE_PAGE};
 
 struct Fixture {
     base: String,
@@ -83,7 +83,10 @@ async fn console_page_is_served_at_root() {
         .contains("text/html"));
     let body = response.into_string().expect("body");
     assert_eq!(body, CONSOLE_PAGE);
-    assert!(body.contains("Syllune"), "console must carry the wordmark");
+    assert!(
+        body.contains("Voiceless"),
+        "console must carry the wordmark"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

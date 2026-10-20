@@ -10,12 +10,12 @@ use common::{
     entries, new_log, CountingProcessor, FakeCapture, RecordingHistory, RecordingInjector,
     RecordingSink, ScriptedTransport,
 };
-use syllune::batch::load_wav_pcm16;
-use syllune::capture::wav_header;
-use syllune::coordinator::{run_session, ControlCommand, SessionPlan};
-use syllune::realtime::RealtimeEvent;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+use voiceless::batch::load_wav_pcm16;
+use voiceless::capture::wav_header;
+use voiceless::coordinator::{run_session, ControlCommand, SessionPlan};
+use voiceless::realtime::RealtimeEvent;
 
 fn plan(audio_dir: Option<PathBuf>) -> SessionPlan {
     let mut plan = SessionPlan::new("cloud-realtime", false);
@@ -93,7 +93,7 @@ async fn successful_session_saves_a_readable_wav_linked_to_history() {
     );
     assert_eq!(wav[44..], expected_pcm[..]);
 
-    // The saved file must be consumable by Syllune's own batch path.
+    // The saved file must be consumable by Voiceless's own batch path.
     let decoded = load_wav_pcm16(PathBuf::from(audio_path).as_path()).expect("parse saved wav");
     assert_eq!(decoded, expected_pcm);
 

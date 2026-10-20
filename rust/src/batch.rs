@@ -350,5 +350,5 @@ pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError
 }
 
 pub fn temp_wav_path() -> PathBuf {
-    std::env::temp_dir().join(format!("syllune-record-{}.wav", std::process::id()))
+    std::env::temp_dir().join(format!("voiceless-record-{}.wav", std::process::id()))
 }

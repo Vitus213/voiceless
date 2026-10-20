@@ -1,6 +1,6 @@
-use syllune::coordinator::HistoryEntry;
-use syllune::history::HistoryStore;
 use tempfile::tempdir;
+use voiceless::coordinator::HistoryEntry;
+use voiceless::history::HistoryStore;
 
 fn entry(raw: &str, final_text: &str, mode: &str) -> HistoryEntry {
     HistoryEntry {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Syllune · 夜声档案</title>
+<title>Voiceless · 夜声档案</title>
 <style>
 :root {
   --ink: #0C1120;
@@ -264,7 +264,7 @@ canvas.wave-big { height: 64px; width: 100%; display: block; border-radius: 6px;
     <div class="wordmark">
       <span class="moon-mark">☾</span>
       <div>
-        <h1>Syllune</h1>
+        <h1>Voiceless</h1>
         <div class="sub">夜声档案 · HISTORY</div>
       </div>
     </div>
@@ -588,7 +588,7 @@ async function loadPage() {
     if (body.records.length === 0 && !cursor) {
       feed.innerHTML = `<div class="empty">
         <div class="big">夜声档案还是空的</div>
-        <div>在终端运行 <code>syllune stream</code> 说点什么，记录会出现在这里。</div>
+        <div>在终端运行 <code>voiceless stream</code> 说点什么，记录会出现在这里。</div>
       </div>`;
       statusEl.textContent = "";
       exhausted = true;

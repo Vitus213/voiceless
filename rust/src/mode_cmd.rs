@@ -1,4 +1,4 @@
-//! `syllune mode` subcommands backed by the modes repository.
+//! `voiceless mode` subcommands backed by the modes repository.
 
 use crate::models::default_config_dir;
 use crate::modes::ModesRepository;
@@ -7,7 +7,7 @@ pub fn run(action: &str, args: ModeArgs) -> i32 {
     let mut repository = match ModesRepository::open(default_config_dir().join("modes.json")) {
         Ok(repository) => repository,
         Err(error) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
     };
@@ -16,13 +16,13 @@ pub fn run(action: &str, args: ModeArgs) -> i32 {
         "reload" => match repository.reload() {
             Ok(modes) => serde_json::to_value(modes).expect("serialize modes"),
             Err(error) => {
-                eprintln!("Syllune: {error}");
+                eprintln!("Voiceless: {error}");
                 return 1;
             }
         },
         "add" => {
             let Some(name) = args.name.as_deref() else {
-                eprintln!("Syllune: mode add requires --name");
+                eprintln!("Voiceless: mode add requires --name");
                 return 1;
             };
             match repository.add(
@@ -32,14 +32,14 @@ pub fn run(action: &str, args: ModeArgs) -> i32 {
             ) {
                 Ok(mode) => serde_json::to_value(&mode).expect("serialize mode"),
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     return 1;
                 }
             }
         }
         "update" => {
             let Some(id) = args.id.as_deref() else {
-                eprintln!("Syllune: mode update requires --id");
+                eprintln!("Voiceless: mode update requires --id");
                 return 1;
             };
             match repository.update(
@@ -50,26 +50,26 @@ pub fn run(action: &str, args: ModeArgs) -> i32 {
             ) {
                 Ok(mode) => serde_json::to_value(&mode).expect("serialize mode"),
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     return 1;
                 }
             }
         }
         "remove" => {
             let Some(id) = args.id.as_deref() else {
-                eprintln!("Syllune: mode remove requires --id");
+                eprintln!("Voiceless: mode remove requires --id");
                 return 1;
             };
             match repository.remove(id) {
                 Ok(mode) => serde_json::to_value(&mode).expect("serialize mode"),
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     return 1;
                 }
             }
         }
         other => {
-            eprintln!("Syllune: unknown mode action: {other}");
+            eprintln!("Voiceless: unknown mode action: {other}");
             return 1;
         }
     };

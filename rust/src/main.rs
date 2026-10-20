@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "syllune",
+    name = "voiceless",
     version,
     about = "Fast realtime voice input for Linux"
 )]
@@ -170,7 +170,7 @@ enum HistoryAction {
 async fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        Command::Stream(args) => match syllune::stream::run(syllune::stream::StreamOptions {
+        Command::Stream(args) => match voiceless::stream::run(voiceless::stream::StreamOptions {
             config_path: cli.config,
             backend: args.backend,
             json: args.json,
@@ -181,12 +181,12 @@ async fn main() {
         {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("Syllune: {error}");
+                eprintln!("Voiceless: {error}");
                 1
             }
         },
         Command::Transcribe(args) => {
-            syllune::batch_cmd::transcribe(syllune::batch_cmd::TranscribeArgs {
+            voiceless::batch_cmd::transcribe(voiceless::batch_cmd::TranscribeArgs {
                 wav: args.wav,
                 backend: args.backend,
                 inject: args.inject,
@@ -195,7 +195,7 @@ async fn main() {
             .await
         }
         Command::Record(args) => {
-            syllune::batch_cmd::record(syllune::batch_cmd::RecordArgs {
+            voiceless::batch_cmd::record(voiceless::batch_cmd::RecordArgs {
                 seconds: args.seconds,
                 backend: args.backend,
                 no_inject: args.no_inject,
@@ -203,12 +203,12 @@ async fn main() {
             })
             .await
         }
-        Command::Model(args) => syllune::model_cmd::run(
+        Command::Model(args) => voiceless::model_cmd::run(
             match args.action {
-                ModelAction::List => syllune::model_cmd::ModelCommand::List,
-                ModelAction::Install { id } => syllune::model_cmd::ModelCommand::Install { id },
-                ModelAction::Check { id } => syllune::model_cmd::ModelCommand::Check { id },
-                ModelAction::Remove { id } => syllune::model_cmd::ModelCommand::Remove { id },
+                ModelAction::List => voiceless::model_cmd::ModelCommand::List,
+                ModelAction::Install { id } => voiceless::model_cmd::ModelCommand::Install { id },
+                ModelAction::Check { id } => voiceless::model_cmd::ModelCommand::Check { id },
+                ModelAction::Remove { id } => voiceless::model_cmd::ModelCommand::Remove { id },
             },
             args.json,
         ),
@@ -220,9 +220,9 @@ async fn main() {
                 ModeAction::Update => "update",
                 ModeAction::Remove => "remove",
             };
-            syllune::mode_cmd::run(
+            voiceless::mode_cmd::run(
                 action,
-                syllune::mode_cmd::ModeArgs {
+                voiceless::mode_cmd::ModeArgs {
                     id: args.id,
                     name: args.name,
                     prompt: args.prompt,
@@ -231,9 +231,9 @@ async fn main() {
             )
         }
         Command::History(args) if matches!(args.action, HistoryAction::Serve) => {
-            match syllune::history_web::serve(
-                syllune::models::default_data_dir().join("history.sqlite3"),
-                syllune::history_web::ServeOptions {
+            match voiceless::history_web::serve(
+                voiceless::models::default_data_dir().join("history.sqlite3"),
+                voiceless::history_web::ServeOptions {
                     host: args.host,
                     port: args.port,
                 },
@@ -242,7 +242,7 @@ async fn main() {
             {
                 Ok(code) => code,
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     1
                 }
             }
@@ -256,9 +256,9 @@ async fn main() {
                 HistoryAction::Usage => "usage",
                 HistoryAction::Serve => unreachable!("handled above"),
             };
-            syllune::history_cmd::run(
+            voiceless::history_cmd::run(
                 action,
-                syllune::history_cmd::HistoryArgs {
+                voiceless::history_cmd::HistoryArgs {
                     ids: args.ids,
                     all: args.all,
                     limit: args.limit,
@@ -269,8 +269,8 @@ async fn main() {
             )
         }
         Command::Doctor => {
-            println!("Syllune doctor");
-            let checks = syllune::doctor::run_checks();
+            println!("Voiceless doctor");
+            let checks = voiceless::doctor::run_checks();
             let mut all_ok = true;
             for check in &checks {
                 if !check.pass() {
@@ -286,17 +286,17 @@ async fn main() {
             i32::from(!all_ok)
         }
         Command::Daemon(args) => {
-            let options = syllune::stream::StreamOptions {
+            let options = voiceless::stream::StreamOptions {
                 config_path: cli.config,
                 backend: None,
                 json: false,
                 inject: true,
                 mode: args.mode,
             };
-            match syllune::daemon::serve(options).await {
+            match voiceless::daemon::serve(options).await {
                 Ok(()) => 0,
                 Err(error) => {
-                    eprintln!("Syllune: {error}");
+                    eprintln!("Voiceless: {error}");
                     1
                 }
             }
@@ -307,20 +307,21 @@ async fn main() {
                 backend,
                 enforce,
             } => {
-                let mut bench_args = syllune::benchmark_cmd::AsrBenchmarkArgs::new(split, backend);
+                let mut bench_args =
+                    voiceless::benchmark_cmd::AsrBenchmarkArgs::new(split, backend);
                 bench_args.enforce = enforce;
-                syllune::benchmark_cmd::run_asr(bench_args).await
+                voiceless::benchmark_cmd::run_asr(bench_args).await
             }
             BenchmarkAction::Latency {
                 trials,
                 inject,
                 enforce,
             } => {
-                let mut latency_args = syllune::latency_cmd::LatencyBenchmarkArgs::new();
+                let mut latency_args = voiceless::latency_cmd::LatencyBenchmarkArgs::new();
                 latency_args.trials = trials;
                 latency_args.inject = inject;
                 latency_args.enforce = enforce;
-                syllune::latency_cmd::run_latency(latency_args).await
+                voiceless::latency_cmd::run_latency(latency_args).await
             }
         },
     };

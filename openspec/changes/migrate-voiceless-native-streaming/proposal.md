@@ -6,7 +6,7 @@
 
 ## What Changes
 
-- **BREAKING**：以原生 Rust `syllune` 可执行文件替换 Python 分发、`type4me-linux` 命令、Python 包和 Adwaita 桌面应用；不提供旧命令、Python 导入、XDG 路径或流式后端名称的兼容别名。
+- **BREAKING**：以原生 Rust `voiceless` 可执行文件替换 Python 分发、`type4me-linux` 命令、Python 包和 Adwaita 桌面应用；不提供旧命令、Python 导入、XDG 路径或流式后端名称的兼容别名。
 - **BREAKING**：默认实时后端改为 `cloud-realtime`，使用 DashScope `qwen3-asr-flash-realtime` WebSocket 在采集期间持续发送 PCM 并接收局部/确认文本；停止时发送显式 finish 并以同一流式会话的最终结果作为唯一权威文本，不再执行停止后的 SenseVoice/Qwen/HTTP 整段校准。
 - 新增显式 `local-streaming` 后端，使用 Sherpa-ONNX 原生在线识别器和本地端点检测提供断网路径；云端和本地失败均不得静默切换到另一后端。
 - 保留 `stream`、`transcribe`、`record`、`model`、`doctor`、`mode`、`history` 和 headless `daemon` 核心 CLI 工作流，迁移严格 TOML、模型完整性、历史、模式、Portal 快捷键和一次最终注入语义。
@@ -17,7 +17,7 @@
 
 ### New Capabilities
 
-- `syllune-identity-migration`：以原生 Rust Syllune 完成无兼容入口的身份、分发和持久化边界切换。
+- `voiceless-identity-migration`：以原生 Rust Voiceless 完成无兼容入口的身份、分发和持久化边界切换。
 - `rust-cli-migration`：将核心 CLI、严格配置、模型管理、模式/历史和 headless 快捷键工作流迁移到 Rust，并明确移除 GUI。
 - `native-cli-streaming-recognition`：提供边采集边上传/解码的云端真流式默认路径、显式本地流式路径和唯一最终注入语义。
 - `live-recognition-latency`：约束完整音频交付、背压、停止冲刷和可复现的延迟/准确率门禁。
@@ -28,4 +28,4 @@
 
 ## Impact
 
-受影响范围包括全部 Python 源码与测试、Nix flake/Home Manager、XDG 路径、CLI/JSON 消费方、D-Bus/Portal 快捷键、模型目录、历史与模式数据，以及依赖 `cloud-vad`、`sensevoice-vad`、`final_backend` 或 GTK 桌面应用的用户。旧 XDG 目录留在磁盘但不被 Syllune 自动读取或修改；用户可回装旧发布物回滚。云端默认路径会持续把会话 PCM 发送到 DashScope，文档必须明确这一隐私边界；选择 `local-streaming` 时不得建立云端连接。
+受影响范围包括全部 Python 源码与测试、Nix flake/Home Manager、XDG 路径、CLI/JSON 消费方、D-Bus/Portal 快捷键、模型目录、历史与模式数据，以及依赖 `cloud-vad`、`sensevoice-vad`、`final_backend` 或 GTK 桌面应用的用户。旧 XDG 目录留在磁盘但不被 Voiceless 自动读取或修改；用户可回装旧发布物回滚。云端默认路径会持续把会话 PCM 发送到 DashScope，文档必须明确这一隐私边界；选择 `local-streaming` 时不得建立云端连接。

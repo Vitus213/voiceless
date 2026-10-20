@@ -8,10 +8,10 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::time::Duration;
-use syllune::coordinator::{run_session, ControlCommand, SessionPlan};
-use syllune::daemon::{ActivateOutcome, Gateway, SessionRunner};
-use syllune::realtime::RealtimeEvent;
 use tokio::sync::mpsc;
+use voiceless::coordinator::{run_session, ControlCommand, SessionPlan};
+use voiceless::daemon::{ActivateOutcome, Gateway, SessionRunner};
+use voiceless::realtime::RealtimeEvent;
 
 /// Runner executing the real coordinator with scripted fakes; one prepared
 /// session per start() call.

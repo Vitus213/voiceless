@@ -1,4 +1,4 @@
-//! Identity cutover: the repository ships Syllune as the sole product
+//! Identity cutover: the repository ships Voiceless as the sole product
 //! identity; no `type4me-linux` command, package attribute, Home Manager
 //! option or desktop entry survives as a compatibility path.
 
@@ -24,14 +24,14 @@ fn repo_file(name: &str) -> Option<std::path::PathBuf> {
 }
 
 #[test]
-fn flake_default_package_is_syllune_and_drops_python_identity() {
+fn flake_default_package_is_voiceless_and_drops_python_identity() {
     let Some(flake_path) = repo_file("flake.nix") else {
         return;
     };
     let flake = read(&flake_path);
     assert!(
-        flake.contains("packages.default = syllune;"),
-        "default package must be syllune"
+        flake.contains("packages.default = voiceless;"),
+        "default package must be voiceless"
     );
     assert!(
         !flake.contains("packages.type4me-linux"),
@@ -48,12 +48,12 @@ fn flake_default_package_is_syllune_and_drops_python_identity() {
 }
 
 #[test]
-fn home_manager_module_exposes_only_syllune_options() {
+fn home_manager_module_exposes_only_voiceless_options() {
     let Some(module_path) = repo_file("nix/home-manager.nix") else {
         return;
     };
     let module = read(&module_path);
-    assert!(module.contains("options.programs.syllune"));
+    assert!(module.contains("options.programs.voiceless"));
     assert!(
         !module.contains("programs.type4me-linux"),
         "old Home Manager options must not remain"
@@ -73,13 +73,13 @@ fn no_desktop_entry_or_python_distribution_survives() {
 }
 
 #[test]
-fn rust_binary_reports_syllune_identity() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_syllune"))
+fn rust_binary_reports_voiceless_identity() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_voiceless"))
         .arg("--help")
         .output()
-        .expect("syllune binary should be runnable");
+        .expect("voiceless binary should be runnable");
     let help = String::from_utf8(output.stdout).expect("UTF-8");
-    assert!(help.contains("syllune"));
+    assert!(help.contains("voiceless"));
     assert!(
         !help.contains("type4me"),
         "help must not mention the old identity"

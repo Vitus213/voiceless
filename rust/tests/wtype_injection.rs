@@ -1,7 +1,7 @@
 //! Contract tests for the wtype injection argument builder: newlines become
 //! Shift+Enter so a chat input breaks lines without submitting the message.
 
-use syllune::stream::wtype_invocations;
+use voiceless::stream::wtype_invocations;
 
 #[test]
 fn newlines_become_shift_enter() {

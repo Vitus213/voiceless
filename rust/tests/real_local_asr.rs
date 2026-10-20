@@ -1,20 +1,20 @@
 //! Real local ASR smoke: requires an installed
-//! `streaming-paraformer-bilingual-zh-en` model and `SYLLUNE_REAL_LOCAL_ASR=1`.
+//! `streaming-paraformer-bilingual-zh-en` model and `VOICELESS_REAL_LOCAL_ASR=1`.
 //! Ignored by default so CI without the model never fabricates a pass.
 
 use std::time::Duration;
 
-use syllune::local_asr::LocalStreamingRecognizer;
-use syllune::models::{
+use voiceless::local_asr::LocalStreamingRecognizer;
+use voiceless::models::{
     default_cache_dir, default_data_dir, streaming_paraformer_spec, ModelManager,
 };
-use syllune::realtime::RealtimeEvent;
+use voiceless::realtime::RealtimeEvent;
 
 #[test]
-#[ignore = "requires SYLLUNE_REAL_LOCAL_ASR=1 and the installed streaming model"]
+#[ignore = "requires VOICELESS_REAL_LOCAL_ASR=1 and the installed streaming model"]
 fn real_local_asr_recognizer_processes_and_finishes() {
-    if std::env::var("SYLLUNE_REAL_LOCAL_ASR").unwrap_or_default() != "1" {
-        eprintln!("set SYLLUNE_REAL_LOCAL_ASR=1 to run the real local ASR smoke");
+    if std::env::var("VOICELESS_REAL_LOCAL_ASR").unwrap_or_default() != "1" {
+        eprintln!("set VOICELESS_REAL_LOCAL_ASR=1 to run the real local ASR smoke");
         return;
     }
     let spec = streaming_paraformer_spec();
@@ -22,7 +22,7 @@ fn real_local_asr_recognizer_processes_and_finishes() {
     let payload = manager
         .resolve(&spec.id)
         .expect("resolve installed model")
-        .expect("streaming model installed; run `syllune model install streaming-paraformer-bilingual-zh-en`");
+        .expect("streaming model installed; run `voiceless model install streaming-paraformer-bilingual-zh-en`");
     let (_, report) = manager.check(&spec).expect("check model");
     assert!(report.ok(), "installed model must be intact: {report:?}");
 

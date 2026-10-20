@@ -1,4 +1,4 @@
-//! `syllune transcribe` and `syllune record` subcommands.
+//! `voiceless transcribe` and `voiceless record` subcommands.
 
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ pub async fn transcribe(args: TranscribeArgs) -> i32 {
     let config = match load_default_config() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
     };
@@ -37,11 +37,11 @@ pub async fn transcribe(args: TranscribeArgs) -> i32 {
     {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
         Err(error) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
     };
@@ -56,7 +56,7 @@ pub async fn transcribe(args: TranscribeArgs) -> i32 {
     }
 
     if batch_result.text.is_empty() {
-        eprintln!("Syllune: no speech text was recognized");
+        eprintln!("Voiceless: no speech text was recognized");
         return 0;
     }
 
@@ -72,7 +72,7 @@ pub async fn transcribe(args: TranscribeArgs) -> i32 {
             println!("{}", serde_json::to_string(&payload).expect("serialize"));
         }
         if !injected.ok {
-            eprintln!("Syllune: injection failed: {}", injected.message);
+            eprintln!("Voiceless: injection failed: {}", injected.message);
             return 1;
         }
     } else if !args.json {
@@ -92,7 +92,7 @@ pub async fn record(args: RecordArgs) -> i32 {
     // Config validation happens before recording, matching the strict-config
     // contract: bad config must fail before any capture starts.
     if let Err(error) = load_default_config() {
-        eprintln!("Syllune: {error}");
+        eprintln!("Voiceless: {error}");
         return 1;
     }
     let wav_path = batch::temp_wav_path();
@@ -104,11 +104,11 @@ pub async fn record(args: RecordArgs) -> i32 {
     {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
         Err(error) => {
-            eprintln!("Syllune: {error}");
+            eprintln!("Voiceless: {error}");
             return 1;
         }
     }

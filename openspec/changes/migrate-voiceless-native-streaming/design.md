@@ -8,7 +8,7 @@
 
 **Goals:**
 
-- 用原生 Rust `syllune` 完成 CLI-first clean cutover，最终运行时不依赖 Python。
+- 用原生 Rust `voiceless` 完成 CLI-first clean cutover，最终运行时不依赖 Python。
 - 默认云端真流式边录边传，停止时只冲刷尾包和同一会话的最终结果。
 - 提供明确选择的本地原生流式后端，不做运行时隐式回退。
 - 保留严格配置、模型完整性、模式、历史、headless 快捷键和一次最终注入语义。
@@ -43,7 +43,7 @@ flowchart LR
 
 ### 1. 单个 Tokio 运行时与原生 Rust 包边界
 
-根目录改为 Cargo package/workspace，`syllune` 二进制使用 `tokio`、`clap`、`serde`/`toml`、`tokio-tungstenite`（rustls）、`reqwest`（rustls）、`zbus`、`wl-clipboard-rs` 和 `thiserror`。生产后端使用枚举分派而非动态插件接口；测试通过构造函数注入 capture、transport、clock 和 injector，避免为未批准的插件能力建立 ABI。
+根目录改为 Cargo package/workspace，`voiceless` 二进制使用 `tokio`、`clap`、`serde`/`toml`、`tokio-tungstenite`（rustls）、`reqwest`（rustls）、`zbus`、`wl-clipboard-rs` 和 `thiserror`。生产后端使用枚举分派而非动态插件接口；测试通过构造函数注入 capture、transport、clock 和 injector，避免为未批准的插件能力建立 ABI。
 
 Nix 使用 `rustPlatform.buildRustPackage` 和提交的 `Cargo.lock`。`sherpa-onnx = { version = "1.13.3", default-features = false, features = ["shared"] }`，跟随锁定 nixpkgs 的 Sherpa-ONNX 版本；flake 设置 `SHERPA_ONNX_LIB_DIR` 指向 nixpkgs 构建的共享库，禁止 crate build script 联网下载预编译归档。x86_64-linux 可选 CUDA 继续由 nixpkgs 的 Sherpa-ONNX/ONNX Runtime override 提供；aarch64-linux 保持 CPU。
 
@@ -89,13 +89,13 @@ JSON 行保持顶层 `type`、`sequence`、`transcript`、`message`、`injection
 
 ### 7. 严格配置与密钥边界
 
-配置继续为严格 TOML，但根目录切换到 Syllune XDG。`streaming_backend` 只接受 `cloud-realtime`/`local-streaming`；删除 `final_backend`、`cloud-vad` 和 `sensevoice-vad`。`[cloud]` 保留 batch 字段并新增 realtime endpoint/model、server VAD threshold/silence、连接/finish timeout；endpoint 必须为 `wss://`。云端密钥按用户既有决定保存在配置文件，但使用前要求文件权限不宽于 0600。
+配置继续为严格 TOML，但根目录切换到 Voiceless XDG。`streaming_backend` 只接受 `cloud-realtime`/`local-streaming`；删除 `final_backend`、`cloud-vad` 和 `sensevoice-vad`。`[cloud]` 保留 batch 字段并新增 realtime endpoint/model、server VAD threshold/silence、连接/finish timeout；endpoint 必须为 `wss://`。云端密钥按用户既有决定保存在配置文件，但使用前要求文件权限不宽于 0600。
 
 错误和日志实现 `Debug`/`Display` 时只保留密钥是否配置，不保留值；WebSocket request、Authorization header、完整音频和 transcript 默认不进日志。云端模式文档明确音频在会话期间持续发送；本地模式不得创建 HTTP/WebSocket client 请求。
 
 ### 8. Headless 快捷键与停止语义统一
 
-`syllune daemon` 用 `zbus` 连接 XDG Desktop Portal GlobalShortcuts，或由用户的 Sway/合成器绑定调用公开 D-Bus 控制入口。所有入口只向同一协调器发送 Start/Stop/Cancel 命令：空闲时激活为 Start，活动时激活为正常 Stop；并发 Start 被拒绝。第一次 SIGINT 等价 Stop，第二次 SIGINT 或 SIGTERM 等价 Cancel。
+`voiceless daemon` 用 `zbus` 连接 XDG Desktop Portal GlobalShortcuts，或由用户的 Sway/合成器绑定调用公开 D-Bus 控制入口。所有入口只向同一协调器发送 Start/Stop/Cancel 命令：空闲时激活为 Start，活动时激活为正常 Stop；并发 Start 被拒绝。第一次 SIGINT 等价 Stop，第二次 SIGINT 或 SIGTERM 等价 Cancel。
 
 选择理由：只有一个状态机才能保证停止只发送一次 finish、最终文本只注入一次；快捷键层不拥有音频或识别资源。
 
@@ -119,13 +119,13 @@ JSON 行保持顶层 `type`、`sequence`、`transcript`、`message`、`injection
 
 1. 在不改变安装默认入口的情况下先建立 Rust tracer bullet 与确定性测试。
 2. 云端真流式、错误/取消和真实基准达到门禁后，加入本地后端与核心数据工作流。
-3. 最后一次切换 flake、Home Manager、桌面/D-Bus 标识到 `syllune`，删除 Python/GTK 产物、旧命令和旧后端配置；旧 XDG 目录不修改。
-4. 回滚通过安装旧 Type4Me 发布物并继续读取旧目录；Rust Syllune 的新目录不被旧版读取。由于无自动迁移，两边状态不会混写。
+3. 最后一次切换 flake、Home Manager、桌面/D-Bus 标识到 `voiceless`，删除 Python/GTK 产物、旧命令和旧后端配置；旧 XDG 目录不修改。
+4. 回滚通过安装旧 Type4Me 发布物并继续读取旧目录；Rust Voiceless 的新目录不被旧版读取。由于无自动迁移，两边状态不会混写。
 
 ## Open Questions / Gates
 
 - 负责人：实现者。P1 开始前，用当前账号确认 `qwen3-asr-flash-realtime` endpoint、鉴权和 `session.finish` 最终事件；失败阻塞默认后端实现，不改成批量伪流式。
 - 负责人：实现者。全量 clean cutover 前，完成至少 100 次真实云端 + Wayland 注入试验与 realtime test CER ≤0.02 门禁；任一失败都阻止删除 Python/GUI/旧入口，并回到 design 评估明确替代后端。
 - 负责人：实现者。P2 添加本地模型目录前固定并复核 URL、字节数、SRI、成员与许可证；字段不全时不得安装模型。
-- 负责人：维护者。公开发布前完成 Syllune 商标/域名检查；不阻塞本地开发，但阻塞公开品牌声明。
+- 负责人：维护者。公开发布前完成 Voiceless 商标/域名检查；不阻塞本地开发，但阻塞公开品牌声明。
 - 负责人：维护者。Rust change 完成后重新严格校验 `asr` 基线和本 change，再执行本 change 的独立 archive dry-run；不得把代码完成当作 archive 确认。

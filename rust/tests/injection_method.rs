@@ -5,8 +5,8 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use syllune::config::{AppConfig, InjectConfig};
-use syllune::stream::inject_text;
+use voiceless::config::{AppConfig, InjectConfig};
+use voiceless::stream::inject_text;
 
 fn write_executable(path: &Path, script: &str) {
     std::fs::write(path, script).expect("write fake command");

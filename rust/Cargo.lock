@@ -1566,35 +1566,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "syllune"
-version = "0.1.0"
-dependencies = [
- "ashpd",
- "base64",
- "bzip2",
- "clap",
- "futures-util",
- "getrandom 0.2.17",
- "libc",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "sherpa-onnx",
- "tar",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "unicode-normalization",
- "ureq",
- "zbus",
-]
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2002,6 +1973,35 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "voiceless"
+version = "0.1.0"
+dependencies = [
+ "ashpd",
+ "base64",
+ "bzip2",
+ "clap",
+ "futures-util",
+ "getrandom 0.2.17",
+ "libc",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sherpa-onnx",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "unicode-normalization",
+ "ureq",
+ "zbus",
+]
 
 [[package]]
 name = "wasi"

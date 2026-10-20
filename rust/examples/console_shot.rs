@@ -5,12 +5,12 @@
 //! cargo run --example console_shot   # then screenshot the page
 use std::sync::Arc;
 
-use syllune::capture::wav_header;
-use syllune::coordinator::HistoryEntry;
-use syllune::history::HistoryStore;
-use syllune::history_web::serve_listener;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
+use voiceless::capture::wav_header;
+use voiceless::coordinator::HistoryEntry;
+use voiceless::history::HistoryStore;
+use voiceless::history_web::serve_listener;
 
 fn synth_wav(seconds: f64, freq: f64) -> Vec<u8> {
     let n = (seconds * 16_000.0) as usize;

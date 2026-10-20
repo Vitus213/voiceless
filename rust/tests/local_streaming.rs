@@ -3,8 +3,8 @@ use std::process::Command;
 
 use tempfile::tempdir;
 
-fn syllune() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_syllune"))
+fn voiceless() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_voiceless"))
 }
 
 #[test]
@@ -13,7 +13,7 @@ fn explicit_local_backend_reports_model_error_without_cloud() {
     let config = root.path().join("config.toml");
     fs::write(&config, "[asr]\nstreaming_backend = \"local-streaming\"\n").expect("config write");
 
-    let output = syllune()
+    let output = voiceless()
         .args([
             "--config",
             config.to_str().expect("config path"),
@@ -26,7 +26,7 @@ fn explicit_local_backend_reports_model_error_without_cloud() {
         .env("XDG_CACHE_HOME", root.path().join("cache"))
         .env("XDG_STATE_HOME", root.path().join("state"))
         .output()
-        .expect("syllune binary should be runnable");
+        .expect("voiceless binary should be runnable");
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).expect("JSON output should be UTF-8");
@@ -61,7 +61,7 @@ fn local_backend_reports_the_missing_required_model_file() {
     )
     .expect("config write");
 
-    let output = syllune()
+    let output = voiceless()
         .args([
             "--config",
             config.to_str().expect("config path"),
@@ -74,7 +74,7 @@ fn local_backend_reports_the_missing_required_model_file() {
         .env("XDG_CACHE_HOME", root.path().join("cache"))
         .env("XDG_STATE_HOME", root.path().join("state"))
         .output()
-        .expect("syllune binary should be runnable");
+        .expect("voiceless binary should be runnable");
 
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8(output.stdout).expect("JSON output should be UTF-8");

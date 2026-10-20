@@ -8,7 +8,7 @@
 
 #### Scenario: 批量 cloud 继续工作
 
-- **WHEN** 用户配置 `asr.batch_backend = "cloud"` 并调用 `syllune transcribe <wav> --backend cloud`
+- **WHEN** 用户配置 `asr.batch_backend = "cloud"` 并调用 `voiceless transcribe <wav> --backend cloud`
 - **THEN** 命令 MUST 返回云端转写文本并标记 `backend == "cloud"`，且 MUST 使用批量接口而非实时会话
 
 #### Scenario: 批量 cloud 缺少密钥
@@ -24,7 +24,7 @@
 
 #### Scenario: 默认实时后端为 cloud-realtime
 
-- **WHEN** 用户未覆盖实时后端并启动 `syllune stream`
+- **WHEN** 用户未覆盖实时后端并启动 `voiceless stream`
 - **THEN** 配置 MUST 选择 `cloud-realtime`，在 ready 前建立实时会话，且不得使用本地 VAD 分段 HTTP 转写
 
 #### Scenario: 旧 cloud-vad 配置被拒绝
@@ -34,7 +34,7 @@
 
 #### Scenario: 显式 local-streaming 不建立云端连接
 
-- **WHEN** 用户执行 `syllune stream --backend local-streaming`
+- **WHEN** 用户执行 `voiceless stream --backend local-streaming`
 - **THEN** 会话 MUST 只使用有效本地在线模型，不得创建 DashScope WebSocket 或批量 HTTP 请求
 
 ## REMOVED Requirements

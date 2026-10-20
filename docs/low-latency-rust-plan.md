@@ -20,7 +20,7 @@
 | 开始说话 → 首个局部文本可见 | ≤ 1.0s（期望 0.3–0.5s） | 同上，首个 partial 事件 |
 | 说话中局部文本更新间隔 | ≤ 0.5s | partial 事件时间序列 |
 | 识别质量（内容 CER，36 样本库） | 云端 ≤ 0.02（对齐 qwen3-asr-flash 的 0.011）；本地离线单独记录 | 移植 `scripts/asr_benchmark/` 基准 |
-| 退出条件 | `cargo test`、`nix build` 全绿；`syllune stream --backend cloud` 全流程可用 | CI + 手动冒烟 |
+| 退出条件 | `cargo test`、`nix build` 全绿；`voiceless stream --backend cloud` 全流程可用 | CI + 手动冒烟 |
 
 ### 延迟预算分解（停止按键 → 注入）
 
@@ -106,8 +106,8 @@
 
 ### 4.1 命名与形态
 
-- 二进制名沿用已批准方向 **`syllune`**（`openspec/changes/migrate-syllune-native-streaming/proposal.md` 记录用户已选择 Syllune）；可在批准时一并确认。
-- Cargo workspace 单二进制 `syllune`，子命令保留既有语义：`stream`、`transcribe`、`record`、`model`、`doctor`、`mode`、`history`、`config`、`daemon`。
+- 二进制名沿用已批准方向 **`voiceless`**（`openspec/changes/migrate-voiceless-native-streaming/proposal.md` 记录用户已选择 Voiceless）；可在批准时一并确认。
+- Cargo workspace 单二进制 `voiceless`，子命令保留既有语义：`stream`、`transcribe`、`record`、`model`、`doctor`、`mode`、`history`、`config`、`daemon`。
 
 ### 4.2 模块与数据流
 
@@ -179,7 +179,7 @@ flowchart LR
 - 为什么：只有它同时命中"质量 ≥ 云端批量实测（CER 0.011）"与"停止→输出 ≤1s"两个硬指标；Rust 侧只有协议薄层，主链路由 DashScope 托管 RTT 决定（见 §1 预算）。
 - 相对 B 牺牲：离线纯本地质量、零成本运行。相对 C 牺牲：无本地实时预览。
 - 保留的本地资产：sherpa-onnx 链接方式、模型下载/校验体系（ModelManager 语义）原样移植。
-- 命名：按既有批准方向使用 `syllune`（文档内决策项，随本批准一并确认）。
+- 命名：按既有批准方向使用 `voiceless`（文档内决策项，随本批准一并确认）。
 
 ---
 

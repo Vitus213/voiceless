@@ -1,4 +1,4 @@
-//! `syllune benchmark latency`: run real cloud sessions with Wayland
+//! `voiceless benchmark latency`: run real cloud sessions with Wayland
 //! injection and record per-stage timestamps. Each trial replays one corpus
 //! sample at the 32 ms pace through `cloud-realtime`, stops normally,
 //! injects the final text via the configured `[inject]` method and records
@@ -51,21 +51,21 @@ impl LatencyBenchmarkArgs {
 
 pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
     if args.backend != "cloud-realtime" {
-        eprintln!("Syllune: latency benchmark only supports cloud-realtime");
+        eprintln!("Voiceless: latency benchmark only supports cloud-realtime");
         return 2;
     }
     if args.mode != "quick" {
-        eprintln!("Syllune: non-quick modes must not feed the 1s latency gate; use --mode quick");
+        eprintln!("Voiceless: non-quick modes must not feed the 1s latency gate; use --mode quick");
         return 2;
     }
     let config = match load_default_config() {
         Ok(config) if !config.cloud.api_key.trim().is_empty() => config,
         Ok(_) => {
-            eprintln!("Syllune: cloud.api_key missing; latency benchmark skipped (unverified)");
+            eprintln!("Voiceless: cloud.api_key missing; latency benchmark skipped (unverified)");
             return 2;
         }
         Err(error) => {
-            eprintln!("Syllune: {error}; latency benchmark skipped (unverified)");
+            eprintln!("Voiceless: {error}; latency benchmark skipped (unverified)");
             return 2;
         }
     };
@@ -74,13 +74,13 @@ pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
         Ok(entries) if !entries.is_empty() => entries,
         Ok(_) => {
             eprintln!(
-                "Syllune: corpus {} is empty; latency benchmark skipped (unverified)",
+                "Voiceless: corpus {} is empty; latency benchmark skipped (unverified)",
                 args.corpus_path.display()
             );
             return 2;
         }
         Err(error) => {
-            eprintln!("Syllune: cannot read corpus: {error}; skipped (unverified)");
+            eprintln!("Voiceless: cannot read corpus: {error}; skipped (unverified)");
             return 2;
         }
     };
@@ -91,7 +91,7 @@ pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
             Ok(pcm) => pcm_pool.push((entry.id.clone(), pcm)),
             Err(_) => {
                 eprintln!(
-                    "Syllune: audio missing for {}; latency benchmark skipped (unverified)",
+                    "Voiceless: audio missing for {}; latency benchmark skipped (unverified)",
                     entry.id
                 );
                 return 2;
@@ -130,13 +130,13 @@ pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
     match serde_json::to_string_pretty(&gate) {
         Ok(json) => {
             if let Err(error) = std::fs::write(&path, json) {
-                eprintln!("Syllune: cannot write report: {error}");
+                eprintln!("Voiceless: cannot write report: {error}");
                 return 1;
             }
             println!("report: {}", path.display());
         }
         Err(error) => {
-            eprintln!("Syllune: cannot serialize report: {error}");
+            eprintln!("Voiceless: cannot serialize report: {error}");
             return 1;
         }
     }
@@ -152,16 +152,16 @@ pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
     );
     if gate.unverified {
         eprintln!(
-            "Syllune: fewer than {} successful trials; gate unverified",
+            "Voiceless: fewer than {} successful trials; gate unverified",
             thresholds.min_trials
         );
         return 2;
     }
     if gate.passed {
-        println!("Syllune: latency gate passed");
+        println!("Voiceless: latency gate passed");
         0
     } else {
-        eprintln!("Syllune: latency gate not passed");
+        eprintln!("Voiceless: latency gate not passed");
         1
     }
 }

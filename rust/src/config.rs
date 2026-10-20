@@ -146,7 +146,7 @@ impl Default for ProcessingConfig {
 pub struct HistoryConfig {
     pub enabled: bool,
     /// Keep the WAV recording of every successful streaming session next
-    /// to the history database (`~/.local/share/syllune/audio/`).
+    /// to the history database (`~/.local/share/voiceless/audio/`).
     pub save_audio: bool,
 }
 
@@ -245,17 +245,17 @@ impl AppConfig {
     }
 }
 
-/// Path to the Syllune config file under the XDG config root.
+/// Path to the Voiceless config file under the XDG config root.
 pub fn default_config_path() -> PathBuf {
     let root = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned())).join(".config")
         });
-    root.join("syllune").join("config.toml")
+    root.join("voiceless").join("config.toml")
 }
 
-/// Load the Syllune XDG config file when present, otherwise defaults.
+/// Load the Voiceless XDG config file when present, otherwise defaults.
 /// Missing files are valid; unreadable or invalid files are errors.
 pub fn load_default_config() -> Result<AppConfig, ConfigError> {
     let path = default_config_path();

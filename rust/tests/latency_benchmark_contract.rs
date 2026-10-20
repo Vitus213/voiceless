@@ -1,4 +1,4 @@
-use syllune::latency::{evaluate_gate, percentile, LatencyThresholds, TrialOutcome, TrialStage};
+use voiceless::latency::{evaluate_gate, percentile, LatencyThresholds, TrialOutcome, TrialStage};
 
 fn trial(partial: f64, stop_to_final: f64, stop_to_inject: f64) -> TrialOutcome {
     TrialOutcome {

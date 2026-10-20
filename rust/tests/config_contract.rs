@@ -1,7 +1,7 @@
 use std::fs;
 
-use syllune::config::{AppConfig, ConfigError, ProcessingConfig};
 use tempfile::tempdir;
+use voiceless::config::{AppConfig, ConfigError, ProcessingConfig};
 
 #[test]
 fn defaults_to_cloud_realtime_without_a_legacy_final_backend() {

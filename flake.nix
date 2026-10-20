@@ -1,5 +1,5 @@
 {
-  description = "Syllune：面向 NixOS/Wayland 的原生 Rust 实时语音输入";
+  description = "Voiceless：面向 NixOS/Wayland 的原生 Rust 实时语音输入";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -45,7 +45,7 @@
               }
             );
             sherpaRuntimeLib = pkgs.symlinkJoin {
-              name = "syllune-sherpa-runtime-libs";
+              name = "voiceless-sherpa-runtime-libs";
               paths = [
                 sherpaOnnx
                 onnxruntime
@@ -58,10 +58,10 @@
         stack = mkStack true;
         stackCpu = mkStack false;
 
-        mkSyllune =
+        mkVoiceless =
           stack:
           pkgs.rustPlatform.buildRustPackage {
-            pname = "syllune";
+            pname = "voiceless";
             version = "0.1.0";
             src = ./rust;
             cargoLock.lockFile = ./rust/Cargo.lock;
@@ -80,7 +80,7 @@
             ];
             SHERPA_ONNX_LIB_DIR = stack.sherpaRuntimeLib + "/lib";
             postInstall = ''
-              wrapProgram "$out/bin/syllune" \
+              wrapProgram "$out/bin/voiceless" \
                 --prefix PATH : ${
                   pkgs.lib.makeBinPath [
                     pkgs.pipewire
@@ -92,14 +92,14 @@
             '';
             meta = {
               description = "Fast realtime voice input for Linux";
-              homepage = "https://github.com/Vitus213/syllune";
+              homepage = "https://github.com/Vitus213/voiceless";
               license = pkgs.lib.licenses.mit;
-              mainProgram = "syllune";
+              mainProgram = "voiceless";
               platforms = pkgs.lib.platforms.linux;
             };
           };
-        syllune = mkSyllune stack;
-        sylluneCpu = mkSyllune stackCpu;
+        voiceless = mkVoiceless stack;
+        voicelessCpu = mkVoiceless stackCpu;
 
         mkShell =
           stack:
@@ -122,20 +122,20 @@
           };
       in
       {
-        packages.default = syllune;
-        packages.syllune = syllune;
-        packages.syllune-cpu = sylluneCpu;
+        packages.default = voiceless;
+        packages.voiceless = voiceless;
+        packages.voiceless-cpu = voicelessCpu;
 
-        apps.default = flake-utils.lib.mkApp { drv = syllune; };
+        apps.default = flake-utils.lib.mkApp { drv = voiceless; };
 
         # CI-safe check: builds and tests the CPU stack only.
-        checks.default = sylluneCpu;
+        checks.default = voicelessCpu;
 
         devShells.default = mkShell stack;
         devShells.cpu = mkShell stackCpu;
 
         formatter = pkgs.writeShellApplication {
-          name = "syllune-format";
+          name = "voiceless-format";
           runtimeInputs = [ pkgs.nixfmt ];
           text = ''
             nixfmt flake.nix nix/home-manager.nix
@@ -145,7 +145,7 @@
     )
     // {
       overlays.default = final: prev: {
-        syllune = self.packages.${prev.system}.syllune;
+        voiceless = self.packages.${prev.system}.voiceless;
       };
 
       homeManagerModules.default = import ./nix/home-manager.nix self;

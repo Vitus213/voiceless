@@ -5,9 +5,9 @@ use common::{
     RecordingSink, ScriptedTransport,
 };
 use std::time::Duration;
-use syllune::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
-use syllune::realtime::RealtimeEvent;
 use tokio::sync::mpsc;
+use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
+use voiceless::realtime::RealtimeEvent;
 
 fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
     events
@@ -56,7 +56,7 @@ async fn run_fixture(
 
 #[tokio::test]
 async fn default_capture_contract_is_16khz_mono_pcm16_32ms_chunks() {
-    use syllune::capture::{CHUNK_BYTES, SAMPLE_RATE};
+    use voiceless::capture::{CHUNK_BYTES, SAMPLE_RATE};
     // 32 ms of 16 kHz mono PCM16 = 0.032 * 16000 * 2 bytes.
     assert_eq!(SAMPLE_RATE, 16_000);
     assert_eq!(CHUNK_BYTES, 1_024);

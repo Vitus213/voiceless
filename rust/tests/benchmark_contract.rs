@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use syllune::benchmark::{
+use voiceless::benchmark::{
     cer, load_corpus, normalize_content, run_asr_benchmark, BackendFactory, BenchmarkReport,
     CorpusEntry,
 };

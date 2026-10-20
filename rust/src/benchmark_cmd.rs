@@ -1,4 +1,4 @@
-//! `syllune benchmark` subcommands. The ASR quality gate replays versioned
+//! `voiceless benchmark` subcommands. The ASR quality gate replays versioned
 //! corpus audio through the selected realtime backend at the real 32 ms
 //! pace and writes a versioned JSON report; `--enforce` applies the
 //! cloud-realtime CER threshold. Missing credentials, corpus or audio skip
@@ -47,14 +47,14 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
         Ok(entries) if !entries.is_empty() => entries,
         Ok(_) => {
             eprintln!(
-                "Syllune: corpus {} is empty; benchmark skipped (unverified)",
+                "Voiceless: corpus {} is empty; benchmark skipped (unverified)",
                 corpus_path.display()
             );
             return 2;
         }
         Err(error) => {
             eprintln!(
-                "Syllune: cannot read corpus {}: {error}; benchmark skipped (unverified)",
+                "Voiceless: cannot read corpus {}: {error}; benchmark skipped (unverified)",
                 corpus_path.display()
             );
             return 2;
@@ -72,7 +72,7 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
     }
     if !missing_audio.is_empty() {
         eprintln!(
-            "Syllune: {} audio files missing from {} ({}); benchmark skipped (unverified)",
+            "Voiceless: {} audio files missing from {} ({}); benchmark skipped (unverified)",
             missing_audio.len(),
             args.audio_dir.display(),
             missing_audio.join(", ")
@@ -83,7 +83,7 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
     let config = match load_default_config() {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("Syllune: {error}; benchmark skipped (unverified)");
+            eprintln!("Voiceless: {error}; benchmark skipped (unverified)");
             return 2;
         }
     };
@@ -92,7 +92,7 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
     let factory = match args.backend.as_str() {
         "cloud-realtime" => {
             if config.cloud.api_key.trim().is_empty() {
-                eprintln!("Syllune: cloud.api_key missing; benchmark skipped (unverified)");
+                eprintln!("Voiceless: cloud.api_key missing; benchmark skipped (unverified)");
                 return 2;
             }
             Backend::Cloud {
@@ -109,12 +109,12 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
                 Ok(Some(payload)) => payload,
                 Ok(None) => {
                     eprintln!(
-                        "Syllune: streaming model not installed; benchmark skipped (unverified)"
+                        "Voiceless: streaming model not installed; benchmark skipped (unverified)"
                     );
                     return 2;
                 }
                 Err(error) => {
-                    eprintln!("Syllune: {error}; benchmark skipped (unverified)");
+                    eprintln!("Voiceless: {error}; benchmark skipped (unverified)");
                     return 2;
                 }
             };
@@ -122,20 +122,20 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
                 Ok((_, report)) if report.ok() => {}
                 Ok((_, report)) => {
                     eprintln!(
-                        "Syllune: installed model is corrupted ({:?}); benchmark skipped (unverified)",
+                        "Voiceless: installed model is corrupted ({:?}); benchmark skipped (unverified)",
                         report
                     );
                     return 2;
                 }
                 Err(error) => {
-                    eprintln!("Syllune: {error}; benchmark skipped (unverified)");
+                    eprintln!("Voiceless: {error}; benchmark skipped (unverified)");
                     return 2;
                 }
             }
             Backend::Local { payload }
         }
         other => {
-            eprintln!("Syllune: unknown benchmark backend: {other}");
+            eprintln!("Voiceless: unknown benchmark backend: {other}");
             return 2;
         }
     };
@@ -158,7 +158,7 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
     );
 
     if let Err(error) = write_report(&args.report_path, &args.split, &args.backend, &report) {
-        eprintln!("Syllune: cannot write report: {error}");
+        eprintln!("Voiceless: cannot write report: {error}");
         return 1;
     }
 
@@ -173,7 +173,7 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
 
     if report.failures > 0 {
         eprintln!(
-            "Syllune: {} samples failed; gate not passed",
+            "Voiceless: {} samples failed; gate not passed",
             report.failures
         );
         return 1;
@@ -181,7 +181,7 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
     if args.enforce && args.backend == "cloud-realtime" && report.content_cer > CLOUD_CER_THRESHOLD
     {
         eprintln!(
-            "Syllune: content CER {:.4} exceeds threshold {CLOUD_CER_THRESHOLD}; gate not passed",
+            "Voiceless: content CER {:.4} exceeds threshold {CLOUD_CER_THRESHOLD}; gate not passed",
             report.content_cer
         );
         return 1;
@@ -189,9 +189,9 @@ pub async fn run_asr(args: AsrBenchmarkArgs) -> i32 {
     if args.backend != "cloud-realtime" {
         // Local reports are informational: no cross-backend threshold applies
         // and they never merge with the cloud gate.
-        println!("Syllune: local CER reported separately; no gate enforced");
+        println!("Voiceless: local CER reported separately; no gate enforced");
     } else if args.enforce {
-        println!("Syllune: quality gate passed");
+        println!("Voiceless: quality gate passed");
     }
     0
 }

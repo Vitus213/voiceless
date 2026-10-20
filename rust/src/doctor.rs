@@ -1,4 +1,4 @@
-//! `syllune doctor`: verify runtime dependencies without requiring models.
+//! `voiceless doctor`: verify runtime dependencies without requiring models.
 
 use std::path::PathBuf;
 

@@ -1,12 +1,12 @@
 [package]
-name = "syllune"
+name = "voiceless"
 version = "0.1.0"
 edition = "2021"
 description = "Fast realtime voice input for Linux"
 license = "MIT"
 
 [[bin]]
-name = "syllune"
+name = "voiceless"
 path = "src/main.rs"
 
 [dependencies]

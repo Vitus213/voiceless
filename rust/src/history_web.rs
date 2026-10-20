@@ -1,4 +1,4 @@
-//! `syllune history serve`: local web console over the SQLite history
+//! `voiceless history serve`: local web console over the SQLite history
 //! store. Hand-rolled HTTP/1.1 over tokio TCP — GET plus a POST
 //! `/api/prompt` for editing the organize prompt. One response per
 //! connection, no external dependencies. Binds loopback by default;
@@ -47,7 +47,7 @@ pub async fn serve(store_path: PathBuf, options: ServeOptions) -> Result<i32, St
     let listener = TcpListener::bind(address)
         .await
         .map_err(|error| format!("cannot bind {address}: {error}"))?;
-    println!("Syllune history console: http://{address}/");
+    println!("Voiceless history console: http://{address}/");
     serve_listener(listener, store, crate::config::default_config_path()).await
 }
 
