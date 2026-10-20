@@ -1,0 +1,37 @@
+/* Voiceless streaming overlay pill.
+ * Visual language ported from the old type4me Adwaita app CSS:
+ * translucent surfaces, 1px borders, soft radii.
+ * State is shown by border color only (pump-driven via :style):
+ * live = blue, final = green, idle = neutral.
+ * SCSS intercepts GTK's two-arg alpha(), so use rgba() everywhere. */
+
+window {
+  background-color: transparent;
+}
+
+.ov {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  min-height: 44px;
+  padding: 0 20px;
+  font-family: "Maple Mono NF CN", "Source Han Sans", sans-serif;
+  color: rgba(255, 255, 255, 0.92);
+  /* The pill "settles" into the listening state on every fresh start:
+   * border/background morph to the resting colors instead of snapping.
+   * GTK3 has no prefers-reduced-motion media query, so this stays subtle. */
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+
+.text {
+  font-size: 16px;
+}
+
+/* Gentle settle: the pill label fades in as the window opens. */
+.ov {
+  animation: pill-fade-in 180ms ease;
+}
+
+@keyframes pill-fade-in {
+  from { opacity: 0.35; }
+  to   { opacity: 1; }
+}

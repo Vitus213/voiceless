@@ -725,6 +725,28 @@ fn unique_suffix() -> String {
     format!("{nanos:x}-{}", std::process::id())
 }
 
+/// Payload directory of an installed, intact catalog model.
+pub fn installed_model_dir(id: &str) -> Result<PathBuf, String> {
+    let spec = catalog()
+        .into_iter()
+        .find(|spec| spec.id == id)
+        .ok_or_else(|| format!("unknown model id: {id}"))?;
+    let manager = ModelManager::new(&default_data_dir(), &default_cache_dir());
+    match manager.check(&spec) {
+        Ok((path, report)) if report.ok() => Ok(path),
+        Ok((_, report)) => Err(format!(
+            "model {id} is corrupted: {} missing, {} corrupt, {} extra; reinstall it",
+            report.missing.len(),
+            report.corrupt.len(),
+            report.extra.len()
+        )),
+        Err(ModelError::NotInstalled(_)) => Err(format!(
+            "model {id} is not installed; run `voiceless model install {id}`"
+        )),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub fn default_data_dir() -> PathBuf {
     xdg_dir("XDG_DATA_HOME", ".local/share").join("voiceless")
 }

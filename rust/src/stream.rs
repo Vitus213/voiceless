@@ -67,6 +67,34 @@ pub async fn run_with_control(
     options: StreamOptions,
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
 ) -> Result<i32, StreamError> {
+    run_with_env(options, control, SessionEnv::default()).await
+}
+
+/// What a resident daemon lends a session: a warm engine and the event
+/// broadcast that replaces stdout.
+#[derive(Default, Clone)]
+pub struct SessionEnv {
+    pub warm: Option<std::sync::Arc<crate::engine::WarmEngine>>,
+    pub events: Option<tokio::sync::broadcast::Sender<String>>,
+}
+
+impl SessionEnv {
+    fn sink(&self, json: bool) -> Box<dyn EventSink + Send> {
+        match &self.events {
+            Some(events) => Box::new(BroadcastSink {
+                events: events.clone(),
+                sequence: 0,
+            }),
+            None => Box::new(StdoutSink::new(json)),
+        }
+    }
+}
+
+pub async fn run_with_env(
+    options: StreamOptions,
+    control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    env: SessionEnv,
+) -> Result<i32, StreamError> {
     let mut config = AppConfig::load_optional(options.config_path.as_deref())?;
     if let Some(backend) = options.backend.as_deref() {
         config.asr.streaming_backend = backend.to_owned();
@@ -75,10 +103,10 @@ pub async fn run_with_control(
         })?)?;
     }
     match config.asr.streaming_backend.as_str() {
-        "cloud-realtime" => run_cloud(config, options, control).await,
-        "doubao-realtime" => run_doubao(config, options, control).await,
-        "local-streaming" => run_local(config, options, control).await,
-        "local-offline" => run_local_offline(config, options, control).await,
+        "cloud-realtime" => run_cloud(config, options, control, env).await,
+        "doubao-realtime" => run_doubao(config, options, control, env).await,
+        "local-streaming" => run_local(config, options, control, env).await,
+        "local-offline" => run_local_offline(config, options, control, env).await,
         value => Err(StreamError::UnsupportedBackend(value.to_owned())),
     }
 }
@@ -87,6 +115,7 @@ async fn run_cloud(
     config: AppConfig,
     options: StreamOptions,
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    env: SessionEnv,
 ) -> Result<i32, StreamError> {
     if config.cloud.api_key.trim().is_empty() {
         return Err(StreamError::MissingApiKey);
@@ -107,7 +136,7 @@ async fn run_cloud(
         ConfiguredInjector::new(config.inject.clone()),
         pipeline.history,
         control,
-        &mut StdoutSink::new(options.json),
+        &mut env.sink(options.json),
     )
     .await;
     Ok(code)
@@ -117,6 +146,7 @@ async fn run_doubao(
     config: AppConfig,
     options: StreamOptions,
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    env: SessionEnv,
 ) -> Result<i32, StreamError> {
     if !config.doubao.has_credentials() {
         return Err(StreamError::MissingDoubaoCredentials);
@@ -132,7 +162,7 @@ async fn run_doubao(
         ConfiguredInjector::new(config.inject.clone()),
         pipeline.history,
         control,
-        &mut StdoutSink::new(options.json),
+        &mut env.sink(options.json),
     )
     .await;
     Ok(code)
@@ -142,6 +172,7 @@ async fn run_local(
     config: AppConfig,
     options: StreamOptions,
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    env: SessionEnv,
 ) -> Result<i32, StreamError> {
     // Config-level validation (mode, processing) precedes model resolution:
     // invalid configuration must fail before touching the model store.
@@ -149,7 +180,10 @@ async fn run_local(
     let model_dir = match config.asr.local_model_dir.clone() {
         Some(path) => path,
         None => {
-            match resolve_managed_model(&crate::models::streaming_paraformer_spec(), &options) {
+            match resolve_managed_model(
+                &crate::models::streaming_paraformer_spec(),
+                &mut env.sink(options.json),
+            ) {
                 Ok(path) => path,
                 Err(code) => return Ok(code),
             }
@@ -158,7 +192,7 @@ async fn run_local(
     let recognizer = match crate::local_asr::LocalStreamingRecognizer::new(&model_dir) {
         Ok(recognizer) => recognizer,
         Err(error) => {
-            let mut sink = StdoutSink::new(options.json);
+            let mut sink = env.sink(options.json);
             let _ = sink.emit(OutputEvent::Error(error.to_string()));
             let _ = sink.emit(OutputEvent::Completed);
             return Ok(1);
@@ -173,7 +207,7 @@ async fn run_local(
         ConfiguredInjector::new(config.inject.clone()),
         pipeline.history,
         control,
-        &mut StdoutSink::new(options.json),
+        &mut env.sink(options.json),
     )
     .await;
     Ok(code)
@@ -297,13 +331,12 @@ fn remove_audio(audio_path: Option<&str>, audio_dir: Option<&std::path::Path>) {
 /// re-verify its payload; a corrupted install is never reused.
 fn resolve_managed_model(
     spec: &crate::models::ModelSpec,
-    options: &StreamOptions,
+    sink: &mut dyn EventSink,
 ) -> Result<std::path::PathBuf, i32> {
     let manager = crate::models::ModelManager::new(
         &crate::models::default_data_dir(),
         &crate::models::default_cache_dir(),
     );
-    let mut sink = StdoutSink::new(options.json);
     match manager.resolve(&spec.id) {
         Ok(Some(_payload)) => {}
         Ok(None) => {
@@ -447,6 +480,7 @@ async fn run_local_offline(
     config: AppConfig,
     options: StreamOptions,
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    env: SessionEnv,
 ) -> Result<i32, StreamError> {
     let pipeline = build_pipeline(&config, &options)?;
     let Some(spec) = crate::models::catalog()
@@ -455,26 +489,43 @@ async fn run_local_offline(
     else {
         return Err(StreamError::UnsupportedBackend(config.local.model.clone()));
     };
-    let model_dir = match resolve_managed_model(&spec, &options) {
-        Ok(path) => path,
-        Err(code) => return Ok(code),
-    };
-    let vad_dir = match resolve_managed_model(&crate::models::silero_vad_spec(), &options) {
-        Ok(path) => path,
-        Err(code) => return Ok(code),
-    };
+    let mut sink = env.sink(options.json);
     let local = config.local.clone();
-    // Model load happens on the worker so capture starts at once.
+    // A warm engine was verified at daemon start: skip the per-session hash
+    // check of ~1 GB of model files, which would delay capture.
+    let warm = env
+        .warm
+        .as_ref()
+        .and_then(|engine| engine.offline_for(&local));
+    let (recognizer, model_dir, vad_model) = match warm {
+        Some((recognizer, vad_model)) => (Some(recognizer), None, vad_model),
+        None => {
+            let model_dir = match resolve_managed_model(&spec, &mut sink) {
+                Ok(path) => path,
+                Err(code) => return Ok(code),
+            };
+            let vad_dir = match resolve_managed_model(&crate::models::silero_vad_spec(), &mut sink)
+            {
+                Ok(path) => path,
+                Err(code) => return Ok(code),
+            };
+            (None, Some(model_dir), vad_dir.join("silero_vad.onnx"))
+        }
+    };
+    // Without a warm engine the model loads on the worker, so capture
+    // starts at once either way.
     let transport = crate::offline_asr::OfflineTransport::start(move || {
-        use crate::offline_asr::{create_recognizer, create_vad, OfflineFamily, OfflineOptions};
-        let family = OfflineFamily::for_model(&local.model)?;
-        let options = OfflineOptions {
-            provider: local.provider.clone(),
-            num_threads: local.num_threads,
-            hotwords: local.hotwords.clone(),
+        use crate::offline_asr::{create_recognizer, create_vad, OfflineFamily};
+        let recognizer = match (recognizer, model_dir) {
+            (Some(recognizer), _) => recognizer,
+            (None, Some(model_dir)) => std::sync::Arc::new(create_recognizer(
+                OfflineFamily::for_model(&local.model)?,
+                &model_dir,
+                &crate::engine::offline_options(&local),
+            )?),
+            (None, None) => unreachable!("cold sessions resolve the model directory"),
         };
-        let recognizer = create_recognizer(family, &model_dir, &options)?;
-        let vad = create_vad(&vad_dir.join("silero_vad.onnx"), local.max_segment_seconds)?;
+        let vad = create_vad(&vad_model, local.max_segment_seconds)?;
         Ok(crate::offline_asr::SegmentedRecognizer::new(
             recognizer,
             vad,
@@ -493,7 +544,7 @@ async fn run_local_offline(
         ConfiguredInjector::new(config.inject.clone()),
         pipeline.history,
         control,
-        &mut StdoutSink::new(options.json),
+        &mut sink,
     )
     .await;
     Ok(code)
@@ -645,23 +696,59 @@ impl StdoutSink {
     }
 }
 
+impl<T: EventSink + ?Sized> EventSink for Box<T> {
+    fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
+        (**self).emit(event)
+    }
+}
+
+/// Daemon sink: every event as one JSON line (the `stream --json` schema)
+/// on the broadcast channel behind `voiceless ctl watch`.
+struct BroadcastSink {
+    events: tokio::sync::broadcast::Sender<String>,
+    sequence: u64,
+}
+
+impl EventSink for BroadcastSink {
+    fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
+        self.sequence += 1;
+        let (kind, transcript, message, injection) = event_fields(&event);
+        let line = serde_json::to_string(&JsonEvent {
+            kind,
+            sequence: self.sequence,
+            transcript,
+            message,
+            injection,
+        })?;
+        // No subscriber is fine: nobody is watching.
+        let _ = self.events.send(line);
+        Ok(())
+    }
+}
+
+type EventFields<'a> = (
+    &'a str,
+    Option<&'a TranscriptSnapshot>,
+    Option<&'a str>,
+    Option<&'a InjectionResult>,
+);
+
+fn event_fields(event: &OutputEvent) -> EventFields<'_> {
+    match event {
+        OutputEvent::Ready => ("ready", None, None, None),
+        OutputEvent::Transcript(snapshot) => ("transcript", Some(snapshot), None, None),
+        OutputEvent::Finalized { injection } => ("finalized", None, None, injection.as_ref()),
+        OutputEvent::Warning(message) => ("warning", None, Some(message.as_str()), None),
+        OutputEvent::Error(message) => ("error", None, Some(message.as_str()), None),
+        OutputEvent::Cancelled => ("cancelled", None, None, None),
+        OutputEvent::Completed => ("completed", None, None, None),
+    }
+}
+
 impl EventSink for StdoutSink {
     fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
         self.sequence += 1;
-        let (kind, transcript, message, injection): (
-            &str,
-            Option<&TranscriptSnapshot>,
-            Option<&str>,
-            Option<&InjectionResult>,
-        ) = match &event {
-            OutputEvent::Ready => ("ready", None, None, None),
-            OutputEvent::Transcript(snapshot) => ("transcript", Some(snapshot), None, None),
-            OutputEvent::Finalized { injection } => ("finalized", None, None, injection.as_ref()),
-            OutputEvent::Warning(message) => ("warning", None, Some(message.as_str()), None),
-            OutputEvent::Error(message) => ("error", None, Some(message.as_str()), None),
-            OutputEvent::Cancelled => ("cancelled", None, None, None),
-            OutputEvent::Completed => ("completed", None, None, None),
-        };
+        let (kind, transcript, message, injection) = event_fields(&event);
         if self.json {
             let payload = JsonEvent {
                 kind,

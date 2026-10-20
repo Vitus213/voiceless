@@ -42,6 +42,16 @@ in
       description = "daemon 会话使用的文本处理模式（例如 quick、prompt-optimize）。";
     };
 
+    overlay.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        是否启用 eww 浮层：识别时在屏幕底部显示实时文字。会安装
+        ~/.config/eww-voiceless，并启动独立的 eww daemon 与事件订阅服务
+        （需要 service.enable）。
+      '';
+    };
+
     shortcuts.sway = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -67,6 +77,47 @@ in
       source = toml.generate "voiceless-config.toml" cfg.settings;
     };
 
+    xdg.configFile."eww-voiceless" = lib.mkIf cfg.overlay.enable {
+      source = "${self}/contrib/eww-overlay";
+    };
+
+    systemd.user.services.voiceless-overlay-eww = lib.mkIf cfg.overlay.enable {
+      Unit = {
+        Description = "eww daemon for the Voiceless overlay";
+        After = [ "graphical-session.target" ];
+        PartOf = [ "graphical-session.target" ];
+      };
+      Service = {
+        # Foreground so Restart=on-failure can track it.
+        ExecStart = "${lib.getExe pkgs.eww} --config %h/.config/eww-voiceless daemon --no-daemonize";
+        Restart = "on-failure";
+        RestartSec = 3;
+      };
+      Install.WantedBy = [ "graphical-session.target" ];
+    };
+
+    systemd.user.services.voiceless-overlay = lib.mkIf cfg.overlay.enable {
+      Unit = {
+        Description = "Voiceless overlay event watcher";
+        After = [
+          "voiceless.service"
+          "voiceless-overlay-eww.service"
+        ];
+        PartOf = [ "graphical-session.target" ];
+      };
+      Service = {
+        ExecStart = "${lib.getExe pkgs.python3} %h/.config/eww-voiceless/voiceless-overlay.py";
+        Environment = [
+          "VOICELESS_BIN=${lib.getExe cfg.package}"
+          "EWW_BIN=${lib.getExe pkgs.eww}"
+          "EWW_CONFIG=%h/.config/eww-voiceless"
+        ];
+        Restart = "on-failure";
+        RestartSec = 3;
+      };
+      Install.WantedBy = [ "graphical-session.target" ];
+    };
+
     systemd.user.services.voiceless = lib.mkIf cfg.service.enable {
       Unit = {
         Description = "Voiceless headless 语音输入 daemon";
@@ -85,7 +136,7 @@ in
     };
 
     wayland.windowManager.sway.extraConfig = lib.mkIf cfg.shortcuts.sway.enable ''
-      bindsym ${cfg.shortcuts.sway.toggleKey} exec ${pkgs.systemd}/bin/busctl --user call dev.voiceless.Daemon /dev/voiceless/Daemon dev.voiceless.Daemon.Controller Activate
+      bindsym ${cfg.shortcuts.sway.toggleKey} exec ${lib.getExe cfg.package} ctl toggle
     '';
   };
 }

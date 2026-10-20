@@ -25,7 +25,38 @@ enum Command {
     Mode(ModeArgs),
     History(HistoryArgs),
     Daemon(DaemonArgs),
+    /// Control the resident daemon (one D-Bus call; for hotkey bindings).
+    Ctl(CtlArgs),
     Benchmark(BenchmarkArgs),
+}
+
+#[derive(Debug, Args)]
+struct CtlArgs {
+    #[command(subcommand)]
+    action: CtlCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CtlCommand {
+    /// Start a session when idle, stop it when recording.
+    Toggle {
+        /// Processing mode; empty uses the daemon default.
+        #[arg(long, default_value = "")]
+        mode: String,
+    },
+    /// Start a session (hold-to-talk press).
+    Start {
+        #[arg(long, default_value = "")]
+        mode: String,
+    },
+    /// Stop and finalize the session (hold-to-talk release).
+    Stop,
+    /// Cancel the session without typing anything.
+    Cancel,
+    /// Print idle, recording or stopping.
+    Status,
+    /// Print every daemon event as a JSON line.
+    Watch,
 }
 
 #[derive(Debug, Args)]
@@ -131,6 +162,9 @@ enum ModeAction {
 struct DaemonArgs {
     #[arg(long, default_value = "quick")]
     mode: String,
+    /// Recognize without typing the result (debugging).
+    #[arg(long)]
+    no_inject: bool,
 }
 
 #[derive(Debug, Args)]
@@ -285,12 +319,24 @@ async fn main() {
             }
             i32::from(!all_ok)
         }
+        Command::Ctl(args) => {
+            use voiceless::ctl::CtlAction;
+            voiceless::ctl::run(match args.action {
+                CtlCommand::Toggle { mode } => CtlAction::Toggle(mode),
+                CtlCommand::Start { mode } => CtlAction::Start(mode),
+                CtlCommand::Stop => CtlAction::Stop,
+                CtlCommand::Cancel => CtlAction::Cancel,
+                CtlCommand::Status => CtlAction::Status,
+                CtlCommand::Watch => CtlAction::Watch,
+            })
+            .await
+        }
         Command::Daemon(args) => {
             let options = voiceless::stream::StreamOptions {
                 config_path: cli.config,
                 backend: None,
                 json: false,
-                inject: true,
+                inject: !args.no_inject,
                 mode: args.mode,
             };
             match voiceless::daemon::serve(options).await {

@@ -25,6 +25,7 @@ struct FixtureRunner {
 impl SessionRunner for FixtureRunner {
     fn start(
         &mut self,
+        _mode: &str,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> {
         self.sessions_started += 1;
@@ -164,4 +165,38 @@ async fn cancel_during_recording_yields_cancelled_exit_and_no_history() {
     let exit = wait_idle_code(&mut gateway).await;
     assert_eq!(exit, 130);
     assert!(history.records().is_empty(), "{:?}", history.records());
+}
+
+#[tokio::test]
+async fn hold_to_talk_start_and_stop_run_one_session_and_reject_out_of_order_calls() {
+    let log = new_log();
+    let mut runner = runner(log.clone());
+    let history = runner.history.clone();
+    runner.events.push_back(Ok(RealtimeEvent::Finished {
+        transcript: "按住说话".to_owned(),
+    }));
+    let mut gateway = Gateway::new(runner);
+
+    // Release before press (e.g. a key-repeat artefact) is a no-op error.
+    assert!(gateway.stop().is_err());
+    assert_eq!(gateway.start("quick"), Ok(ActivateOutcome::Started));
+    // A repeated press while recording must not start a second session.
+    let Err(message) = gateway.start("quick") else {
+        panic!("second start must be rejected");
+    };
+    assert!(message.contains("recording"), "{message}");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(gateway.stop(), Ok(ActivateOutcome::Stopping));
+    assert!(gateway.stop().is_err(), "stop while stopping is rejected");
+    wait_idle(&mut gateway).await;
+
+    assert_eq!(gateway.state(), voiceless::daemon::State::Idle);
+    assert_eq!(history.records().len(), 1);
+    assert_eq!(
+        entries(&log)
+            .iter()
+            .filter(|entry| entry.starts_with("injector.inject:"))
+            .count(),
+        1
+    );
 }

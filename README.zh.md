@@ -90,6 +90,7 @@ flake 提供 `homeManagerModules.default`。模块完成以下任务：
     settings.asr.streaming_backend = "cloud-realtime"; # 或 "local-streaming"
     settings.cloud.api_key = "sk-...";                 # 生成的文件权限为 0600
     service.enable = true;                             # 常驻 `voiceless daemon`
+    overlay.enable = true;                             # eww 浮层显示实时文字（contrib/eww-overlay）
     shortcuts.sway.enable = true;                      # $mod+Shift+d 切换录音
   };
 }
@@ -151,7 +152,8 @@ voiceless stream --backend local-streaming
 | `voiceless mode list\|reload\|add\|update\|remove` | 管理文本处理模式 |
 | `voiceless history list\|delete\|export\|totals\|usage` | 查询识别历史（SQLite） |
 | `voiceless history serve` | 启动本地 Web 控制台。选项：`--host`、`--port`。默认：`http://127.0.0.1:8790` |
-| `voiceless daemon` | 运行 headless daemon，在 D-Bus 导出 `dev.voiceless.Daemon.Controller`。选项：`--mode`（默认 `quick`） |
+| `voiceless daemon` | 运行常驻 daemon：启动时加载一次本地模型（会话不再等待模型加载），在 D-Bus 导出 `dev.voiceless.Daemon.Controller`，并把每个会话事件作为 `Event` 信号广播。选项：`--mode`（默认 `quick`）、`--no-inject` |
+| `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | 一次 D-Bus 调用控制 daemon（快捷键绑定这些命令）。`toggle`/`start` 接受 `--mode`；`start`/`stop` 对应按住说话的按下/松开；`watch` 把每个事件输出为一行 JSON（`stream --json` 格式，外加 `{"type":"state","state":...,"mode":...}`） |
 | `voiceless doctor` | 检查依赖与数据目录 |
 | `voiceless benchmark asr\|latency` | 运行 CER 与 stop→inject 延迟门禁。缺凭据或 Wayland 注入环境时报告 skip，不报告通过 |
 

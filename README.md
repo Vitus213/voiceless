@@ -90,6 +90,7 @@ The flake includes `homeManagerModules.default`. The module performs these tasks
     settings.asr.streaming_backend = "cloud-realtime"; # or "local-streaming"
     settings.cloud.api_key = "sk-...";                 # the generated file has mode 0600
     service.enable = true;                             # run `voiceless daemon` persistently
+    overlay.enable = true;                             # eww pill with the live transcript (contrib/eww-overlay)
     shortcuts.sway.enable = true;                      # $mod+Shift+d toggles recording
   };
 }
@@ -151,7 +152,8 @@ voiceless stream --backend local-streaming
 | `voiceless mode list\|reload\|add\|update\|remove` | Manage text processing modes |
 | `voiceless history list\|delete\|export\|totals\|usage` | Query the recognition history (SQLite) |
 | `voiceless history serve` | Start the local web console. Options: `--host`, `--port`. Default: `http://127.0.0.1:8790` |
-| `voiceless daemon` | Run the headless daemon. It exports `dev.voiceless.Daemon.Controller` on D-Bus. Options: `--mode` (default `quick`) |
+| `voiceless daemon` | Run the resident daemon: it loads the local model once at startup (sessions never wait for a model load), exports `dev.voiceless.Daemon.Controller` on D-Bus and broadcasts every session event as an `Event` signal. Options: `--mode` (default `quick`), `--no-inject` |
+| `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | Control the daemon with one D-Bus call (bind hotkeys to these). `toggle`/`start` take `--mode`; `start`/`stop` are hold-to-talk press/release; `watch` prints every event as a JSON line (the `stream --json` schema plus `{"type":"state","state":...,"mode":...}`) |
 | `voiceless doctor` | Check dependencies and the data directory |
 | `voiceless benchmark asr\|latency` | Run the CER and stop-to-inject latency gates. Without credentials or a Wayland injector they report skip and never report a pass |
 

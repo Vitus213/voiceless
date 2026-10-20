@@ -1,0 +1,34 @@
+;; Voiceless streaming overlay: a bottom-center floating pill that appears
+;; only while the daemon records and flows with the live partial.
+;;
+;; Silky path: voiceless-overlay.py writes one JSON line per frame into a FIFO; eww's
+;; deflisten consumes it in-daemon (no per-update process spawn). State is
+;; border color only: live = blue, final = green, idle = neutral. The pill
+;; width is eased by the pump (30 Hz exponential approach) so growth glides
+;; instead of stepping. The transcript is centered; past MAX_CHARS only the
+;; newest characters are shown, sliding left as new words arrive.
+;; Notes: JSON fields are read via ${stream.x} interpolation (bare dotted
+;; expressions are not resolved); the listen command uses bare
+;; $XDG_RUNTIME_DIR because eww would interpolate a ${...} itself.
+
+(deflisten stream :initial "{\"text\":\"聆听中…\",\"width\":170,\"pillbg\":\"rgba(28, 37, 48, 0.78)\",\"pillborder\":\"rgba(98, 160, 234, 0.85)\"}"
+  "~/.config/eww-voiceless/voiceless-overlay-listen.sh")
+
+(defwidget voiceless-pill []
+  (box :class "ov"
+    :style "background-color: ${stream.pillbg}; border-color: ${stream.pillborder};"
+    :width "${stream.width}"
+    :halign "center"
+    :valign "center"
+    :orientation "h"
+    :space-evenly false
+    (label :class "text" :text "${stream.text}" :wrap false :halign "center"
+      :truncate true :truncate-left true :show-truncated false)))
+
+(defwindow voiceless-overlay
+  :monitor 0
+  :geometry (geometry :x "0%" :y "28px" :width "720px" :height "60px" :anchor "bottom center")
+  :stacking "overlay"
+  :wm-ignore true
+  :focusable "none"
+  (voiceless-pill))

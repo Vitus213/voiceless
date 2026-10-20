@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sherpa_onnx::{
@@ -137,7 +138,7 @@ pub fn create_vad(
 
 /// VAD-segmented recognition state; synchronous, owned by the worker.
 pub struct SegmentedRecognizer {
-    recognizer: OfflineRecognizer,
+    recognizer: Arc<OfflineRecognizer>,
     vad: VoiceActivityDetector,
     partial_interval: Duration,
     pending: Vec<f32>,
@@ -149,13 +150,14 @@ pub struct SegmentedRecognizer {
 }
 
 impl SegmentedRecognizer {
+    /// `recognizer` may be shared: a daemon keeps one warm across sessions.
     pub fn new(
-        recognizer: OfflineRecognizer,
+        recognizer: impl Into<Arc<OfflineRecognizer>>,
         vad: VoiceActivityDetector,
         partial_interval: Duration,
     ) -> Self {
         Self {
-            recognizer,
+            recognizer: recognizer.into(),
             vad,
             partial_interval,
             pending: Vec::new(),

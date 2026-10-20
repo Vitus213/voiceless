@@ -1,7 +1,9 @@
-//! Headless session daemon: one session at a time, hotkey-style Activate
-//! semantics (idle -> start, recording -> normal stop, stopping -> reject)
-//! and explicit cancel. The gateway owns no capture or backend state; it
-//! only forwards commands to the session runner.
+//! Resident session daemon: one session at a time, hotkey-style toggle
+//! semantics (idle -> start, recording -> normal stop, stopping -> reject),
+//! explicit start/stop/cancel, and a warm engine shared by every session so
+//! a hotkey never waits for a model load. Session events are broadcast as
+//! `Event` signals (JSON lines, the `stream --json` schema) for overlays and
+//! `voiceless ctl watch`.
 //!
 //! Activation sources: XDG Desktop Portal GlobalShortcuts (best effort,
 //! requires a compositor portal backend), the `dev.voiceless.Daemon` D-Bus
@@ -27,15 +29,26 @@ pub enum ActivateOutcome {
 pub trait SessionRunner {
     fn start(
         &mut self,
+        mode: &str,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub enum State {
     Idle,
     Recording,
     Stopping,
+}
+
+impl State {
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Idle => "idle",
+            State::Recording => "recording",
+            State::Stopping => "stopping",
+        }
+    }
 }
 
 pub struct Gateway<R: SessionRunner> {
@@ -55,30 +68,51 @@ impl<R: SessionRunner> Gateway<R> {
         }
     }
 
-    /// Hotkey activation: idle starts a session, an active session stops
+    /// Hotkey activation in the default mode; see [`Gateway::toggle`].
+    pub fn activate(&mut self) -> Result<ActivateOutcome, String> {
+        self.toggle("quick")
+    }
+
+    /// Toggle: idle starts a session in `mode`, an active session stops
     /// normally, and a session already stopping rejects further activation
     /// so no concurrent session or duplicate injection can occur.
-    pub fn activate(&mut self) -> Result<ActivateOutcome, String> {
+    pub fn toggle(&mut self, mode: &str) -> Result<ActivateOutcome, String> {
         match self.state {
-            State::Idle => {
-                let (tx, rx) = mpsc::channel(8);
-                let future = self.runner.start(rx);
-                self.task = Some(tokio::spawn(future));
-                self.control_tx = Some(tx);
-                self.state = State::Recording;
-                Ok(ActivateOutcome::Started)
-            }
-            State::Recording => {
-                let tx = self
-                    .control_tx
-                    .clone()
-                    .ok_or_else(|| "session without a control channel".to_owned())?;
-                let _ = tx.try_send(ControlCommand::Stop);
-                self.state = State::Stopping;
-                Ok(ActivateOutcome::Stopping)
-            }
+            State::Idle => self.start(mode),
+            State::Recording => self.stop(),
             State::Stopping => Err("session is already stopping".to_owned()),
         }
+    }
+
+    /// Start a session in `mode`; only valid when idle (hold-to-talk press).
+    pub fn start(&mut self, mode: &str) -> Result<ActivateOutcome, String> {
+        if self.state != State::Idle {
+            return Err(format!("cannot start: session is {}", self.state.name()));
+        }
+        let (tx, rx) = mpsc::channel(8);
+        let future = self.runner.start(mode, rx);
+        self.task = Some(tokio::spawn(future));
+        self.control_tx = Some(tx);
+        self.state = State::Recording;
+        Ok(ActivateOutcome::Started)
+    }
+
+    /// Normal stop of a recording session (hold-to-talk release).
+    pub fn stop(&mut self) -> Result<ActivateOutcome, String> {
+        if self.state != State::Recording {
+            return Err(format!("cannot stop: session is {}", self.state.name()));
+        }
+        let tx = self
+            .control_tx
+            .clone()
+            .ok_or_else(|| "session without a control channel".to_owned())?;
+        let _ = tx.try_send(ControlCommand::Stop);
+        self.state = State::Stopping;
+        Ok(ActivateOutcome::Stopping)
+    }
+
+    pub fn state(&self) -> State {
+        self.state
     }
 
     /// Force cancel: valid from any active state; idle is a no-op.
@@ -124,21 +158,25 @@ impl<R: SessionRunner> Gateway<R> {
     }
 }
 
-/// Production runner: executes one `voiceless stream` session per activation
-/// through the shared coordinator, controlled exclusively via the gateway
-/// channel.
+/// Production runner: executes one streaming session per activation through
+/// the shared coordinator, with the daemon's warm engine and event
+/// broadcast, controlled exclusively via the gateway channel.
 pub struct StreamRunner {
     pub options: crate::stream::StreamOptions,
+    pub env: crate::stream::SessionEnv,
 }
 
 impl SessionRunner for StreamRunner {
     fn start(
         &mut self,
+        mode: &str,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> {
-        let options = self.options.clone();
+        let mut options = self.options.clone();
+        options.mode = mode.to_owned();
+        let env = self.env.clone();
         Box::pin(async move {
-            crate::stream::run_with_control(options, control)
+            crate::stream::run_with_env(options, control, env)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -147,48 +185,117 @@ impl SessionRunner for StreamRunner {
 
 pub const BUS_NAME: &str = "dev.voiceless.Daemon";
 pub const OBJECT_PATH: &str = "/dev/voiceless/Daemon";
+pub const INTERFACE: &str = "dev.voiceless.Daemon.Controller";
 
-/// D-Bus control interface. Activate maps to the gateway hotkey semantics;
-/// Cancel force-stops.
+/// D-Bus control interface. Toggle/Activate map to the gateway hotkey
+/// semantics, Start/Stop to hold-to-talk press/release, Cancel force-stops.
+/// An empty mode selects the daemon's default mode.
 #[zbus::interface(name = "dev.voiceless.Daemon.Controller")]
 impl ControllerInterface {
     fn activate(&self) -> zbus::fdo::Result<String> {
-        self.commands
-            .try_send(DaemonCommand::Activate)
-            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
-        Ok("queued".to_owned())
+        self.queue(DaemonCommand::Toggle(String::new()))
+    }
+
+    fn toggle(&self, mode: &str) -> zbus::fdo::Result<String> {
+        self.queue(DaemonCommand::Toggle(mode.to_owned()))
+    }
+
+    fn start(&self, mode: &str) -> zbus::fdo::Result<String> {
+        self.queue(DaemonCommand::Start(mode.to_owned()))
+    }
+
+    fn stop(&self) -> zbus::fdo::Result<String> {
+        self.queue(DaemonCommand::Stop)
     }
 
     fn cancel(&self) -> zbus::fdo::Result<String> {
+        self.queue(DaemonCommand::Cancel)
+    }
+
+    /// Current session state: idle, recording or stopping.
+    fn status(&self) -> String {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .to_string()
+    }
+
+    /// One session event as a JSON line (`stream --json` schema), plus
+    /// `{"type":"state","state":...}` on every state change.
+    #[zbus(signal)]
+    async fn event(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        json: &str,
+    ) -> zbus::Result<()>;
+}
+
+impl ControllerInterface {
+    fn queue(&self, command: DaemonCommand) -> zbus::fdo::Result<String> {
         self.commands
-            .try_send(DaemonCommand::Cancel)
+            .try_send(command)
             .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
         Ok("queued".to_owned())
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum DaemonCommand {
-    Activate,
+    Toggle(String),
+    Start(String),
+    Stop,
     Cancel,
 }
 
 struct ControllerInterface {
     commands: mpsc::Sender<DaemonCommand>,
+    state: std::sync::Arc<std::sync::Mutex<&'static str>>,
 }
 
-/// Serve the daemon until the task ends: owns the gateway, the D-Bus
-/// control bus and the reaping loop.
+/// Serve the daemon until the task ends: loads the warm engine, owns the
+/// gateway, the D-Bus control bus, the event signal and the reaping loop.
 pub async fn serve(options: crate::stream::StreamOptions) -> Result<(), String> {
-    let gateway = Gateway::new(StreamRunner { options });
-    serve_with_gateway(gateway).await
+    let config = crate::config::AppConfig::load_optional(options.config_path.as_deref())
+        .map_err(|error| error.to_string())?;
+    let started = std::time::Instant::now();
+    let warm = tokio::task::spawn_blocking(move || crate::engine::WarmEngine::load(&config))
+        .await
+        .map_err(|error| error.to_string())?;
+    let warm = match warm {
+        Ok(Some(engine)) => {
+            println!(
+                "Voiceless: {} loaded in {:.1}s",
+                engine.describe(),
+                started.elapsed().as_secs_f64()
+            );
+            Some(std::sync::Arc::new(engine))
+        }
+        Ok(None) => None,
+        Err(message) => {
+            // Sessions still work: they load on demand and report the error.
+            eprintln!("Voiceless: warm engine unavailable: {message}");
+            None
+        }
+    };
+    let (events, _) = tokio::sync::broadcast::channel::<String>(256);
+    let default_mode = options.mode.clone();
+    let env = crate::stream::SessionEnv {
+        warm,
+        events: Some(events.clone()),
+    };
+    let gateway = Gateway::new(StreamRunner { options, env });
+    serve_with_gateway(gateway, events, default_mode).await
 }
 
-async fn serve_with_gateway<R>(mut gateway: Gateway<R>) -> Result<(), String>
+async fn serve_with_gateway<R>(
+    mut gateway: Gateway<R>,
+    events: tokio::sync::broadcast::Sender<String>,
+    default_mode: String,
+) -> Result<(), String>
 where
     R: SessionRunner,
 {
     let (command_tx, mut command_rx) = mpsc::channel::<DaemonCommand>(8);
+    let state = std::sync::Arc::new(std::sync::Mutex::new(State::Idle.name()));
 
     let connection = zbus::Connection::session()
         .await
@@ -199,6 +306,7 @@ where
             OBJECT_PATH,
             ControllerInterface {
                 commands: command_tx.clone(),
+                state: state.clone(),
             },
         )
         .await
@@ -208,26 +316,78 @@ where
         .await
         .map_err(|error| format!("cannot claim bus name {BUS_NAME}: {error}"))?;
 
+    // Forward broadcast events as D-Bus signals.
+    let emitter = connection
+        .object_server()
+        .interface::<_, ControllerInterface>(OBJECT_PATH)
+        .await
+        .map_err(|error| format!("cannot resolve controller object: {error}"))?
+        .signal_emitter()
+        .clone();
+    let mut forwarded = events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match forwarded.recv().await {
+                Ok(line) => {
+                    let _ = ControllerInterface::event(&emitter, &line).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     // Best-effort portal global shortcut; unavailable portals fall back to
     // compositor bindings over the control bus above.
     tokio::spawn(portal_shortcut_listener(command_tx.clone()));
 
     println!("Voiceless daemon listening on {BUS_NAME}");
+    let mut published = State::Idle;
+    let mut session_mode = default_mode.clone();
     loop {
         tokio::select! {
-            command = command_rx.recv() => match command {
-                Some(DaemonCommand::Activate) => match gateway.activate() {
-                    Ok(outcome) => println!("activate: {outcome:?}"),
-                    Err(message) => eprintln!("Voiceless: {message}"),
-                },
-                Some(DaemonCommand::Cancel) => gateway.cancel().await,
-                None => break,
+            command = command_rx.recv() => {
+                let Some(command) = command else { break };
+                let mode = |requested: String| {
+                    if requested.is_empty() { default_mode.clone() } else { requested }
+                };
+                if gateway.state() == State::Idle {
+                    if let DaemonCommand::Toggle(requested) | DaemonCommand::Start(requested) =
+                        &command
+                    {
+                        session_mode = mode(requested.clone());
+                    }
+                }
+                let result = match command {
+                    DaemonCommand::Toggle(requested) => gateway.toggle(&mode(requested)).map(Some),
+                    DaemonCommand::Start(requested) => gateway.start(&mode(requested)).map(Some),
+                    DaemonCommand::Stop => gateway.stop().map(Some),
+                    DaemonCommand::Cancel => {
+                        gateway.cancel().await;
+                        Ok(None)
+                    }
+                };
+                if let Err(message) = result {
+                    eprintln!("Voiceless: {message}");
+                }
             },
             _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
                 if let Some(code) = gateway.poll().await {
                     println!("session finished with exit code {code}");
                 }
             }
+        }
+        if gateway.state() != published {
+            published = gateway.state();
+            *state.lock().unwrap_or_else(|error| error.into_inner()) = published.name();
+            let _ = events.send(
+                serde_json::json!({
+                    "type": "state",
+                    "state": published.name(),
+                    "mode": session_mode,
+                })
+                .to_string(),
+            );
         }
     }
     Ok(())
@@ -292,7 +452,7 @@ async fn portal_shortcut_listener(commands: mpsc::Sender<DaemonCommand>) {
     // created, so matching the shortcut id is sufficient.
     while let Some(event) = activated.next().await {
         if event.shortcut_id() == TOGGLE_SHORTCUT_ID {
-            let _ = commands.send(DaemonCommand::Activate).await;
+            let _ = commands.send(DaemonCommand::Toggle(String::new())).await;
         }
     }
 }
