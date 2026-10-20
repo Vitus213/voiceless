@@ -244,6 +244,64 @@ pub enum DaemonCommand {
     Start(String),
     Stop,
     Cancel,
+    Key(crate::hotkey::KeyEvent),
+}
+
+/// What a push-to-talk key event asks of the gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyAction {
+    Start(String),
+    Stop,
+    Nothing,
+}
+
+/// One key, two gestures (as in Handy): hold it past the threshold and the
+/// session stops on release; tap it and recording continues until the next
+/// press. Any press while recording stops, whoever started the session.
+pub struct HotkeyMachine {
+    hold: std::time::Duration,
+    mode: String,
+    ctrl_mode: String,
+    pressed_at: Option<std::time::Instant>,
+}
+
+impl HotkeyMachine {
+    pub fn new(hold: std::time::Duration, mode: String, ctrl_mode: String) -> Self {
+        Self {
+            hold,
+            mode,
+            ctrl_mode,
+            pressed_at: None,
+        }
+    }
+
+    pub fn on_press(&mut self, state: State, ctrl: bool, now: std::time::Instant) -> KeyAction {
+        match state {
+            State::Idle => {
+                self.pressed_at = Some(now);
+                KeyAction::Start(if ctrl {
+                    self.ctrl_mode.clone()
+                } else {
+                    self.mode.clone()
+                })
+            }
+            State::Recording => {
+                self.pressed_at = None;
+                KeyAction::Stop
+            }
+            State::Stopping => KeyAction::Nothing,
+        }
+    }
+
+    pub fn on_release(&mut self, state: State, now: std::time::Instant) -> KeyAction {
+        match self.pressed_at.take() {
+            Some(at) if state == State::Recording && now.duration_since(at) >= self.hold => {
+                KeyAction::Stop
+            }
+            // A tap: keep recording until the next press.
+            _ => KeyAction::Nothing,
+        }
+    }
 }
 
 struct ControllerInterface {
@@ -257,7 +315,8 @@ pub async fn serve(options: crate::stream::StreamOptions) -> Result<(), String> 
     let config = crate::config::AppConfig::load_optional(options.config_path.as_deref())
         .map_err(|error| error.to_string())?;
     let started = std::time::Instant::now();
-    let warm = tokio::task::spawn_blocking(move || crate::engine::WarmEngine::load(&config))
+    let warm_config = config.clone();
+    let warm = tokio::task::spawn_blocking(move || crate::engine::WarmEngine::load(&warm_config))
         .await
         .map_err(|error| error.to_string())?;
     let warm = match warm {
@@ -283,18 +342,43 @@ pub async fn serve(options: crate::stream::StreamOptions) -> Result<(), String> 
         events: Some(events.clone()),
     };
     let gateway = Gateway::new(StreamRunner { options, env });
-    serve_with_gateway(gateway, events, default_mode).await
+    serve_with_gateway(gateway, events, default_mode, config).await
 }
 
 async fn serve_with_gateway<R>(
     mut gateway: Gateway<R>,
     events: tokio::sync::broadcast::Sender<String>,
     default_mode: String,
+    config: crate::config::AppConfig,
 ) -> Result<(), String>
 where
     R: SessionRunner,
 {
     let (command_tx, mut command_rx) = mpsc::channel::<DaemonCommand>(8);
+    let mut hotkey = HotkeyMachine::new(
+        std::time::Duration::from_millis(config.hotkey.hold_threshold_ms),
+        config.hotkey.mode.clone(),
+        config.hotkey.ctrl_mode.clone(),
+    );
+    if let Some(name) = &config.hotkey.key {
+        let key = crate::hotkey::parse_key(name)?;
+        let (key_tx, mut key_rx) = mpsc::channel(16);
+        match crate::hotkey::listen(key, key_tx) {
+            0 => eprintln!(
+                "Voiceless: no readable keyboard has {name}; add your user to the `input` group for push-to-talk"
+            ),
+            count => println!("Voiceless: push-to-talk on {name} ({count} keyboards)"),
+        }
+        let commands = command_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = key_rx.recv().await {
+                if commands.send(DaemonCommand::Key(event)).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let mut paused_media: Option<tokio::task::JoinHandle<Vec<String>>> = None;
     let state = std::sync::Arc::new(std::sync::Mutex::new(State::Idle.name()));
 
     let connection = zbus::Connection::session()
@@ -358,10 +442,33 @@ where
                         session_mode = mode(requested.clone());
                     }
                 }
+                let command = match command {
+                    DaemonCommand::Key(event) => {
+                        let now = std::time::Instant::now();
+                        let action = match event {
+                            crate::hotkey::KeyEvent::Press { ctrl } => {
+                                hotkey.on_press(gateway.state(), ctrl, now)
+                            }
+                            crate::hotkey::KeyEvent::Release => {
+                                hotkey.on_release(gateway.state(), now)
+                            }
+                        };
+                        match action {
+                            KeyAction::Start(requested) => {
+                                session_mode = mode(requested.clone());
+                                DaemonCommand::Start(requested)
+                            }
+                            KeyAction::Stop => DaemonCommand::Stop,
+                            KeyAction::Nothing => continue,
+                        }
+                    }
+                    command => command,
+                };
                 let result = match command {
                     DaemonCommand::Toggle(requested) => gateway.toggle(&mode(requested)).map(Some),
                     DaemonCommand::Start(requested) => gateway.start(&mode(requested)).map(Some),
                     DaemonCommand::Stop => gateway.stop().map(Some),
+                    DaemonCommand::Key(_) => unreachable!("key events were translated above"),
                     DaemonCommand::Cancel => {
                         gateway.cancel().await;
                         Ok(None)
@@ -378,6 +485,29 @@ where
             }
         }
         if gateway.state() != published {
+            match (published, gateway.state()) {
+                (State::Idle, State::Recording) => {
+                    if config.audio.cues {
+                        crate::media::play_cue(crate::media::Cue::Start);
+                    }
+                    if config.audio.pause_media {
+                        paused_media = Some(tokio::spawn(crate::media::pause_playing()));
+                    }
+                }
+                (State::Recording, State::Stopping) if config.audio.cues => {
+                    crate::media::play_cue(crate::media::Cue::Stop);
+                }
+                (_, State::Idle) => {
+                    if let Some(paused) = paused_media.take() {
+                        tokio::spawn(async move {
+                            if let Ok(names) = paused.await {
+                                crate::media::resume(names).await;
+                            }
+                        });
+                    }
+                }
+                _ => {}
+            }
             published = gateway.state();
             *state.lock().unwrap_or_else(|error| error.into_inner()) = published.name();
             let _ = events.send(

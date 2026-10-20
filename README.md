@@ -210,6 +210,16 @@ hotword_threshold = 0.9                # 1.0 = identical syllables; zh/z, n/l, -
 # pattern = '(\d+)点(\d+)分'
 # replace = "$1:$2"
 
+[hotkey]                               # daemon push-to-talk key read from evdev (user must be in the `input` group)
+# key = "KEY_SCROLLLOCK"               # unset disables; hold ≥ threshold = talk while held, tap = toggle
+mode = ""                              # plain press; empty uses `voiceless daemon --mode`
+ctrl_mode = "prompt-optimize"          # press with Ctrl held
+hold_threshold_ms = 350
+
+[audio]
+pause_media = true                     # pause MPRIS players while recording, resume them after
+cues = false                           # short start/stop tones through pw-play
+
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5
 wtype_command = "wtype"

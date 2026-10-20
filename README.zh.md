@@ -210,6 +210,16 @@ hotword_threshold = 0.9                # 1.0 = 音节完全相同；zh/z、n/l�
 # pattern = '(\d+)点(\d+)分'
 # replace = "$1:$2"
 
+[hotkey]                               # daemon 通过 evdev 读取的按键（用户需在 `input` 组）
+# key = "KEY_SCROLLLOCK"               # 不设置则关闭；按住超过阈值 = 按住说话，短按 = 开始/停止切换
+mode = ""                              # 直接按下时的模式；为空则用 `voiceless daemon --mode`
+ctrl_mode = "prompt-optimize"          # 按住 Ctrl 再按时的模式
+hold_threshold_ms = 350
+
+[audio]
+pause_media = true                     # 录音时暂停正在播放的 MPRIS 播放器，结束后恢复
+cues = false                           # 用 pw-play 播放开始/结束的提示音
+
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5
 wtype_command = "wtype"

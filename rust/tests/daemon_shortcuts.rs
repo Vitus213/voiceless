@@ -200,3 +200,84 @@ async fn hold_to_talk_start_and_stop_run_one_session_and_reject_out_of_order_cal
         1
     );
 }
+
+mod hotkey_machine {
+    use std::time::{Duration, Instant};
+    use voiceless::daemon::{HotkeyMachine, KeyAction, State};
+
+    fn machine() -> HotkeyMachine {
+        HotkeyMachine::new(
+            Duration::from_millis(350),
+            "quick".to_owned(),
+            "prompt-optimize".to_owned(),
+        )
+    }
+
+    #[test]
+    fn holding_past_the_threshold_stops_on_release() {
+        let mut keys = machine();
+        let t0 = Instant::now();
+        assert_eq!(
+            keys.on_press(State::Idle, false, t0),
+            KeyAction::Start("quick".to_owned())
+        );
+        assert_eq!(
+            keys.on_release(State::Recording, t0 + Duration::from_millis(900)),
+            KeyAction::Stop
+        );
+    }
+
+    #[test]
+    fn a_tap_latches_and_the_next_press_stops() {
+        let mut keys = machine();
+        let t0 = Instant::now();
+        keys.on_press(State::Idle, false, t0);
+        assert_eq!(
+            keys.on_release(State::Recording, t0 + Duration::from_millis(120)),
+            KeyAction::Nothing,
+            "a tap keeps recording"
+        );
+        assert_eq!(
+            keys.on_press(State::Recording, false, t0 + Duration::from_secs(5)),
+            KeyAction::Stop
+        );
+        // The release of that stopping press does nothing more.
+        assert_eq!(
+            keys.on_release(State::Stopping, t0 + Duration::from_secs(6)),
+            KeyAction::Nothing
+        );
+    }
+
+    #[test]
+    fn ctrl_selects_the_organize_mode_and_stopping_ignores_keys() {
+        let mut keys = machine();
+        let t0 = Instant::now();
+        assert_eq!(
+            keys.on_press(State::Idle, true, t0),
+            KeyAction::Start("prompt-optimize".to_owned())
+        );
+        assert_eq!(
+            keys.on_press(State::Stopping, false, t0),
+            KeyAction::Nothing
+        );
+    }
+
+    #[test]
+    fn a_press_stops_a_session_started_elsewhere() {
+        // e.g. started by `voiceless ctl toggle`: no press is pending.
+        let mut keys = machine();
+        let t0 = Instant::now();
+        assert_eq!(keys.on_press(State::Recording, false, t0), KeyAction::Stop);
+        assert_eq!(keys.on_release(State::Stopping, t0), KeyAction::Nothing);
+    }
+}
+
+#[test]
+fn hotkey_and_audio_config_are_validated() {
+    use voiceless::config::AppConfig;
+    let config = AppConfig::from_toml("[hotkey]\nkey = \"KEY_SCROLLLOCK\"\n").unwrap();
+    assert_eq!(config.hotkey.hold_threshold_ms, 350);
+    assert!(config.audio.pause_media);
+    assert!(!config.audio.cues);
+    assert!(AppConfig::from_toml("[hotkey]\nkey = \"KEY_NOPE\"\n").is_err());
+}

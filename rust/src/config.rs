@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub doubao: DoubaoConfig,
     pub local: LocalConfig,
     pub text: TextConfig,
+    pub hotkey: HotkeyConfig,
+    pub audio: AudioConfig,
     pub inject: InjectConfig,
     pub processing: ProcessingConfig,
     pub history: HistoryConfig,
@@ -91,6 +93,51 @@ impl Default for CloudConfig {
             timeout_seconds: 60.0,
             realtime_endpoint: DEFAULT_REALTIME_ENDPOINT.to_owned(),
             realtime_model: DEFAULT_REALTIME_MODEL.to_owned(),
+        }
+    }
+}
+
+/// Daemon push-to-talk key read from evdev (needs the `input` group). Hold
+/// it at least `hold_threshold_ms` to talk while held; tap it to toggle
+/// (tap again to stop). With Ctrl held the session uses `ctrl_mode`.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HotkeyConfig {
+    /// evdev key name, e.g. `KEY_SCROLLLOCK`; unset disables the listener.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Mode for a plain press; empty uses the daemon's `--mode`.
+    pub mode: String,
+    pub ctrl_mode: String,
+    pub hold_threshold_ms: u64,
+}
+
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self {
+            key: None,
+            mode: String::new(),
+            ctrl_mode: "prompt-optimize".to_owned(),
+            hold_threshold_ms: 350,
+        }
+    }
+}
+
+/// Daemon session side effects.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioConfig {
+    /// Pause MPRIS players while recording; resume the paused ones after.
+    pub pause_media: bool,
+    /// Short start/stop tones through `pw-play`.
+    pub cues: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            pause_media: true,
+            cues: false,
         }
     }
 }
@@ -458,6 +505,10 @@ impl AppConfig {
                 "local.max_segment_seconds must be between 1 and {max_segment} for {}",
                 self.local.model
             )));
+        }
+        if let Some(key) = &self.hotkey.key {
+            crate::hotkey::parse_key(key)
+                .map_err(|error| ConfigError::Invalid(format!("hotkey.key: {error}")))?;
         }
         if !(0.5..=1.0).contains(&self.text.hotword_threshold) {
             return Err(ConfigError::Invalid(
