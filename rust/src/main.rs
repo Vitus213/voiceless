@@ -302,7 +302,10 @@ async fn main() {
         }
         Command::Doctor => {
             println!("Voiceless doctor");
-            let checks = voiceless::doctor::run_checks();
+            // zbus::blocking calls block_on, which panics on a runtime thread.
+            let checks = tokio::task::spawn_blocking(voiceless::doctor::run_checks)
+                .await
+                .expect("doctor checks panicked");
             let mut all_ok = true;
             for check in &checks {
                 if !check.pass() {
