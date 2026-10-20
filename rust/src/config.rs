@@ -224,10 +224,10 @@ impl AppConfig {
             ));
         }
         match self.inject.prefer.as_str() {
-            "wtype" | "clipboard" => {}
+            "wtype" | "clipboard" | "fcitx5" => {}
             value => {
                 return Err(ConfigError::Invalid(format!(
-                    "inject.prefer={value:?}; expected wtype or clipboard"
+                    "inject.prefer={value:?}; expected wtype, clipboard or fcitx5"
                 )))
             }
         }

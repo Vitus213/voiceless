@@ -174,7 +174,7 @@ realtime_endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 realtime_model = "qwen3-asr-flash-realtime"
 
 [inject]
-prefer = "wtype"                       # wtype | clipboard
+prefer = "wtype"                       # wtype | clipboard | fcitx5
 wtype_command = "wtype"
 wl_copy_command = "wl-copy"
 paste_command = "-M ctrl -k v"         # args passed to paste_tool
@@ -200,7 +200,18 @@ save_audio = true                      # keep one WAV per successful session
 
 The old values `cloud-vad`, `sensevoice-vad` and `final_backend` are rejected. Voiceless never rewrites them silently.
 
-`[inject]` selects how the final text reaches the focused window. `prefer = "wtype"` types it through the Wayland virtual keyboard. `prefer = "clipboard"` copies it with `wl-copy` and synthesizes the `paste_command` keypress instead; paste delivers the text verbatim, so apps whose input method (Fcitx5) reinterprets typed keys -- WeChat and other IME-controlled XWayland apps -- receive clean text. Rootless Xwayland (xwayland-satellite) does not forward Wayland selections to X11 clients, so when `x11_clipboard_command` is set (for example `xsel --clipboard --input`) the clipboard method also mirrors the text to the X11 clipboard, best effort. With `clipboard_fallback = true`, a failed wtype injection retries through the clipboard.
+`[inject]` selects how the final text reaches the focused window. `prefer = "wtype"` types it through the Wayland virtual keyboard. `prefer = "clipboard"` copies it with `wl-copy` and synthesizes the `paste_command` keypress instead; paste delivers the text verbatim, so apps whose input method (Fcitx5) reinterprets typed keys -- WeChat and other IME-controlled XWayland apps -- receive clean text. Rootless Xwayland (xwayland-satellite) does not forward Wayland selections to X11 clients, so when `x11_clipboard_command` is set (for example `xsel --clipboard --input`) the clipboard method also mirrors the text to the X11 clipboard, best effort. `prefer = "fcitx5"` commits the text through the Voiceless Fcitx5 bridge, the same path as text typed with the input method: no synthesized keys, no clipboard, and it reaches every window where Fcitx5 works (Wayland and XWayland/XIM apps alike). With `clipboard_fallback = true`, a failed wtype or fcitx5 injection retries through the clipboard.
+
+### Fcitx5 bridge
+
+`fcitx5-bridge/` is a small Fcitx5 module. It exposes `dev.voiceless.Fcitx5Bridge1` at `/voiceless` on Fcitx5's own bus name (`org.fcitx.Fcitx5`) with two methods: `CommitString(s) -> (b, s)` commits into the focused input context, and `Status() -> (b, s)` reports it without side effects. Build it against the Fcitx5 you run, through the overlay, and add it to the Fcitx5 addons:
+
+```nix
+nixpkgs.overlays = [ voiceless.overlays.default ];
+i18n.inputMethod.fcitx5.addons = [ pkgs.voiceless-fcitx5-bridge ];
+```
+
+Then restart Fcitx5, set `prefer = "fcitx5"`, and run `voiceless doctor`; the `fcitx5 bridge` check calls `Status`.
 
 ## Modes and injection
 
@@ -290,6 +301,7 @@ just test    # nix develop -c cargo test --all-targets
 just lint    # cargo fmt --check + clippy -D warnings
 just check   # lint + test + nix flake check -L
 just run …   # nix run . -- …
+just bridge-test  # Fcitx5 bridge end-to-end test in a private D-Bus session
 ```
 
 The real quality gate is `benchmark asr` (CER ≤ 0.02). The real latency gate is `benchmark latency` (stop-to-inject p99 ≤ 1.0 s). Both are documented in `docs/low-latency-rust-plan.md` and the OpenSpec change. Without real credentials or a Wayland injection environment they report skip and never report a pass.

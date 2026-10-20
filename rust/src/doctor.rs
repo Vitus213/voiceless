@@ -17,17 +17,52 @@ impl Check {
 }
 
 pub fn run_checks() -> Vec<Check> {
-    let clipboard_preferred = crate::config::load_default_config()
-        .map(|config| config.inject.prefer == "clipboard")
-        .unwrap_or(false);
-    vec![
+    let prefer = crate::config::load_default_config()
+        .map(|config| config.inject.prefer)
+        .unwrap_or_default();
+    let mut checks = vec![
         executable_check("pw-record", true),
-        executable_check("wtype", true),
-        // wl-copy powers the clipboard injection method and the wtype
-        // fallback; it is required when clipboard is the preferred method.
-        executable_check("wl-copy", clipboard_preferred),
+        executable_check("wtype", prefer != "fcitx5"),
+        // wl-copy powers the clipboard injection method and the fallback; it
+        // is required when clipboard is the preferred method.
+        executable_check("wl-copy", prefer == "clipboard"),
         directory_check(),
-    ]
+    ];
+    if prefer == "fcitx5" {
+        checks.push(fcitx5_bridge_check());
+    }
+    checks
+}
+
+/// The bridge is reachable when its `Status` call answers; a missing focused
+/// input context (doctor runs from a terminal) still counts as present.
+fn fcitx5_bridge_check() -> Check {
+    use crate::stream::{FCITX5_BRIDGE_INTERFACE, FCITX5_BRIDGE_PATH, FCITX5_BRIDGE_SERVICE};
+    let status = zbus::blocking::Connection::session().and_then(|connection| {
+        connection
+            .call_method(
+                Some(FCITX5_BRIDGE_SERVICE),
+                FCITX5_BRIDGE_PATH,
+                Some(FCITX5_BRIDGE_INTERFACE),
+                "Status",
+                &(),
+            )?
+            .body()
+            .deserialize::<(bool, String)>()
+    });
+    let (present, detail) = match status {
+        Ok((_, detail)) => (true, detail),
+        Err(error) => (
+            false,
+            format!("{error}; add voiceless-fcitx5-bridge to the Fcitx5 addons"),
+        ),
+    };
+    Check {
+        name: "fcitx5 bridge".to_owned(),
+        present,
+        required: true,
+        detail,
+    }
 }
 
 fn executable_check(name: &str, required: bool) -> Check {

@@ -174,7 +174,7 @@ realtime_endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 realtime_model = "qwen3-asr-flash-realtime"
 
 [inject]
-prefer = "wtype"                       # wtype | clipboard
+prefer = "wtype"                       # wtype | clipboard | fcitx5
 wtype_command = "wtype"
 wl_copy_command = "wl-copy"
 paste_command = "-M ctrl -k v"         # 传给 paste_tool 的粘贴按键参数
@@ -200,7 +200,18 @@ save_audio = true                      # 每次成功会话保留一份 WAV
 
 旧值 `cloud-vad`、`sensevoice-vad`、`final_backend` 会被拒绝。Voiceless 不静默改写。
 
-`[inject]` 决定最终文本如何进入焦点窗口。`prefer = "wtype"` 通过 Wayland 虚拟键盘逐键输入；`prefer = "clipboard"` 先用 `wl-copy` 复制文本，再合成 `paste_command` 按键粘贴——粘贴按原样投递文本，因此输入法（Fcitx5）会重解释按键的应用（微信等 XWayland IME 应用）也能收到干净文本。无根 Xwayland（xwayland-satellite）不会把 Wayland 选区转发给 X11 客户端，因此设置 `x11_clipboard_command`（例如 `xsel --clipboard --input`）后，剪贴板方式会尽力把文本镜像到 X11 剪贴板。`clipboard_fallback = true` 时，wtype 注入失败会自动改用剪贴板重试。
+`[inject]` 决定最终文本如何进入焦点窗口。`prefer = "wtype"` 通过 Wayland 虚拟键盘逐键输入；`prefer = "clipboard"` 先用 `wl-copy` 复制文本，再合成 `paste_command` 按键粘贴——粘贴按原样投递文本，因此输入法（Fcitx5）会重解释按键的应用（微信等 XWayland IME 应用）也能收到干净文本。无根 Xwayland（xwayland-satellite）不会把 Wayland 选区转发给 X11 客户端，因此设置 `x11_clipboard_command`（例如 `xsel --clipboard --input`）后，剪贴板方式会尽力把文本镜像到 X11 剪贴板。`prefer = "fcitx5"` 通过 Voiceless 的 Fcitx5 桥接模块提交文本，和用输入法打字上屏走同一条路：不模拟按键、不动剪贴板，凡是 Fcitx5 能输入的窗口（Wayland 与 XWayland/XIM 应用）都能收到。`clipboard_fallback = true` 时，wtype 或 fcitx5 注入失败会自动改用剪贴板重试。
+
+### Fcitx5 桥接模块
+
+`fcitx5-bridge/` 是一个很小的 Fcitx5 模块。它在 Fcitx5 自己的总线名（`org.fcitx.Fcitx5`）的 `/voiceless` 上暴露 `dev.voiceless.Fcitx5Bridge1`，提供两个方法：`CommitString(s) -> (b, s)` 把文本提交到当前焦点输入上下文；`Status() -> (b, s)` 只报告状态、无副作用。请通过 overlay 用你正在运行的 Fcitx5 构建它，并加入 Fcitx5 addons：
+
+```nix
+nixpkgs.overlays = [ voiceless.overlays.default ];
+i18n.inputMethod.fcitx5.addons = [ pkgs.voiceless-fcitx5-bridge ];
+```
+
+然后重启 Fcitx5，设置 `prefer = "fcitx5"`，运行 `voiceless doctor`；其中 `fcitx5 bridge` 一项会调用 `Status`。
 
 ## 模式与注入
 
@@ -290,6 +301,7 @@ just test    # nix develop -c cargo test --all-targets
 just lint    # cargo fmt --check + clippy -D warnings
 just check   # lint + test + nix flake check -L
 just run …   # nix run . -- …
+just bridge-test  # 在私有 D-Bus 会话里跑 Fcitx5 桥接端到端测试
 ```
 
 真实质量门禁为 `benchmark asr`（CER ≤ 0.02）；真实延迟门禁为 `benchmark latency`（stop→inject p99 ≤ 1.0 s）。两者见 `docs/low-latency-rust-plan.md` 与 OpenSpec change。缺真实凭据或 Wayland 注入环境时报告 skip，不报告通过。

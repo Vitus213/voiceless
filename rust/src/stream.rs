@@ -580,15 +580,17 @@ impl TextInjector for ConfiguredInjector {
 
 /// Inject `text` following the `[inject]` configuration: `prefer` selects
 /// the primary method and `clipboard_fallback` retries through the
-/// clipboard when the primary wtype path fails. The clipboard method copies
-/// the text with `wl-copy` and synthesizes a paste keypress, so apps whose
-/// input method (Fcitx5) reinterprets typed keys receive the text verbatim.
+/// clipboard when the primary wtype or fcitx5 path fails. The clipboard
+/// method copies the text with `wl-copy` and synthesizes a paste keypress,
+/// so apps whose input method (Fcitx5) reinterprets typed keys receive the
+/// text verbatim. The fcitx5 method commits through the Voiceless Fcitx5
+/// bridge module, the same path as text typed with the input method.
 pub async fn inject_text(config: &InjectConfig, text: &str) -> InjectionResult {
     let prefer_clipboard = config.prefer == "clipboard";
-    let result = if prefer_clipboard {
-        inject_via_clipboard(config, text).await
-    } else {
-        inject_via_wtype_with(config, text).await
+    let result = match config.prefer.as_str() {
+        "clipboard" => inject_via_clipboard(config, text).await,
+        "fcitx5" => inject_via_fcitx5(text).await,
+        _ => inject_via_wtype_with(config, text).await,
     };
     if !result.ok && config.clipboard_fallback && !prefer_clipboard {
         let fallback = inject_via_clipboard(config, text).await;
@@ -597,6 +599,41 @@ pub async fn inject_text(config: &InjectConfig, text: &str) -> InjectionResult {
         }
     }
     result
+}
+
+pub const FCITX5_BRIDGE_SERVICE: &str = "org.fcitx.Fcitx5";
+pub const FCITX5_BRIDGE_PATH: &str = "/voiceless";
+pub const FCITX5_BRIDGE_INTERFACE: &str = "dev.voiceless.Fcitx5Bridge1";
+
+/// Commit text into the focused input field through the Fcitx5 bridge
+/// module (`fcitx5-bridge/`). Fails when Fcitx5 or the module is not
+/// running, or when no input context has focus.
+async fn inject_via_fcitx5(text: &str) -> InjectionResult {
+    match timeout(
+        Duration::from_secs(2),
+        call_fcitx5_bridge("CommitString", text),
+    )
+    .await
+    {
+        Ok(Ok((true, _))) => method_result(true, "fcitx5", ""),
+        Ok(Ok((false, reason))) => method_result(false, "fcitx5", &reason),
+        Ok(Err(error)) => method_result(false, "fcitx5", &error.to_string()),
+        Err(_) => method_result(false, "fcitx5", "fcitx5 bridge timed out"),
+    }
+}
+
+async fn call_fcitx5_bridge(method: &str, text: &str) -> zbus::Result<(bool, String)> {
+    let connection = zbus::Connection::session().await?;
+    let reply = connection
+        .call_method(
+            Some(FCITX5_BRIDGE_SERVICE),
+            FCITX5_BRIDGE_PATH,
+            Some(FCITX5_BRIDGE_INTERFACE),
+            method,
+            &(text,),
+        )
+        .await?;
+    reply.body().deserialize()
 }
 
 /// Inject text through `wtype` with default settings. Newlines are typed as

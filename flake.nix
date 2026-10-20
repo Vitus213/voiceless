@@ -100,6 +100,7 @@
           };
         voiceless = mkVoiceless stack;
         voicelessCpu = mkVoiceless stackCpu;
+        fcitx5Bridge = pkgs.callPackage ./nix/fcitx5-bridge.nix { };
 
         mkShell =
           stack:
@@ -115,8 +116,13 @@
               stack.onnxruntime
               pkgs.wl-clipboard
               pkgs.wtype
+              pkgs.dbus
+              pkgs.systemd
             ];
 
+            # Used by scripts/fcitx5-bridge-test.sh.
+            VOICELESS_FCITX5 = pkgs.fcitx5;
+            VOICELESS_FCITX5_BRIDGE = fcitx5Bridge;
             SHERPA_ONNX_LIB_DIR = "${stack.sherpaRuntimeLib}/lib";
             LD_LIBRARY_PATH = "${stack.sherpaRuntimeLib}/lib";
           };
@@ -125,6 +131,7 @@
         packages.default = voiceless;
         packages.voiceless = voiceless;
         packages.voiceless-cpu = voicelessCpu;
+        packages.voiceless-fcitx5-bridge = fcitx5Bridge;
 
         apps.default = flake-utils.lib.mkApp { drv = voiceless; };
 
@@ -146,6 +153,9 @@
     // {
       overlays.default = final: prev: {
         voiceless = self.packages.${prev.system}.voiceless;
+        # Built against the consumer's nixpkgs so the module matches the
+        # running Fcitx5's C++ ABI.
+        voiceless-fcitx5-bridge = final.callPackage ./nix/fcitx5-bridge.nix { };
       };
 
       homeManagerModules.default = import ./nix/home-manager.nix self;
