@@ -161,7 +161,7 @@ Full key reference. All keys are optional; the values below are the defaults:
 
 ```toml
 [asr]
-streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming
+streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming | local-offline
 batch_backend = "cloud"                # cloud | local (SenseVoice)
 # local_model_dir / batch_model_dir: override the managed model locations
 
@@ -185,6 +185,14 @@ enable_ddc = false                     # semantic smoothing (drops filler words)
 enable_nonstream = false               # second-pass recognition of each sentence
 # end_window_size = 800                # ms of silence that closes a sentence
 hotwords = []                          # e.g. ["Voiceless", "NixOS"]
+
+[local]                                # local-offline: offline model on VAD segments
+model = "qwen3-asr-0.6b-int8"          # qwen3-asr-0.6b-int8 (punctuated) | sense-voice-int8 (fastest, no punctuation)
+provider = "cpu"                       # cpu | cuda (the int8 models gain little on a GPU)
+num_threads = 4
+partial_interval_ms = 800              # how often the open segment is re-decoded for the live partial
+max_segment_seconds = 15.0             # longest segment before a forced split (Qwen3-ASR holds ~25 s)
+hotwords = []                          # Qwen3-ASR only
 
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5
@@ -263,6 +271,9 @@ Audio URLs contain only the record id. The server reads the file path from the d
 | ID | Version and bytes | Pinned source and SRI SHA-256 |
 | --- | --- | --- |
 | `streaming-paraformer-bilingual-zh-en` | `asr-models-2024-03-10`; `1047319737` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2><br>`sha256-VGKh/OQmk96uVyrx6MRocSSxKqhf5h/00xaLtSgOIF8=` |
+| `qwen3-asr-0.6b-int8` | `asr-models-2026-03-25`; `878702423` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2><br>`sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=` |
+| `sense-voice-int8` | `asr-models-2025-09-09`; `165783878` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2><br>`sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=` |
+| `silero-vad` | `asr-models`; `643854` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx><br>`sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=` |
 
 The install process verifies the SRI hash and the byte count over HTTPS. It rejects archive members that are not in the allowlist. It writes a manifest with per-file hashes. It activates the model atomically with a `versions/<id>/<version>-<digest12>` directory and a `current` symlink. Voiceless verifies the model again before each session. It never uses a corrupted model. `voiceless model list --json` reports the license status in the `license_status` field. Verify the license independently before you redistribute the model.
 

@@ -18,6 +18,7 @@ pub mod mode_cmd;
 pub mod model_cmd;
 pub mod models;
 pub mod modes;
+pub mod offline_asr;
 pub mod processing;
 pub mod realtime;
 pub mod session;

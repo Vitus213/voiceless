@@ -78,6 +78,7 @@ pub async fn run_with_control(
         "cloud-realtime" => run_cloud(config, options, control).await,
         "doubao-realtime" => run_doubao(config, options, control).await,
         "local-streaming" => run_local(config, options, control).await,
+        "local-offline" => run_local_offline(config, options, control).await,
         value => Err(StreamError::UnsupportedBackend(value.to_owned())),
     }
 }
@@ -147,10 +148,12 @@ async fn run_local(
     let pipeline = build_pipeline(&config, &options)?;
     let model_dir = match config.asr.local_model_dir.clone() {
         Some(path) => path,
-        None => match resolve_managed_model(&options) {
-            Ok(path) => path,
-            Err(code) => return Ok(code),
-        },
+        None => {
+            match resolve_managed_model(&crate::models::streaming_paraformer_spec(), &options) {
+                Ok(path) => path,
+                Err(code) => return Ok(code),
+            }
+        }
     };
     let recognizer = match crate::local_asr::LocalStreamingRecognizer::new(&model_dir) {
         Ok(recognizer) => recognizer,
@@ -292,8 +295,10 @@ fn remove_audio(audio_path: Option<&str>, audio_dir: Option<&std::path::Path>) {
 
 /// Resolve the managed streaming model freshly through the pointer and
 /// re-verify its payload; a corrupted install is never reused.
-fn resolve_managed_model(options: &StreamOptions) -> Result<std::path::PathBuf, i32> {
-    let spec = crate::models::streaming_paraformer_spec();
+fn resolve_managed_model(
+    spec: &crate::models::ModelSpec,
+    options: &StreamOptions,
+) -> Result<std::path::PathBuf, i32> {
     let manager = crate::models::ModelManager::new(
         &crate::models::default_data_dir(),
         &crate::models::default_cache_dir(),
@@ -303,7 +308,7 @@ fn resolve_managed_model(options: &StreamOptions) -> Result<std::path::PathBuf, 
         Ok(Some(_payload)) => {}
         Ok(None) => {
             let _ = sink.emit(OutputEvent::Error(format!(
-                "local-streaming has no installed model; run `voiceless model install {}`",
+                "model {0} is not installed; run `voiceless model install {0}`",
                 spec.id
             )));
             let _ = sink.emit(OutputEvent::Completed);
@@ -315,11 +320,12 @@ fn resolve_managed_model(options: &StreamOptions) -> Result<std::path::PathBuf, 
             return Err(1);
         }
     };
-    match manager.check(&spec) {
+    match manager.check(spec) {
         Ok((path, report)) if report.ok() => Ok(path),
         Ok((_, report)) => {
             let _ = sink.emit(OutputEvent::Error(format!(
-                "local-streaming model is corrupted: {} missing, {} corrupt, {} extra; reinstall it",
+                "model {} is corrupted: {} missing, {} corrupt, {} extra; reinstall it",
+                spec.id,
                 report.missing.len(),
                 report.corrupt.len(),
                 report.extra.len()
@@ -434,6 +440,82 @@ impl BackendTransport for CloudTransport {
 
     async fn cancel(&mut self) -> io::Result<()> {
         self.0.cancel().await
+    }
+}
+
+async fn run_local_offline(
+    config: AppConfig,
+    options: StreamOptions,
+    control: tokio::sync::mpsc::Receiver<ControlCommand>,
+) -> Result<i32, StreamError> {
+    let pipeline = build_pipeline(&config, &options)?;
+    let Some(spec) = crate::models::catalog()
+        .into_iter()
+        .find(|spec| spec.id == config.local.model)
+    else {
+        return Err(StreamError::UnsupportedBackend(config.local.model.clone()));
+    };
+    let model_dir = match resolve_managed_model(&spec, &options) {
+        Ok(path) => path,
+        Err(code) => return Ok(code),
+    };
+    let vad_dir = match resolve_managed_model(&crate::models::silero_vad_spec(), &options) {
+        Ok(path) => path,
+        Err(code) => return Ok(code),
+    };
+    let local = config.local.clone();
+    // Model load happens on the worker so capture starts at once.
+    let transport = crate::offline_asr::OfflineTransport::start(move || {
+        use crate::offline_asr::{create_recognizer, create_vad, OfflineFamily, OfflineOptions};
+        let family = OfflineFamily::for_model(&local.model)?;
+        let options = OfflineOptions {
+            provider: local.provider.clone(),
+            num_threads: local.num_threads,
+            hotwords: local.hotwords.clone(),
+        };
+        let recognizer = create_recognizer(family, &model_dir, &options)?;
+        let vad = create_vad(&vad_dir.join("silero_vad.onnx"), local.max_segment_seconds)?;
+        Ok(crate::offline_asr::SegmentedRecognizer::new(
+            recognizer,
+            vad,
+            Duration::from_millis(local.partial_interval_ms),
+        ))
+    });
+    let mut plan = session_plan(&config, &options, "local-offline", &pipeline.mode_id);
+    // The final waits for the last segment's decode, and for the model load
+    // when the utterance is shorter than it.
+    plan.finish_timeout = Duration::from_secs(20);
+    let code = crate::coordinator::run_session(
+        plan,
+        PwCapture::default(),
+        OfflineTransportAdapter(transport),
+        pipeline.processor,
+        ConfiguredInjector::new(config.inject.clone()),
+        pipeline.history,
+        control,
+        &mut StdoutSink::new(options.json),
+    )
+    .await;
+    Ok(code)
+}
+
+struct OfflineTransportAdapter(crate::offline_asr::OfflineTransport);
+
+impl BackendTransport for OfflineTransportAdapter {
+    async fn send_audio(&self, pcm: &[u8]) -> io::Result<()> {
+        self.0.send_audio(pcm)
+    }
+
+    async fn next_event(&self) -> io::Result<RealtimeEvent> {
+        self.0.next_event().await
+    }
+
+    async fn finish(&mut self) -> io::Result<()> {
+        self.0.finish()
+    }
+
+    async fn cancel(&mut self) -> io::Result<()> {
+        self.0.cancel()
     }
 }
 

@@ -161,7 +161,7 @@ voiceless stream --backend local-streaming
 
 ```toml
 [asr]
-streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming
+streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming | local-offline
 batch_backend = "cloud"                # cloud | local（SenseVoice）
 # local_model_dir / batch_model_dir：覆盖托管模型位置
 
@@ -185,6 +185,14 @@ enable_ddc = false                     # 语义顺滑（去掉语气词）
 enable_nonstream = false               # 每句二遍识别，确认文本更准
 # end_window_size = 800                # 静音多少毫秒判定一句结束
 hotwords = []                          # 例如 ["Voiceless", "NixOS"]
+
+[local]                                # local-offline：离线模型 + VAD 分段
+model = "qwen3-asr-0.6b-int8"          # qwen3-asr-0.6b-int8（带标点）| sense-voice-int8（最快，无标点）
+provider = "cpu"                       # cpu | cuda（int8 模型上 GPU 收益很小）
+num_threads = 4
+partial_interval_ms = 800              # 多久重新识别一次当前句，用于实时显示
+max_segment_seconds = 15.0             # 单段最长秒数，超过强制切分（Qwen3-ASR 上限约 25 秒）
+hotwords = []                          # 仅 Qwen3-ASR 支持
 
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5
@@ -263,6 +271,9 @@ voiceless history serve --port 9000
 | ID | 版本与字节数 | 固定源与 SRI SHA-256 |
 | --- | --- | --- |
 | `streaming-paraformer-bilingual-zh-en` | `asr-models-2024-03-10`；`1047319737` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2><br>`sha256-VGKh/OQmk96uVyrx6MRocSSxKqhf5h/00xaLtSgOIF8=` |
+| `qwen3-asr-0.6b-int8` | `asr-models-2026-03-25`; `878702423` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2><br>`sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=` |
+| `sense-voice-int8` | `asr-models-2025-09-09`; `165783878` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2><br>`sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=` |
+| `silero-vad` | `asr-models`; `643854` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx><br>`sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=` |
 
 安装过程经 HTTPS 校验 SRI 哈希与字节数；拒绝白名单外的归档成员；写入按文件哈希的 manifest；用 `versions/<id>/<version>-<digest12>` 目录与 `current` 符号链接原子激活。Voiceless 每次会话前重新校验模型，不使用损坏模型。`voiceless model list --json` 在 `license_status` 字段报告许可证状态；再分发前请独立核验许可证。
 

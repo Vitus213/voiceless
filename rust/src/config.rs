@@ -34,6 +34,7 @@ pub struct AppConfig {
     pub asr: AsrConfig,
     pub cloud: CloudConfig,
     pub doubao: DoubaoConfig,
+    pub local: LocalConfig,
     pub inject: InjectConfig,
     pub processing: ProcessingConfig,
     pub history: HistoryConfig,
@@ -84,6 +85,35 @@ impl Default for CloudConfig {
             timeout_seconds: 60.0,
             realtime_endpoint: DEFAULT_REALTIME_ENDPOINT.to_owned(),
             realtime_model: DEFAULT_REALTIME_MODEL.to_owned(),
+        }
+    }
+}
+
+/// `local-offline` backend: an offline catalog model run on VAD segments.
+/// The open segment is re-decoded every `partial_interval_ms` for the live
+/// partial; `max_segment_seconds` caps a segment (Qwen3-ASR holds ~25 s).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalConfig {
+    pub model: String,
+    /// ONNX Runtime execution provider: cpu | cuda.
+    pub provider: String,
+    pub num_threads: i32,
+    pub partial_interval_ms: u64,
+    pub max_segment_seconds: f32,
+    /// Biasing words (Qwen3-ASR only).
+    pub hotwords: Vec<String>,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            model: "qwen3-asr-0.6b-int8".to_owned(),
+            provider: "cpu".to_owned(),
+            num_threads: 4,
+            partial_interval_ms: 800,
+            max_segment_seconds: 15.0,
+            hotwords: Vec::new(),
         }
     }
 }
@@ -262,10 +292,10 @@ impl AppConfig {
 
     fn validate(self) -> Result<Self, ConfigError> {
         match self.asr.streaming_backend.as_str() {
-            "cloud-realtime" | "doubao-realtime" | "local-streaming" => {}
+            "cloud-realtime" | "doubao-realtime" | "local-streaming" | "local-offline" => {}
             value => {
                 return Err(ConfigError::Invalid(format!(
-                    "asr.streaming_backend={value:?}; expected cloud-realtime, doubao-realtime or local-streaming"
+                    "asr.streaming_backend={value:?}; expected cloud-realtime, doubao-realtime, local-streaming or local-offline"
                 )))
             }
         }
@@ -282,6 +312,23 @@ impl AppConfig {
                     "inject.prefer={value:?}; expected wtype, clipboard or fcitx5"
                 )))
             }
+        }
+        if crate::offline_asr::OfflineFamily::for_model(&self.local.model).is_err() {
+            return Err(ConfigError::Invalid(format!(
+                "local.model={:?}; expected qwen3-asr-0.6b-int8 or sense-voice-int8",
+                self.local.model
+            )));
+        }
+        if !matches!(self.local.provider.as_str(), "cpu" | "cuda") {
+            return Err(ConfigError::Invalid(format!(
+                "local.provider={:?}; expected cpu or cuda",
+                self.local.provider
+            )));
+        }
+        if !(1.0..=25.0).contains(&self.local.max_segment_seconds) {
+            return Err(ConfigError::Invalid(
+                "local.max_segment_seconds must be between 1 and 25".to_owned(),
+            ));
         }
         if !self.doubao.endpoint.starts_with("wss://") {
             return Err(ConfigError::Invalid(

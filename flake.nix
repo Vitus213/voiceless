@@ -44,12 +44,28 @@
                 inherit onnxruntime;
               }
             );
+            withCuda = cuda && system == "x86_64-linux";
+            nvrtc = pkgs.cudaPackages_12.cuda_nvrtc;
             sherpaRuntimeLib = pkgs.symlinkJoin {
               name = "voiceless-sherpa-runtime-libs";
               paths = [
                 sherpaOnnx
                 onnxruntime
               ];
+              # nixpkgs' CUDA provider calls NVRTC without linking it, so
+              # loading it fails with "undefined symbol: nvrtcGetProgramLogSize".
+              # Ship a copy that links libnvrtc itself.
+              postBuild = pkgs.lib.optionalString withCuda ''
+                provider=$out/lib/libonnxruntime_providers_cuda.so
+                target=$(readlink -f "$provider")
+                rm "$provider"
+                cp "$target" "$provider"
+                chmod u+w "$provider"
+                ${pkgs.patchelf}/bin/patchelf \
+                  --add-needed libnvrtc.so.12 \
+                  --add-rpath ${pkgs.lib.getLib nvrtc}/lib \
+                  "$provider"
+              '';
             };
           in
           {
@@ -88,7 +104,8 @@
                     pkgs.wl-clipboard
                   ]
                 } \
-                --prefix LD_LIBRARY_PATH : ${stack.sherpaRuntimeLib}/lib
+                --prefix LD_LIBRARY_PATH : ${stack.sherpaRuntimeLib}/lib \
+                --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib
             '';
             meta = {
               description = "Fast realtime voice input for Linux";
@@ -124,7 +141,7 @@
             VOICELESS_FCITX5 = pkgs.fcitx5;
             VOICELESS_FCITX5_BRIDGE = fcitx5Bridge;
             SHERPA_ONNX_LIB_DIR = "${stack.sherpaRuntimeLib}/lib";
-            LD_LIBRARY_PATH = "${stack.sherpaRuntimeLib}/lib";
+            LD_LIBRARY_PATH = "${stack.sherpaRuntimeLib}/lib:/run/opengl-driver/lib";
           };
       in
       {

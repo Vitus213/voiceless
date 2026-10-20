@@ -68,8 +68,134 @@ pub fn streaming_paraformer_spec() -> ModelSpec {
     }
 }
 
+fn names(members: &[&str]) -> Vec<String> {
+    members.iter().map(|member| (*member).to_owned()).collect()
+}
+
+const SHERPA_RELEASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+const UNVERIFIED_LICENSE: &str =
+    "上游模型页面未在归档内提供独立许可证文本；使用前需用户自行核验许可。";
+
+/// Qwen3-ASR 0.6B (int8): offline, punctuated zh/en/multilingual model
+/// driven through VAD segmentation by the `local-offline` backend.
+pub fn qwen3_asr_spec() -> ModelSpec {
+    ModelSpec {
+        id: "qwen3-asr-0.6b-int8".to_owned(),
+        version: "asr-models-2026-03-25".to_owned(),
+        url: format!("{SHERPA_RELEASE}/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2"),
+        sha256_sri: "sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=".to_owned(),
+        size_bytes: 878_702_423,
+        archive_type: ArchiveType::TarBz2,
+        top_level_directory: Some("sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25".to_owned()),
+        allowed_members: names(&[
+            "README.md",
+            "conv_frontend.onnx",
+            "decoder.int8.onnx",
+            "encoder.int8.onnx",
+            "test_wavs/README.md",
+            "test_wavs/ar1.wav",
+            "test_wavs/cantonese.wav",
+            "test_wavs/codeswitch.wav",
+            "test_wavs/de.wav",
+            "test_wavs/es1.wav",
+            "test_wavs/f1_noise.wav",
+            "test_wavs/fast1.wav",
+            "test_wavs/fr1.wav",
+            "test_wavs/ja1.wav",
+            "test_wavs/noise1-en.wav",
+            "test_wavs/noise2.wav",
+            "test_wavs/qiqiu1.wav",
+            "test_wavs/raokouling.wav",
+            "test_wavs/rap1.wav",
+            "test_wavs/ru1.wav",
+            "test_wavs/transcript.txt",
+            "tokenizer/merges.txt",
+            "tokenizer/tokenizer_config.json",
+            "tokenizer/vocab.json",
+        ]),
+        required_paths: names(&[
+            "conv_frontend.onnx",
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "tokenizer/vocab.json",
+            "tokenizer/merges.txt",
+            "tokenizer/tokenizer_config.json",
+        ]),
+        license_status: UNVERIFIED_LICENSE.to_owned(),
+    }
+}
+
+/// SenseVoice small (int8): very fast offline zh/en/ja/ko/yue model
+/// without punctuation.
+pub fn sense_voice_spec() -> ModelSpec {
+    ModelSpec {
+        id: "sense-voice-int8".to_owned(),
+        version: "asr-models-2025-09-09".to_owned(),
+        url: format!(
+            "{SHERPA_RELEASE}/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2"
+        ),
+        sha256_sri: "sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=".to_owned(),
+        size_bytes: 165_783_878,
+        archive_type: ArchiveType::TarBz2,
+        top_level_directory: Some(
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09".to_owned(),
+        ),
+        allowed_members: names(&[
+            "README.md",
+            "model.int8.onnx",
+            "tokens.txt",
+            "test_wavs/en.wav",
+            "test_wavs/ja.wav",
+            "test_wavs/ko.wav",
+            "test_wavs/zh.wav",
+            "test_wavs/yue.wav",
+            "test_wavs/yue-0.wav",
+            "test_wavs/yue-1.wav",
+            "test_wavs/yue-2.wav",
+            "test_wavs/yue-3.wav",
+            "test_wavs/yue-4.wav",
+            "test_wavs/yue-5.wav",
+            "test_wavs/yue-6.wav",
+            "test_wavs/yue-7.wav",
+            "test_wavs/yue-8.wav",
+            "test_wavs/yue-9.wav",
+            "test_wavs/yue-10.wav",
+            "test_wavs/yue-11.wav",
+            "test_wavs/yue-12.wav",
+            "test_wavs/yue-13.wav",
+            "test_wavs/yue-14.wav",
+            "test_wavs/yue-15.wav",
+            "test_wavs/yue-16.wav",
+            "test_wavs/yue-17.wav",
+        ]),
+        required_paths: names(&["model.int8.onnx", "tokens.txt"]),
+        license_status: UNVERIFIED_LICENSE.to_owned(),
+    }
+}
+
+/// Silero VAD: segments speech for the `local-offline` backend.
+pub fn silero_vad_spec() -> ModelSpec {
+    ModelSpec {
+        id: "silero-vad".to_owned(),
+        version: "asr-models".to_owned(),
+        url: format!("{SHERPA_RELEASE}/silero_vad.onnx"),
+        sha256_sri: "sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=".to_owned(),
+        size_bytes: 643_854,
+        archive_type: ArchiveType::File,
+        top_level_directory: None,
+        allowed_members: names(&["silero_vad.onnx"]),
+        required_paths: names(&["silero_vad.onnx"]),
+        license_status: "MIT (snakers4/silero-vad).".to_owned(),
+    }
+}
+
 pub fn catalog() -> Vec<ModelSpec> {
-    vec![streaming_paraformer_spec()]
+    vec![
+        streaming_paraformer_spec(),
+        qwen3_asr_spec(),
+        sense_voice_spec(),
+        silero_vad_spec(),
+    ]
 }
 
 #[derive(Debug, thiserror::Error)]
