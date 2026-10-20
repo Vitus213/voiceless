@@ -35,6 +35,7 @@ pub struct AppConfig {
     pub cloud: CloudConfig,
     pub doubao: DoubaoConfig,
     pub local: LocalConfig,
+    pub text: TextConfig,
     pub inject: InjectConfig,
     pub processing: ProcessingConfig,
     pub history: HistoryConfig,
@@ -94,6 +95,52 @@ impl Default for CloudConfig {
     }
 }
 
+/// Cleanup applied to every final transcript before mode processing and
+/// injection. `hotwords` both bias the recognizer (local models, Doubao)
+/// and correct sound-alike spans phonetically (Chinese words of two or
+/// more characters, pinyin similarity ≥ `hotword_threshold`).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TextConfig {
+    /// Drop "呃" everywhere and a standalone "嗯", fixing punctuation.
+    pub remove_fillers: bool,
+    /// Drop one trailing "。" or "." (chat boxes).
+    pub strip_trailing_period: bool,
+    pub hotwords: Vec<String>,
+    pub hotword_threshold: f32,
+    /// Exact replacements, applied in order.
+    pub replacements: Vec<TextReplacement>,
+    /// Regex replacements (`$1` captures), applied in order after them.
+    pub rules: Vec<TextRule>,
+}
+
+impl Default for TextConfig {
+    fn default() -> Self {
+        Self {
+            remove_fillers: true,
+            strip_trailing_period: false,
+            hotwords: Vec::new(),
+            hotword_threshold: 0.9,
+            replacements: Vec::new(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextReplacement {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextRule {
+    pub pattern: String,
+    pub replace: String,
+}
+
 /// `local-offline` backend: an offline catalog model run on VAD segments.
 /// The open segment is re-decoded every `partial_interval_ms` for the live
 /// partial; `max_segment_seconds` caps a segment (the Sherpa Qwen3-ASR
@@ -125,6 +172,30 @@ impl Default for LocalConfig {
             partial_interval_ms: 500,
             max_segment_seconds: None,
             hotwords: Vec::new(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// `[local]` with `[text].hotwords` merged into its recognizer hotwords.
+    pub fn local_engine(&self) -> LocalConfig {
+        let mut local = self.local.clone();
+        merge_hotwords(&mut local.hotwords, &self.text.hotwords);
+        local
+    }
+
+    /// `[doubao]` with `[text].hotwords` merged into its hotwords.
+    pub fn doubao_engine(&self) -> DoubaoConfig {
+        let mut doubao = self.doubao.clone();
+        merge_hotwords(&mut doubao.hotwords, &self.text.hotwords);
+        doubao
+    }
+}
+
+fn merge_hotwords(target: &mut Vec<String>, extra: &[String]) {
+    for word in extra {
+        if !target.contains(word) {
+            target.push(word.clone());
         }
     }
 }
@@ -388,6 +459,12 @@ impl AppConfig {
                 self.local.model
             )));
         }
+        if !(0.5..=1.0).contains(&self.text.hotword_threshold) {
+            return Err(ConfigError::Invalid(
+                "text.hotword_threshold must be between 0.5 and 1.0".to_owned(),
+            ));
+        }
+        crate::text::TextCleaner::new(&self.text).map_err(ConfigError::Invalid)?;
         if !self.doubao.endpoint.starts_with("wss://") {
             return Err(ConfigError::Invalid(
                 "doubao.endpoint must use wss://".to_owned(),

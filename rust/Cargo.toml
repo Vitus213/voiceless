@@ -20,6 +20,8 @@ cuda = ["transcribe", "transcribe-cpp/cuda"]
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1"
+pinyin = { version = "0.10", default-features = false, features = ["plain"] }
+regex = "1"
 futures-util = "0.3"
 libc = "0.2"
 parking_lot = "0.12"

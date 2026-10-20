@@ -198,6 +198,18 @@ partial_interval_ms = 500              # 多久重新识别一次当前句，用
 max_segment_seconds = 30.0             # 单段最长秒数，超过强制切分（GGUF ≤ 60，Sherpa ≤ 25）
 hotwords = []                          # 仅 Qwen3-ASR 支持
 
+[text]                                 # 每次最终识别结果的清理，所有模式都生效
+remove_fillers = true                  # 删除所有“呃”和单独成句的“嗯”，并修正标点
+strip_trailing_period = false          # 去掉末尾一个“。”/“.”（适合聊天框）
+hotwords = []                          # 既用于识别时的热词偏置，也按拼音纠正读音相近的片段（中文 ≥ 2 字）
+hotword_threshold = 0.9                # 1.0 = 音节完全相同；zh/z、n/l、前后鼻音等混淆每个记 0.8
+# [[text.replacements]]                # 精确替换，按顺序
+# from = "receive test"
+# to = "resume text"
+# [[text.rules]]                       # 正则替换，按顺序，在精确替换之后
+# pattern = '(\d+)点(\d+)分'
+# replace = "$1:$2"
+
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5
 wtype_command = "wtype"

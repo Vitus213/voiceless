@@ -198,6 +198,18 @@ partial_interval_ms = 500              # how often the open segment is re-decode
 max_segment_seconds = 30.0             # longest segment before a forced split (≤ 60 GGUF, ≤ 25 Sherpa)
 hotwords = []                          # Qwen3-ASR only
 
+[text]                                 # cleanup of every final transcript, in every mode
+remove_fillers = true                  # drop "呃" everywhere and a standalone "嗯", fixing punctuation
+strip_trailing_period = false          # drop one trailing "。"/"." (chat boxes)
+hotwords = []                          # bias the recognizers AND fix sound-alike spans (pinyin match, Chinese ≥ 2 chars)
+hotword_threshold = 0.9                # 1.0 = identical syllables; zh/z, n/l, -ng/-n confusions score 0.8 each
+# [[text.replacements]]                # exact, in order
+# from = "receive test"
+# to = "resume text"
+# [[text.rules]]                       # regex, in order, after replacements
+# pattern = '(\d+)点(\d+)分'
+# replace = "$1:$2"
+
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5
 wtype_command = "wtype"

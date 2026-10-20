@@ -28,3 +28,4 @@ pub mod processing;
 pub mod realtime;
 pub mod session;
 pub mod stream;
+pub mod text;

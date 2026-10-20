@@ -204,7 +204,7 @@ async fn open_transport(
             if !config.doubao.has_credentials() {
                 return Err(StreamError::MissingDoubaoCredentials.into());
             }
-            let session = crate::doubao::DoubaoSession::connect(&config.doubao)
+            let session = crate::doubao::DoubaoSession::connect(&config.doubao_engine())
                 .await
                 .map_err(StreamError::from)?;
             Ok(AnyTransport::Doubao(DoubaoTransport(session)))
@@ -228,7 +228,7 @@ fn open_local_offline(
     config: &AppConfig,
     env: &SessionEnv,
 ) -> Result<OfflineTransportAdapter, OpenError> {
-    let local = config.local.clone();
+    let local = config.local_engine();
     // A warm engine was verified at daemon start: skip the per-session hash
     // check of ~1-2 GB of model files, which would delay capture.
     let warm = env
@@ -349,7 +349,12 @@ fn build_pipeline(config: &AppConfig, options: &StreamOptions) -> Result<Pipelin
 
     Ok(Pipeline {
         mode_id: mode_id.clone(),
-        processor: PipelineProcessor { prompts, chat },
+        processor: PipelineProcessor {
+            prompts,
+            chat,
+            cleaner: crate::text::TextCleaner::new(&config.text)
+                .map_err(|error| StreamError::Config(ConfigError::Invalid(error)))?,
+        },
         history: SqliteHistory {
             store,
             audio_dir: audio_dir(config),
@@ -370,9 +375,14 @@ fn modes_path() -> std::path::PathBuf {
 struct PipelineProcessor {
     prompts: Vec<(String, String)>,
     chat: Option<crate::processing::ChatProcessor<crate::processing::UreqPoster>>,
+    cleaner: crate::text::TextCleaner,
 }
 
 impl TextProcessor for PipelineProcessor {
+    fn cleanup(&mut self, text: &str) -> String {
+        self.cleaner.clean(text)
+    }
+
     async fn process(&mut self, mode_id: &str, text: &str) -> Result<String, String> {
         let prompt = self
             .prompts

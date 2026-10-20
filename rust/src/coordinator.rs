@@ -115,6 +115,12 @@ pub trait TextInjector {
 /// modes send the authoritative transcript through it.
 pub trait TextProcessor {
     async fn process(&mut self, mode_id: &str, text: &str) -> Result<String, String>;
+
+    /// Rule-based cleanup of every final transcript (fillers, hotwords,
+    /// replacements), in every mode and before `process`.
+    fn cleanup(&mut self, text: &str) -> String {
+        text.to_owned()
+    }
 }
 
 /// History boundary. Only successful sessions with authoritative text are
@@ -382,16 +388,20 @@ where
 
     match session.take_injection_text() {
         Some(raw_text) => {
+            let cleaned = processor.cleanup(&raw_text);
             let (final_text, processed_text) = if plan.mode_id == "quick" {
-                (raw_text.clone(), None)
+                (
+                    cleaned.clone(),
+                    (cleaned != raw_text).then(|| cleaned.clone()),
+                )
             } else {
-                match processor.process(&plan.mode_id, &raw_text).await {
+                match processor.process(&plan.mode_id, &cleaned).await {
                     Ok(processed) => (processed.clone(), Some(processed)),
                     Err(error) => {
                         let _ = sink.emit(OutputEvent::Warning(format!(
                             "processing failed, keeping recognized text: {error}"
                         )));
-                        (raw_text.clone(), None)
+                        (cleaned.clone(), None)
                     }
                 }
             };

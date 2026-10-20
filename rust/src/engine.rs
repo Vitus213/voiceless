@@ -24,7 +24,7 @@ impl WarmEngine {
     pub fn load(config: &AppConfig) -> Result<Option<Self>, String> {
         match config.asr.streaming_backend.as_str() {
             "local-offline" => {
-                let local = config.local.clone();
+                let local = config.local_engine();
                 let model_dir = crate::models::installed_model_dir(&local.model)?;
                 let vad_model =
                     crate::models::installed_model_dir("silero-vad")?.join("silero_vad.onnx");
