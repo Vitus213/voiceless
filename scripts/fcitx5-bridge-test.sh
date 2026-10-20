@@ -25,4 +25,5 @@ for _ in $(seq 50); do
 done
 
 cd "$(dirname "$0")/../rust"
-VOICELESS_FCITX5_BRIDGE_TEST=1 cargo test --test fcitx5_bridge_live -- --nocapture
+# Tests share one Fcitx5 and its focus: run them one at a time.
+VOICELESS_FCITX5_BRIDGE_TEST=1 cargo test --test fcitx5_bridge_live -- --nocapture --test-threads=1

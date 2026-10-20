@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{AppConfig, LocalConfig};
-use crate::offline_asr::{create_recognizer, OfflineFamily, OfflineOptions};
+use crate::offline_asr::{create_decoder, Decoder, OfflineFamily, OfflineOptions};
 
 /// An engine kept loaded across sessions.
 pub enum WarmEngine {
     Offline {
         local: LocalConfig,
-        recognizer: Arc<sherpa_onnx::OfflineRecognizer>,
+        recognizer: Arc<dyn Decoder>,
         /// Verified once at load; sessions skip the per-session hash check.
         vad_model: PathBuf,
     },
@@ -30,11 +30,11 @@ impl WarmEngine {
                     crate::models::installed_model_dir("silero-vad")?.join("silero_vad.onnx");
                 let family =
                     OfflineFamily::for_model(&local.model).map_err(|error| error.to_string())?;
-                let recognizer = create_recognizer(family, &model_dir, &offline_options(&local))
+                let recognizer = create_decoder(family, &model_dir, &offline_options(&local))
                     .map_err(|error| error.to_string())?;
                 Ok(Some(Self::Offline {
                     local,
-                    recognizer: Arc::new(recognizer),
+                    recognizer,
                     vad_model,
                 }))
             }
@@ -44,17 +44,14 @@ impl WarmEngine {
 
     /// The warm offline recognizer and VAD model path, when the recognizer
     /// was built for the same model, device and hotwords as `local`.
-    pub fn offline_for(
-        &self,
-        local: &LocalConfig,
-    ) -> Option<(Arc<sherpa_onnx::OfflineRecognizer>, PathBuf)> {
+    pub fn offline_for(&self, local: &LocalConfig) -> Option<(Arc<dyn Decoder>, PathBuf)> {
         match self {
             Self::Offline {
                 local: loaded,
                 recognizer,
                 vad_model,
             } if loaded.model == local.model
-                && loaded.provider == local.provider
+                && loaded.device() == local.device()
                 && loaded.num_threads == local.num_threads
                 && loaded.hotwords == local.hotwords =>
             {
@@ -66,14 +63,14 @@ impl WarmEngine {
 
     pub fn describe(&self) -> String {
         match self {
-            Self::Offline { local, .. } => format!("{} on {}", local.model, local.provider),
+            Self::Offline { local, .. } => format!("{} on {}", local.model, local.device()),
         }
     }
 }
 
 pub fn offline_options(local: &LocalConfig) -> OfflineOptions {
     OfflineOptions {
-        provider: local.provider.clone(),
+        provider: local.device(),
         num_threads: local.num_threads,
         hotwords: local.hotwords.clone(),
     }

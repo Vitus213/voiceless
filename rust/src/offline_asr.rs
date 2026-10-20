@@ -1,5 +1,6 @@
-//! Offline (non-streaming) Sherpa-ONNX models driven as a streaming
-//! backend. Silero VAD splits speech at pauses: every closed segment gets a
+//! Offline (non-streaming) models driven as a streaming backend: Sherpa-ONNX
+//! archives, or GGUF models on transcribe.cpp (CUDA) with the `transcribe`
+//! feature. Silero VAD splits speech at pauses: every closed segment gets a
 //! final decode (`Completed`), and the open segment is re-decoded every
 //! `partial_interval` for the live partial. Decoding runs on a dedicated
 //! worker thread, so a slow decode never stalls audio capture; queued audio
@@ -23,6 +24,21 @@ const SAMPLE_RATE: i32 = 16_000;
 const VAD_WINDOW: usize = 512;
 /// Audio kept before detected speech so the first syllable is not clipped.
 const PRE_ROLL_SAMPLES: usize = 10 * VAD_WINDOW;
+/// Confirmed text handed to context-aware decoders, in characters.
+const CONTEXT_CHARS: usize = 120;
+
+/// One offline decode of a speech segment. `context` is the tail of the
+/// text confirmed before this segment; decoders that support context
+/// conditioning use it to keep segments coherent, others ignore it.
+pub trait Decoder: Send + Sync {
+    fn decode(&self, samples: &[f32], context: &str) -> String;
+}
+
+impl Decoder for OfflineRecognizer {
+    fn decode(&self, samples: &[f32], _context: &str) -> String {
+        decode(self, samples)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum OfflineAsrError {
@@ -38,19 +54,26 @@ pub enum OfflineAsrError {
     VadUnavailable(PathBuf),
     #[error("no offline model family for model id: {0}")]
     UnknownFamily(String),
+    #[error("{0}")]
+    EngineUnavailable(String),
 }
 
-/// Model families with an offline Sherpa-ONNX recognizer.
+/// Offline model families: Sherpa-ONNX archives, or single-file GGUF
+/// models run by transcribe.cpp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineFamily {
     Qwen3Asr,
     SenseVoice,
+    Gguf,
 }
 
 impl OfflineFamily {
-    /// Family of a catalog model id (`qwen3-asr-0.6b-int8`, `sense-voice-int8`).
+    /// Family of a catalog model id (`qwen3-asr-1.7b-gguf`,
+    /// `qwen3-asr-0.6b-int8`, `sense-voice-int8`).
     pub fn for_model(id: &str) -> Result<Self, OfflineAsrError> {
-        if id.starts_with("qwen3-asr") {
+        if id.ends_with("-gguf") {
+            Ok(Self::Gguf)
+        } else if id.starts_with("qwen3-asr") {
             Ok(Self::Qwen3Asr)
         } else if id.starts_with("sense-voice") {
             Ok(Self::SenseVoice)
@@ -60,9 +83,30 @@ impl OfflineFamily {
     }
 }
 
+/// Build the decoder for a model directory: GGUF models through
+/// transcribe.cpp, everything else through Sherpa-ONNX.
+pub fn create_decoder(
+    family: OfflineFamily,
+    model_dir: &Path,
+    options: &OfflineOptions,
+) -> Result<Arc<dyn Decoder>, OfflineAsrError> {
+    match family {
+        #[cfg(feature = "transcribe")]
+        OfflineFamily::Gguf => Ok(Arc::new(crate::gguf_asr::GgufDecoder::load(
+            &model_dir.join(crate::gguf_asr::MODEL_FILE),
+            options,
+        )?)),
+        #[cfg(not(feature = "transcribe"))]
+        OfflineFamily::Gguf => Err(OfflineAsrError::EngineUnavailable(
+            "GGUF models need the transcribe.cpp engine: install the CUDA package (voiceless) instead of voiceless-cpu".to_owned(),
+        )),
+        family => Ok(Arc::new(create_recognizer(family, model_dir, options)?)),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OfflineOptions {
-    /// ONNX Runtime execution provider: `cuda` or `cpu`.
+    /// Execution device: `cuda` or `cpu`.
     pub provider: String,
     pub num_threads: i32,
     pub hotwords: Vec<String>,
@@ -98,6 +142,11 @@ pub fn create_recognizer(
             config.model_config.sense_voice.model = Some(file("model.int8.onnx")?);
             config.model_config.sense_voice.use_itn = true;
             config.model_config.tokens = Some(file("tokens.txt")?);
+        }
+        OfflineFamily::Gguf => {
+            return Err(OfflineAsrError::EngineUnavailable(
+                "GGUF models are not Sherpa-ONNX models".to_owned(),
+            ))
         }
     }
     config.model_config.provider = Some(options.provider.clone());
@@ -138,7 +187,7 @@ pub fn create_vad(
 
 /// VAD-segmented recognition state; synchronous, owned by the worker.
 pub struct SegmentedRecognizer {
-    recognizer: Arc<OfflineRecognizer>,
+    decoder: Arc<dyn Decoder>,
     vad: VoiceActivityDetector,
     partial_interval: Duration,
     pending: Vec<f32>,
@@ -150,14 +199,14 @@ pub struct SegmentedRecognizer {
 }
 
 impl SegmentedRecognizer {
-    /// `recognizer` may be shared: a daemon keeps one warm across sessions.
+    /// `decoder` may be shared: a daemon keeps one warm across sessions.
     pub fn new(
-        recognizer: impl Into<Arc<OfflineRecognizer>>,
+        decoder: Arc<dyn Decoder>,
         vad: VoiceActivityDetector,
         partial_interval: Duration,
     ) -> Self {
         Self {
-            recognizer: recognizer.into(),
+            decoder,
             vad,
             partial_interval,
             pending: Vec::new(),
@@ -201,7 +250,7 @@ impl SegmentedRecognizer {
             }
         }
         self.last_partial_at = Some(Instant::now());
-        let text = decode(&self.recognizer, &self.open_segment);
+        let text = self.decoder.decode(&self.open_segment, &self.context());
         if text.is_empty() || text == self.last_partial {
             return Vec::new();
         }
@@ -227,11 +276,18 @@ impl SegmentedRecognizer {
         events
     }
 
+    /// The last `CONTEXT_CHARS` characters of the confirmed transcript.
+    fn context(&self) -> String {
+        let confirmed = self.confirmed.concat();
+        let skip = confirmed.chars().count().saturating_sub(CONTEXT_CHARS);
+        confirmed.chars().skip(skip).collect()
+    }
+
     fn drain_segments(&mut self) -> Vec<RealtimeEvent> {
         let mut events = Vec::new();
         while let Some(segment) = self.vad.front() {
             self.vad.pop();
-            let text = decode(&self.recognizer, segment.samples());
+            let text = self.decoder.decode(segment.samples(), &self.context());
             self.open_segment.clear();
             self.speech_started = false;
             self.last_partial.clear();
@@ -259,6 +315,10 @@ pub struct OfflineTransport {
     commands: std_mpsc::Sender<Command>,
     events: tokio::sync::Mutex<mpsc::UnboundedReceiver<RealtimeEvent>>,
     finished: bool,
+    /// Joined on drop: the worker must release the decoder (GPU buffers)
+    /// before the process exits, or CUDA's own exit teardown races the free
+    /// and aborts.
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OfflineTransport {
@@ -269,7 +329,7 @@ impl OfflineTransport {
         let (command_tx, command_rx) = std_mpsc::channel::<Command>();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let _ = event_tx.send(RealtimeEvent::Ready);
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let mut recognizer = match load() {
                 Ok(recognizer) => recognizer,
                 Err(error) => {
@@ -309,6 +369,7 @@ impl OfflineTransport {
             commands: command_tx,
             events: tokio::sync::Mutex::new(event_rx),
             finished: false,
+            worker: Some(worker),
         }
     }
 
@@ -349,6 +410,17 @@ impl OfflineTransport {
         self.commands.send(command).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "offline worker closed")
         })
+    }
+}
+
+impl Drop for OfflineTransport {
+    fn drop(&mut self) {
+        // A finished worker has already returned; otherwise stop it. Either
+        // way wait, bounded by one decode.
+        let _ = self.commands.send(Command::Cancel);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 

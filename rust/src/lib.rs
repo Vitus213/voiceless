@@ -10,6 +10,9 @@ pub mod daemon;
 pub mod doctor;
 pub mod doubao;
 pub mod engine;
+pub mod fcitx5;
+#[cfg(feature = "transcribe")]
+pub mod gguf_asr;
 pub mod history;
 pub mod history_cmd;
 pub mod history_web;

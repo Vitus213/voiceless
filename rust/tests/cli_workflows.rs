@@ -1,11 +1,17 @@
 use std::process::Command;
 
+/// The binary under test with every XDG root inside a scratch home: the
+/// desktop session exports XDG_*_HOME, which would otherwise win over HOME
+/// and let tests touch the user's real data and config.
 fn voiceless() -> Command {
+    let home = std::env::temp_dir().join("voiceless-cli-tests-home");
     let mut command = Command::new(env!("CARGO_BIN_EXE_voiceless"));
-    command.env(
-        "HOME",
-        std::env::temp_dir().join("voiceless-cli-tests-home"),
-    );
+    command
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"));
     command
 }
 

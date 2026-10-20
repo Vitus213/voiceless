@@ -173,6 +173,45 @@ pub fn sense_voice_spec() -> ModelSpec {
     }
 }
 
+const HF: &str = "https://huggingface.co";
+
+/// Qwen3-ASR 1.7B (GGUF Q8_0) for the transcribe.cpp engine: the most
+/// accurate local model; needs the CUDA build to be fast.
+pub fn qwen3_asr_1_7b_gguf_spec() -> ModelSpec {
+    ModelSpec {
+        id: "qwen3-asr-1.7b-gguf".to_owned(),
+        version: "Q8_0".to_owned(),
+        url: format!(
+            "{HF}/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf"
+        ),
+        sha256_sri: "sha256-mg2BeS3+otXyeLimPes+puAhOc5CwjAfMuoZxPd1Jrc=".to_owned(),
+        size_bytes: 2_185_030_624,
+        archive_type: ArchiveType::File,
+        top_level_directory: None,
+        allowed_members: names(&["model.gguf"]),
+        required_paths: names(&["model.gguf"]),
+        license_status: "Apache-2.0 (Qwen3-ASR; GGUF conversion by handy-computer).".to_owned(),
+    }
+}
+
+/// Qwen3-ASR 0.6B (GGUF Q8_0): smaller and faster transcribe.cpp model.
+pub fn qwen3_asr_0_6b_gguf_spec() -> ModelSpec {
+    ModelSpec {
+        id: "qwen3-asr-0.6b-gguf".to_owned(),
+        version: "Q8_0".to_owned(),
+        url: format!(
+            "{HF}/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/main/Qwen3-ASR-0.6B-Q8_0.gguf"
+        ),
+        sha256_sri: "sha256-8IGy1eI71mnZLMMx1yKooGgZQ7jm80tImW/Vwxm1rNg=".to_owned(),
+        size_bytes: 850_423_456,
+        archive_type: ArchiveType::File,
+        top_level_directory: None,
+        allowed_members: names(&["model.gguf"]),
+        required_paths: names(&["model.gguf"]),
+        license_status: "Apache-2.0 (Qwen3-ASR; GGUF conversion by handy-computer).".to_owned(),
+    }
+}
+
 /// Silero VAD: segments speech for the `local-offline` backend.
 pub fn silero_vad_spec() -> ModelSpec {
     ModelSpec {
@@ -192,6 +231,8 @@ pub fn silero_vad_spec() -> ModelSpec {
 pub fn catalog() -> Vec<ModelSpec> {
     vec![
         streaming_paraformer_spec(),
+        qwen3_asr_1_7b_gguf_spec(),
+        qwen3_asr_0_6b_gguf_spec(),
         qwen3_asr_spec(),
         sense_voice_spec(),
         silero_vad_spec(),
@@ -230,7 +271,7 @@ impl Downloader for HttpDownloader {
             )));
         }
         let response = ureq::get(&spec.url)
-            .timeout(std::time::Duration::from_secs(600))
+            .timeout(std::time::Duration::from_secs(3_600))
             .call()
             .map_err(|error| ModelError::Download(error.to_string()))?;
         let mut file = fs::File::create(destination)?;

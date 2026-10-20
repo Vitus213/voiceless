@@ -164,6 +164,7 @@ Full key reference. All keys are optional; the values below are the defaults:
 ```toml
 [asr]
 streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming | local-offline
+# fallback_backend = "doubao-realtime" # used when the primary cannot open (model missing, no key, offline)
 batch_backend = "cloud"                # cloud | local (SenseVoice)
 # local_model_dir / batch_model_dir: override the managed model locations
 
@@ -189,11 +190,12 @@ enable_nonstream = false               # second-pass recognition of each sentenc
 hotwords = []                          # e.g. ["Voiceless", "NixOS"]
 
 [local]                                # local-offline: offline model on VAD segments
-model = "qwen3-asr-0.6b-int8"          # qwen3-asr-0.6b-int8 (punctuated) | sense-voice-int8 (fastest, no punctuation)
-provider = "cpu"                       # cpu | cuda (the int8 models gain little on a GPU)
-num_threads = 4
-partial_interval_ms = 800              # how often the open segment is re-decoded for the live partial
-max_segment_seconds = 15.0             # longest segment before a forced split (Qwen3-ASR holds ~25 s)
+model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf (GPU, CUDA package)
+                                       # qwen3-asr-0.6b-int8 | sense-voice-int8 (CPU, Sherpa-ONNX)
+provider = "cuda"                      # cuda | cpu
+num_threads = 4                        # Sherpa-ONNX models only
+partial_interval_ms = 500              # how often the open segment is re-decoded for the live partial
+max_segment_seconds = 30.0             # longest segment before a forced split (≤ 60 GGUF, ≤ 25 Sherpa)
 hotwords = []                          # Qwen3-ASR only
 
 [inject]
@@ -206,6 +208,7 @@ focus_command = ""                     # optional: raise the target window befor
 x11_clipboard_command = ""             # optional: mirror text to X11 clipboard (e.g. "xsel --clipboard --input"); the previous selection is restored after injection
 clipboard_fallback = true
 timeout_seconds = 10.0
+preedit = true                         # with prefer = "fcitx5": live transcript as underlined preedit in the field
 
 [processing]
 provider = "none"                      # none | openai-compatible | ollama
@@ -227,7 +230,7 @@ The old values `cloud-vad`, `sensevoice-vad` and `final_backend` are rejected. V
 
 ### Fcitx5 bridge
 
-`fcitx5-bridge/` is a small Fcitx5 module. It exposes `dev.voiceless.Fcitx5Bridge1` at `/voiceless` on Fcitx5's own bus name (`org.fcitx.Fcitx5`) with two methods: `CommitString(s) -> (b, s)` commits into the focused input context, and `Status() -> (b, s)` reports it without side effects. Build it against the Fcitx5 you run, through the overlay, and add it to the Fcitx5 addons:
+`fcitx5-bridge/` is a small Fcitx5 module. It exposes `dev.voiceless.Fcitx5Bridge1` at `/voiceless` on Fcitx5's own bus name (`org.fcitx.Fcitx5`): `CommitString(s) -> (b, s)` commits into the focused input context (replacing the bridge's preedit), `SetPreedit(s) -> (b, s)` shows underlined preedit there (inline in clients that render preedit, in the Fcitx5 panel otherwise), `ClearPreedit() -> (b, s)` removes it, and `Status() -> (b, s)` reports the focused context without side effects. With `inject.preedit = true` the live transcript follows your speech inside the field and the final text replaces it; one ordered D-Bus channel carries both, so a stale preview never lands after the commit. Build it against the Fcitx5 you run, through the overlay, and add it to the Fcitx5 addons:
 
 ```nix
 nixpkgs.overlays = [ voiceless.overlays.default ];
@@ -273,6 +276,8 @@ Audio URLs contain only the record id. The server reads the file path from the d
 | ID | Version and bytes | Pinned source and SRI SHA-256 |
 | --- | --- | --- |
 | `streaming-paraformer-bilingual-zh-en` | `asr-models-2024-03-10`; `1047319737` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2><br>`sha256-VGKh/OQmk96uVyrx6MRocSSxKqhf5h/00xaLtSgOIF8=` |
+| `qwen3-asr-1.7b-gguf` | `Q8_0`; `2185030624` | <https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf><br>`sha256-mg2BeS3+otXyeLimPes+puAhOc5CwjAfMuoZxPd1Jrc=` |
+| `qwen3-asr-0.6b-gguf` | `Q8_0`; `850423456` | <https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/main/Qwen3-ASR-0.6B-Q8_0.gguf><br>`sha256-8IGy1eI71mnZLMMx1yKooGgZQ7jm80tImW/Vwxm1rNg=` |
 | `qwen3-asr-0.6b-int8` | `asr-models-2026-03-25`; `878702423` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2><br>`sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=` |
 | `sense-voice-int8` | `asr-models-2025-09-09`; `165783878` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2><br>`sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=` |
 | `silero-vad` | `asr-models`; `643854` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx><br>`sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=` |

@@ -44,6 +44,10 @@ pub struct AppConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AsrConfig {
     pub streaming_backend: String,
+    /// Backend used when `streaming_backend` cannot open (model missing,
+    /// credentials absent, cloud unreachable) before a session starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_backend: Option<String>,
     pub batch_backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_backend: Option<String>,
@@ -57,6 +61,7 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             streaming_backend: "cloud-realtime".to_owned(),
+            fallback_backend: None,
             batch_backend: "cloud".to_owned(),
             final_backend: None,
             local_model_dir: None,
@@ -91,16 +96,22 @@ impl Default for CloudConfig {
 
 /// `local-offline` backend: an offline catalog model run on VAD segments.
 /// The open segment is re-decoded every `partial_interval_ms` for the live
-/// partial; `max_segment_seconds` caps a segment (Qwen3-ASR holds ~25 s).
+/// partial; `max_segment_seconds` caps a segment (the Sherpa Qwen3-ASR
+/// export holds ~25 s, GGUF models up to 60 s here).
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
     pub model: String,
-    /// ONNX Runtime execution provider: cpu | cuda.
-    pub provider: String,
+    /// Execution device: cuda | cpu. Unset: cuda for GGUF models, cpu for
+    /// Sherpa-ONNX ones (see [`LocalConfig::device`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub num_threads: i32,
     pub partial_interval_ms: u64,
-    pub max_segment_seconds: f32,
+    /// Unset: 30 s for GGUF models, 15 s for Sherpa-ONNX ones (see
+    /// [`LocalConfig::segment_limit`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_segment_seconds: Option<f32>,
     /// Biasing words (Qwen3-ASR only).
     pub hotwords: Vec<String>,
 }
@@ -108,13 +119,35 @@ pub struct LocalConfig {
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
-            model: "qwen3-asr-0.6b-int8".to_owned(),
-            provider: "cpu".to_owned(),
+            model: "qwen3-asr-1.7b-gguf".to_owned(),
+            provider: None,
             num_threads: 4,
-            partial_interval_ms: 800,
-            max_segment_seconds: 15.0,
+            partial_interval_ms: 500,
+            max_segment_seconds: None,
             hotwords: Vec::new(),
         }
+    }
+}
+
+impl LocalConfig {
+    fn is_gguf(&self) -> bool {
+        matches!(
+            crate::offline_asr::OfflineFamily::for_model(&self.model),
+            Ok(crate::offline_asr::OfflineFamily::Gguf)
+        )
+    }
+
+    /// The configured device, or the model family's default.
+    pub fn device(&self) -> String {
+        self.provider
+            .clone()
+            .unwrap_or_else(|| if self.is_gguf() { "cuda" } else { "cpu" }.to_owned())
+    }
+
+    /// The configured segment cap, or the model family's default.
+    pub fn segment_limit(&self) -> f32 {
+        self.max_segment_seconds
+            .unwrap_or(if self.is_gguf() { 30.0 } else { 15.0 })
     }
 }
 
@@ -179,6 +212,9 @@ pub struct InjectConfig {
     pub x11_clipboard_command: String,
     pub clipboard_fallback: bool,
     pub timeout_seconds: f64,
+    /// With `prefer = "fcitx5"`: show the live transcript as preedit
+    /// (underlined, uncommitted text) in the focused field while speaking.
+    pub preedit: bool,
 }
 
 impl Default for InjectConfig {
@@ -193,6 +229,7 @@ impl Default for InjectConfig {
             x11_clipboard_command: String::new(),
             clipboard_fallback: true,
             timeout_seconds: 10.0,
+            preedit: true,
         }
     }
 }
@@ -291,12 +328,20 @@ impl AppConfig {
     }
 
     fn validate(self) -> Result<Self, ConfigError> {
-        match self.asr.streaming_backend.as_str() {
-            "cloud-realtime" | "doubao-realtime" | "local-streaming" | "local-offline" => {}
-            value => {
+        let backends = std::iter::once(("streaming_backend", &self.asr.streaming_backend)).chain(
+            self.asr
+                .fallback_backend
+                .iter()
+                .map(|value| ("fallback_backend", value)),
+        );
+        for (key, value) in backends {
+            if !matches!(
+                value.as_str(),
+                "cloud-realtime" | "doubao-realtime" | "local-streaming" | "local-offline"
+            ) {
                 return Err(ConfigError::Invalid(format!(
-                    "asr.streaming_backend={value:?}; expected cloud-realtime, doubao-realtime, local-streaming or local-offline"
-                )))
+                    "asr.{key}={value:?}; expected cloud-realtime, doubao-realtime, local-streaming or local-offline"
+                )));
             }
         }
         if self.asr.final_backend.is_some() {
@@ -313,22 +358,35 @@ impl AppConfig {
                 )))
             }
         }
-        if crate::offline_asr::OfflineFamily::for_model(&self.local.model).is_err() {
+        let family = crate::offline_asr::OfflineFamily::for_model(&self.local.model).map_err(|_| {
+            ConfigError::Invalid(format!(
+                "local.model={:?}; expected qwen3-asr-1.7b-gguf, qwen3-asr-0.6b-gguf, qwen3-asr-0.6b-int8 or sense-voice-int8",
+                self.local.model
+            ))
+        })?;
+        let device = self.local.device();
+        if !matches!(device.as_str(), "cpu" | "cuda") {
             return Err(ConfigError::Invalid(format!(
-                "local.model={:?}; expected qwen3-asr-0.6b-int8 or sense-voice-int8",
+                "local.provider={device:?}; expected cpu or cuda"
+            )));
+        }
+        // The Sherpa int8 exports run slower on CUDA than on CPU and abort
+        // in ONNX Runtime's CUDA teardown at exit; the GPU path is GGUF.
+        if family != crate::offline_asr::OfflineFamily::Gguf && device != "cpu" {
+            return Err(ConfigError::Invalid(format!(
+                "local.provider={device:?} with {}: Sherpa-ONNX models run on cpu; use qwen3-asr-1.7b-gguf for the GPU",
                 self.local.model
             )));
         }
-        if !matches!(self.local.provider.as_str(), "cpu" | "cuda") {
+        let max_segment = match family {
+            crate::offline_asr::OfflineFamily::Gguf => 60.0,
+            _ => 25.0,
+        };
+        if !(1.0..=max_segment).contains(&self.local.segment_limit()) {
             return Err(ConfigError::Invalid(format!(
-                "local.provider={:?}; expected cpu or cuda",
-                self.local.provider
+                "local.max_segment_seconds must be between 1 and {max_segment} for {}",
+                self.local.model
             )));
-        }
-        if !(1.0..=25.0).contains(&self.local.max_segment_seconds) {
-            return Err(ConfigError::Invalid(
-                "local.max_segment_seconds must be between 1 and 25".to_owned(),
-            ));
         }
         if !self.doubao.endpoint.starts_with("wss://") {
             return Err(ConfigError::Invalid(

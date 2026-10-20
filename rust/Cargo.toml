@@ -9,6 +9,13 @@ license = "MIT"
 name = "voiceless"
 path = "src/main.rs"
 
+[features]
+default = []
+# transcribe.cpp engine for GGUF models (Qwen3-ASR 1.7B); `cuda` runs it on
+# the GPU and needs cmake + nvcc (see flake.nix / build.rs).
+transcribe = ["dep:transcribe-cpp"]
+cuda = ["transcribe", "transcribe-cpp/cuda"]
+
 [dependencies]
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
@@ -33,6 +40,7 @@ time = { version = "0.3.55", features = ["formatting", "parsing"] }
 zbus = "5.19.0"
 unicode-normalization = "0.1.25"
 ashpd = "0.11"
+transcribe-cpp = { version = "0.4.0", default-features = false, optional = true }
 
 [dev-dependencies]
 parking_lot = "0.12"

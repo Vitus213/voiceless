@@ -55,6 +55,7 @@ fn config_with(prefer: &str, wl_copy: &str, wtype: &str) -> InjectConfig {
         x11_clipboard_command: String::new(),
         clipboard_fallback: true,
         timeout_seconds: 5.0,
+        preedit: false,
     }
 }
 

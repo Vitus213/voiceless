@@ -37,16 +37,10 @@ pub fn run_checks() -> Vec<Check> {
 /// The bridge is reachable when its `Status` call answers; a missing focused
 /// input context (doctor runs from a terminal) still counts as present.
 fn fcitx5_bridge_check() -> Check {
-    use crate::stream::{FCITX5_BRIDGE_INTERFACE, FCITX5_BRIDGE_PATH, FCITX5_BRIDGE_SERVICE};
+    use crate::fcitx5::{INTERFACE, PATH, SERVICE};
     let status = zbus::blocking::Connection::session().and_then(|connection| {
         connection
-            .call_method(
-                Some(FCITX5_BRIDGE_SERVICE),
-                FCITX5_BRIDGE_PATH,
-                Some(FCITX5_BRIDGE_INTERFACE),
-                "Status",
-                &(),
-            )?
+            .call_method(Some(SERVICE), PATH, Some(INTERFACE), "Status", &())?
             .body()
             .deserialize::<(bool, String)>()
     });

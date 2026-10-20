@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(voiceless-fcitx5-bridge VERSION 0.1.0 LANGUAGES CXX)
+project(voiceless-fcitx5-bridge VERSION 0.2.0 LANGUAGES CXX)
 
 find_package(Fcitx5Core 5.1 REQUIRED)
 find_package(Fcitx5Module REQUIRED COMPONENTS DBus)

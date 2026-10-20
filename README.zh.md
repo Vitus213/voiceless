@@ -164,6 +164,7 @@ voiceless stream --backend local-streaming
 ```toml
 [asr]
 streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming | local-offline
+# fallback_backend = "doubao-realtime" # 主引擎打不开时（缺模型、无密钥、断网）改用的引擎
 batch_backend = "cloud"                # cloud | local（SenseVoice）
 # local_model_dir / batch_model_dir：覆盖托管模型位置
 
@@ -189,11 +190,12 @@ enable_nonstream = false               # 每句二遍识别，确认文本更准
 hotwords = []                          # 例如 ["Voiceless", "NixOS"]
 
 [local]                                # local-offline：离线模型 + VAD 分段
-model = "qwen3-asr-0.6b-int8"          # qwen3-asr-0.6b-int8（带标点）| sense-voice-int8（最快，无标点）
-provider = "cpu"                       # cpu | cuda（int8 模型上 GPU 收益很小）
-num_threads = 4
-partial_interval_ms = 800              # 多久重新识别一次当前句，用于实时显示
-max_segment_seconds = 15.0             # 单段最长秒数，超过强制切分（Qwen3-ASR 上限约 25 秒）
+model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf（GPU，需 CUDA 版软件包）
+                                       # qwen3-asr-0.6b-int8 | sense-voice-int8（CPU，Sherpa-ONNX）
+provider = "cuda"                      # cuda | cpu
+num_threads = 4                        # 仅 Sherpa-ONNX 模型使用
+partial_interval_ms = 500              # 多久重新识别一次当前句，用于实时显示
+max_segment_seconds = 30.0             # 单段最长秒数，超过强制切分（GGUF ≤ 60，Sherpa ≤ 25）
 hotwords = []                          # 仅 Qwen3-ASR 支持
 
 [inject]
@@ -206,6 +208,7 @@ focus_command = ""                     # 可选：粘贴前先把目标窗口提
 x11_clipboard_command = ""             # 可选：把文本镜像到 X11 剪贴板（如 "xsel --clipboard --input"）；注入后会还原原剪贴板
 clipboard_fallback = true
 timeout_seconds = 10.0
+preedit = true                         # prefer = "fcitx5" 时：识别中的文字以带下划线的预编辑显示在输入框里
 
 [processing]
 provider = "none"                      # none | openai-compatible | ollama
@@ -227,7 +230,7 @@ save_audio = true                      # 每次成功会话保留一份 WAV
 
 ### Fcitx5 桥接模块
 
-`fcitx5-bridge/` 是一个很小的 Fcitx5 模块。它在 Fcitx5 自己的总线名（`org.fcitx.Fcitx5`）的 `/voiceless` 上暴露 `dev.voiceless.Fcitx5Bridge1`，提供两个方法：`CommitString(s) -> (b, s)` 把文本提交到当前焦点输入上下文；`Status() -> (b, s)` 只报告状态、无副作用。请通过 overlay 用你正在运行的 Fcitx5 构建它，并加入 Fcitx5 addons：
+`fcitx5-bridge/` 是一个很小的 Fcitx5 模块。它在 Fcitx5 自己的总线名（`org.fcitx.Fcitx5`）的 `/voiceless` 上暴露 `dev.voiceless.Fcitx5Bridge1`：`CommitString(s) -> (b, s)` 把文本提交到当前焦点输入上下文（并替换掉桥接模块显示的预编辑）；`SetPreedit(s) -> (b, s)` 在那里显示带下划线的预编辑（支持的程序直接显示在输入框内，否则显示在 Fcitx5 面板）；`ClearPreedit() -> (b, s)` 清除预编辑；`Status() -> (b, s)` 只报告当前焦点、无副作用。`inject.preedit = true` 时，识别中的文字会跟着你说话实时显示在输入框里，最终文本替换它；两者走同一条有序的 D-Bus 通道，过时的预编辑不会出现在上屏之后。请通过 overlay 用你正在运行的 Fcitx5 构建它，并加入 Fcitx5 addons：
 
 ```nix
 nixpkgs.overlays = [ voiceless.overlays.default ];
@@ -273,6 +276,8 @@ voiceless history serve --port 9000
 | ID | 版本与字节数 | 固定源与 SRI SHA-256 |
 | --- | --- | --- |
 | `streaming-paraformer-bilingual-zh-en` | `asr-models-2024-03-10`；`1047319737` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2><br>`sha256-VGKh/OQmk96uVyrx6MRocSSxKqhf5h/00xaLtSgOIF8=` |
+| `qwen3-asr-1.7b-gguf` | `Q8_0`; `2185030624` | <https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf><br>`sha256-mg2BeS3+otXyeLimPes+puAhOc5CwjAfMuoZxPd1Jrc=` |
+| `qwen3-asr-0.6b-gguf` | `Q8_0`; `850423456` | <https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/main/Qwen3-ASR-0.6B-Q8_0.gguf><br>`sha256-8IGy1eI71mnZLMMx1yKooGgZQ7jm80tImW/Vwxm1rNg=` |
 | `qwen3-asr-0.6b-int8` | `asr-models-2026-03-25`; `878702423` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2><br>`sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=` |
 | `sense-voice-int8` | `asr-models-2025-09-09`; `165783878` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2><br>`sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=` |
 | `silero-vad` | `asr-models`; `643854` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx><br>`sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=` |
