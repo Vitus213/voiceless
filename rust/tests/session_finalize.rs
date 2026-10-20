@@ -75,6 +75,7 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .iter()
         .map(|event| match event {
             OutputEvent::Ready => "ready",
+            OutputEvent::Level(_) => "level",
             OutputEvent::Transcript(snapshot) if snapshot.is_final => "final",
             OutputEvent::Transcript(_) => "transcript",
             OutputEvent::Finalized { .. } => "finalized",

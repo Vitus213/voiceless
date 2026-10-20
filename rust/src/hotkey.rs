@@ -27,11 +27,11 @@ pub fn parse_key(name: &str) -> Result<KeyCode, String> {
 }
 
 /// Watch every keyboard that has `key` and forward its presses and
-/// releases. Returns how many devices are watched; 0 usually means no read
-/// access to /dev/input (join the `input` group).
-pub fn listen(key: KeyCode, events: mpsc::Sender<KeyEvent>) -> usize {
+/// releases. Returns one task per watched device (abort them to stop); none
+/// usually means no read access to /dev/input (join the `input` group).
+pub fn listen(key: KeyCode, events: mpsc::Sender<KeyEvent>) -> Vec<tokio::task::JoinHandle<()>> {
     let ctrl_down = Arc::new(AtomicUsize::new(0));
-    let mut watched = 0;
+    let mut watched = Vec::new();
     for (_path, device) in evdev::enumerate() {
         let has_key = device
             .supported_keys()
@@ -42,10 +42,9 @@ pub fn listen(key: KeyCode, events: mpsc::Sender<KeyEvent>) -> usize {
         let Ok(mut stream) = device.into_event_stream() else {
             continue;
         };
-        watched += 1;
         let events = events.clone();
         let ctrl_down = ctrl_down.clone();
-        tokio::spawn(async move {
+        watched.push(tokio::spawn(async move {
             while let Ok(event) = stream.next_event().await {
                 let EventSummary::Key(_, code, value) = event.destructure() else {
                     continue;
@@ -81,7 +80,7 @@ pub fn listen(key: KeyCode, events: mpsc::Sender<KeyEvent>) -> usize {
                     break;
                 }
             }
-        });
+        }));
     }
     watched
 }

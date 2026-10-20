@@ -163,7 +163,7 @@ impl<R: SessionRunner> Gateway<R> {
 /// broadcast, controlled exclusively via the gateway channel.
 pub struct StreamRunner {
     pub options: crate::stream::StreamOptions,
-    pub env: crate::stream::SessionEnv,
+    pub shared: std::sync::Arc<DaemonShared>,
 }
 
 impl SessionRunner for StreamRunner {
@@ -174,7 +174,11 @@ impl SessionRunner for StreamRunner {
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> {
         let mut options = self.options.clone();
         options.mode = mode.to_owned();
-        let env = self.env.clone();
+        // The engine current at session start (a reload may swap it later).
+        let env = crate::stream::SessionEnv {
+            warm: self.shared.warm(),
+            events: Some(self.shared.events.clone()),
+        };
         Box::pin(async move {
             crate::stream::run_with_env(options, control, env)
                 .await
@@ -238,13 +242,15 @@ impl ControllerInterface {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum DaemonCommand {
     Toggle(String),
     Start(String),
     Stop,
     Cancel,
     Key(crate::hotkey::KeyEvent),
+    /// Re-read the config, reload the warm engine and hotkey (idle only).
+    Reload(tokio::sync::oneshot::Sender<Result<EngineStatus, String>>),
 }
 
 /// What a push-to-talk key event asks of the gateway.
@@ -309,75 +315,341 @@ struct ControllerInterface {
     state: std::sync::Arc<std::sync::Mutex<&'static str>>,
 }
 
+/// Engine state reported to the console.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct EngineStatus {
+    pub loaded: bool,
+    pub description: Option<String>,
+    pub load_seconds: Option<f64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct HotkeyStatus {
+    pub key: Option<String>,
+    pub keyboards: usize,
+    pub error: Option<String>,
+}
+
+/// Timing of the last completed session, measured from daemon events.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionMetrics {
+    pub backend: String,
+    pub audio_seconds: f64,
+    pub stop_to_final_ms: u64,
+    pub chars: usize,
+    pub ended_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DaemonStatus {
+    pub state: &'static str,
+    pub mode: String,
+    pub backend: String,
+    pub fallback_backend: Option<String>,
+    pub engine: EngineStatus,
+    pub hotkey: HotkeyStatus,
+    pub last_session: Option<SessionMetrics>,
+}
+
+const LOG_LINES: usize = 500;
+
+/// What the daemon shares with the web console: the command channel, the
+/// event broadcast, the hot-swappable warm engine, status and recent logs.
+pub struct DaemonShared {
+    pub commands: mpsc::Sender<DaemonCommand>,
+    pub events: tokio::sync::broadcast::Sender<String>,
+    pub config_path: std::path::PathBuf,
+    pub default_mode: String,
+    pub started: std::time::Instant,
+    warm: std::sync::RwLock<Option<std::sync::Arc<crate::engine::WarmEngine>>>,
+    status: std::sync::Mutex<DaemonStatus>,
+    logs: std::sync::Mutex<std::collections::VecDeque<String>>,
+}
+
+impl DaemonShared {
+    /// Print a log line, keep it for `/api/logs` and broadcast it.
+    pub fn log(&self, line: impl Into<String>) {
+        let line = line.into();
+        println!("{line}");
+        let mut logs = self.logs.lock().unwrap_or_else(|error| error.into_inner());
+        if logs.len() == LOG_LINES {
+            logs.pop_front();
+        }
+        logs.push_back(line.clone());
+        drop(logs);
+        let _ = self
+            .events
+            .send(serde_json::json!({"type": "log", "line": line}).to_string());
+    }
+
+    pub fn logs(&self) -> Vec<String> {
+        let logs = self.logs.lock().unwrap_or_else(|error| error.into_inner());
+        logs.iter().cloned().collect()
+    }
+
+    pub fn warm(&self) -> Option<std::sync::Arc<crate::engine::WarmEngine>> {
+        self.warm
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn status(&self) -> DaemonStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn update(&self, change: impl FnOnce(&mut DaemonStatus)) {
+        change(
+            &mut self
+                .status
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+    }
+
+    /// Path the console edits; `--config` or the XDG default.
+    pub fn config(&self) -> Result<crate::config::AppConfig, String> {
+        crate::config::AppConfig::load_optional(Some(&self.config_path))
+            .or_else(|error| {
+                if self.config_path.exists() {
+                    Err(error)
+                } else {
+                    Ok(crate::config::AppConfig::default())
+                }
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Serve the daemon until the task ends: loads the warm engine, owns the
-/// gateway, the D-Bus control bus, the event signal and the reaping loop.
+/// gateway, the D-Bus control bus, the event signal, the web console and
+/// the reaping loop.
 pub async fn serve(options: crate::stream::StreamOptions) -> Result<(), String> {
+    let config_path = options
+        .config_path
+        .clone()
+        .unwrap_or_else(crate::config::default_config_path);
     let config = crate::config::AppConfig::load_optional(options.config_path.as_deref())
         .map_err(|error| error.to_string())?;
+    let (events, _) = tokio::sync::broadcast::channel::<String>(256);
+    let (command_tx, command_rx) = mpsc::channel::<DaemonCommand>(8);
+    let shared = std::sync::Arc::new(DaemonShared {
+        commands: command_tx,
+        events: events.clone(),
+        config_path,
+        default_mode: options.mode.clone(),
+        started: std::time::Instant::now(),
+        warm: std::sync::RwLock::new(None),
+        status: std::sync::Mutex::new(DaemonStatus {
+            state: State::Idle.name(),
+            mode: options.mode.clone(),
+            backend: config.asr.streaming_backend.clone(),
+            fallback_backend: config.asr.fallback_backend.clone(),
+            engine: EngineStatus::default(),
+            hotkey: HotkeyStatus::default(),
+            last_session: None,
+        }),
+        logs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+    });
+    load_engine(&shared, &config).await;
+    tokio::spawn(track_sessions(shared.clone()));
+    if config.console.enabled {
+        let console = shared.clone();
+        let (host, port) = (config.console.host.clone(), config.console.port);
+        tokio::spawn(async move {
+            if let Err(error) = crate::console::serve_daemon(console.clone(), &host, port).await {
+                console.log(format!("Voiceless: console unavailable: {error}"));
+            }
+        });
+    }
+    let gateway = Gateway::new(StreamRunner {
+        options,
+        shared: shared.clone(),
+    });
+    serve_with_gateway(gateway, shared, command_rx, config).await
+}
+
+/// (Re)load the warm engine for `config`, releasing the old one first so
+/// its VRAM is free for the new model.
+async fn load_engine(shared: &std::sync::Arc<DaemonShared>, config: &crate::config::AppConfig) {
+    *shared
+        .warm
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = None;
     let started = std::time::Instant::now();
     let warm_config = config.clone();
-    let warm = tokio::task::spawn_blocking(move || crate::engine::WarmEngine::load(&warm_config))
+    let loaded = tokio::task::spawn_blocking(move || crate::engine::WarmEngine::load(&warm_config))
         .await
-        .map_err(|error| error.to_string())?;
-    let warm = match warm {
+        .unwrap_or_else(|error| Err(error.to_string()));
+    let seconds = started.elapsed().as_secs_f64();
+    let status = match loaded {
         Ok(Some(engine)) => {
-            println!(
-                "Voiceless: {} loaded in {:.1}s",
-                engine.describe(),
-                started.elapsed().as_secs_f64()
-            );
-            Some(std::sync::Arc::new(engine))
+            let description = engine.describe();
+            shared.log(format!("Voiceless: {description} loaded in {seconds:.1}s"));
+            *shared
+                .warm
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = Some(std::sync::Arc::new(engine));
+            EngineStatus {
+                loaded: true,
+                description: Some(description),
+                load_seconds: Some(seconds),
+                error: None,
+            }
         }
-        Ok(None) => None,
+        Ok(None) => EngineStatus::default(),
         Err(message) => {
             // Sessions still work: they load on demand and report the error.
-            eprintln!("Voiceless: warm engine unavailable: {message}");
-            None
+            shared.log(format!("Voiceless: warm engine unavailable: {message}"));
+            EngineStatus {
+                error: Some(message),
+                ..EngineStatus::default()
+            }
         }
     };
-    let (events, _) = tokio::sync::broadcast::channel::<String>(256);
-    let default_mode = options.mode.clone();
-    let env = crate::stream::SessionEnv {
-        warm,
-        events: Some(events.clone()),
+    shared.update(|current| {
+        current.engine = status;
+        current.backend = config.asr.streaming_backend.clone();
+        current.fallback_backend = config.asr.fallback_backend.clone();
+    });
+}
+
+/// Start the evdev push-to-talk listener for `[hotkey] key`; returns the
+/// tasks to abort on reload.
+fn start_hotkey(
+    shared: &std::sync::Arc<DaemonShared>,
+    config: &crate::config::AppConfig,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let Some(name) = config.hotkey.key.clone() else {
+        shared.update(|status| status.hotkey = HotkeyStatus::default());
+        return Vec::new();
     };
-    let gateway = Gateway::new(StreamRunner { options, env });
-    serve_with_gateway(gateway, events, default_mode, config).await
+    let key = match crate::hotkey::parse_key(&name) {
+        Ok(key) => key,
+        Err(error) => {
+            shared.update(|status| {
+                status.hotkey = HotkeyStatus {
+                    key: Some(name.clone()),
+                    keyboards: 0,
+                    error: Some(error),
+                }
+            });
+            return Vec::new();
+        }
+    };
+    let (key_tx, mut key_rx) = mpsc::channel(16);
+    let mut tasks = crate::hotkey::listen(key, key_tx);
+    let error = if tasks.is_empty() {
+        let message = format!(
+            "no readable keyboard has {name}; add your user to the `input` group and log in again"
+        );
+        shared.log(format!("Voiceless: {message}"));
+        Some(message)
+    } else {
+        shared.log(format!(
+            "Voiceless: push-to-talk on {name} ({} keyboards)",
+            tasks.len()
+        ));
+        None
+    };
+    shared.update(|status| {
+        status.hotkey = HotkeyStatus {
+            key: Some(name.clone()),
+            keyboards: tasks.len(),
+            error,
+        }
+    });
+    let commands = shared.commands.clone();
+    tasks.push(tokio::spawn(async move {
+        while let Some(event) = key_rx.recv().await {
+            if commands.send(DaemonCommand::Key(event)).await.is_err() {
+                break;
+            }
+        }
+    }));
+    tasks
+}
+
+/// Derive per-session metrics from the event stream: audio length (record
+/// to stop), stop-to-final latency and character count; published as
+/// `{"type":"session",...}` and in the status.
+async fn track_sessions(shared: std::sync::Arc<DaemonShared>) {
+    let mut events = shared.events.subscribe();
+    let mut recording_at: Option<std::time::Instant> = None;
+    let mut stopping_at: Option<std::time::Instant> = None;
+    let mut chars = 0;
+    loop {
+        let line = match events.recv().await {
+            Ok(line) => line,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("state") => match event["state"].as_str() {
+                Some("recording") => {
+                    recording_at = Some(std::time::Instant::now());
+                    stopping_at = None;
+                    chars = 0;
+                }
+                Some("stopping") => stopping_at = Some(std::time::Instant::now()),
+                _ => {}
+            },
+            Some("transcript") if event["transcript"]["is_final"] == true => {
+                chars = event["transcript"]["authoritative_text"]
+                    .as_str()
+                    .map_or(0, |text| text.chars().count());
+            }
+            Some("finalized") => {
+                let (Some(recording), Some(stopping)) = (recording_at, stopping_at) else {
+                    continue;
+                };
+                let metrics = SessionMetrics {
+                    backend: shared.status().backend,
+                    audio_seconds: stopping.duration_since(recording).as_secs_f64(),
+                    stop_to_final_ms: stopping.elapsed().as_millis() as u64,
+                    chars,
+                    ended_at: time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                };
+                let mut payload = serde_json::to_value(&metrics).unwrap_or_default();
+                payload["type"] = "session".into();
+                let _ = shared.events.send(payload.to_string());
+                shared.update(|status| status.last_session = Some(metrics));
+            }
+            _ => {}
+        }
+    }
 }
 
 async fn serve_with_gateway<R>(
     mut gateway: Gateway<R>,
-    events: tokio::sync::broadcast::Sender<String>,
-    default_mode: String,
-    config: crate::config::AppConfig,
+    shared: std::sync::Arc<DaemonShared>,
+    mut command_rx: mpsc::Receiver<DaemonCommand>,
+    mut config: crate::config::AppConfig,
 ) -> Result<(), String>
 where
     R: SessionRunner,
 {
-    let (command_tx, mut command_rx) = mpsc::channel::<DaemonCommand>(8);
-    let mut hotkey = HotkeyMachine::new(
-        std::time::Duration::from_millis(config.hotkey.hold_threshold_ms),
-        config.hotkey.mode.clone(),
-        config.hotkey.ctrl_mode.clone(),
-    );
-    if let Some(name) = &config.hotkey.key {
-        let key = crate::hotkey::parse_key(name)?;
-        let (key_tx, mut key_rx) = mpsc::channel(16);
-        match crate::hotkey::listen(key, key_tx) {
-            0 => eprintln!(
-                "Voiceless: no readable keyboard has {name}; add your user to the `input` group for push-to-talk"
-            ),
-            count => println!("Voiceless: push-to-talk on {name} ({count} keyboards)"),
-        }
-        let commands = command_tx.clone();
-        tokio::spawn(async move {
-            while let Some(event) = key_rx.recv().await {
-                if commands.send(DaemonCommand::Key(event)).await.is_err() {
-                    break;
-                }
-            }
-        });
-    }
+    let events = shared.events.clone();
+    let default_mode = shared.default_mode.clone();
+    let command_tx = shared.commands.clone();
+    let hotkey_machine = |config: &crate::config::AppConfig| {
+        HotkeyMachine::new(
+            std::time::Duration::from_millis(config.hotkey.hold_threshold_ms),
+            config.hotkey.mode.clone(),
+            config.hotkey.ctrl_mode.clone(),
+        )
+    };
+    let mut hotkey = hotkey_machine(&config);
+    let mut hotkey_tasks = start_hotkey(&shared, &config);
     let mut paused_media: Option<tokio::task::JoinHandle<Vec<String>>> = None;
     let state = std::sync::Arc::new(std::sync::Mutex::new(State::Idle.name()));
 
@@ -425,7 +697,7 @@ where
     // compositor bindings over the control bus above.
     tokio::spawn(portal_shortcut_listener(command_tx.clone()));
 
-    println!("Voiceless daemon listening on {BUS_NAME}");
+    shared.log(format!("Voiceless daemon listening on {BUS_NAME}"));
     let mut published = State::Idle;
     let mut session_mode = default_mode.clone();
     loop {
@@ -462,25 +734,49 @@ where
                             KeyAction::Nothing => continue,
                         }
                     }
+                    DaemonCommand::Reload(reply) => {
+                        if gateway.state() != State::Idle {
+                            let _ = reply.send(Err("a session is running; reload when idle".to_owned()));
+                            continue;
+                        }
+                        match shared.config() {
+                            Ok(fresh) => {
+                                config = fresh;
+                                for task in hotkey_tasks.drain(..) {
+                                    task.abort();
+                                }
+                                load_engine(&shared, &config).await;
+                                hotkey = hotkey_machine(&config);
+                                hotkey_tasks = start_hotkey(&shared, &config);
+                                let _ = reply.send(Ok(shared.status().engine));
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                            }
+                        }
+                        continue;
+                    }
                     command => command,
                 };
                 let result = match command {
                     DaemonCommand::Toggle(requested) => gateway.toggle(&mode(requested)).map(Some),
                     DaemonCommand::Start(requested) => gateway.start(&mode(requested)).map(Some),
                     DaemonCommand::Stop => gateway.stop().map(Some),
-                    DaemonCommand::Key(_) => unreachable!("key events were translated above"),
+                    DaemonCommand::Key(_) | DaemonCommand::Reload(_) => {
+                        unreachable!("handled above")
+                    }
                     DaemonCommand::Cancel => {
                         gateway.cancel().await;
                         Ok(None)
                     }
                 };
                 if let Err(message) = result {
-                    eprintln!("Voiceless: {message}");
+                    shared.log(format!("Voiceless: {message}"));
                 }
             },
             _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
                 if let Some(code) = gateway.poll().await {
-                    println!("session finished with exit code {code}");
+                    shared.log(format!("session finished with exit code {code}"));
                 }
             }
         }
@@ -510,6 +806,10 @@ where
             }
             published = gateway.state();
             *state.lock().unwrap_or_else(|error| error.into_inner()) = published.name();
+            shared.update(|status| {
+                status.state = published.name();
+                status.mode = session_mode.clone();
+            });
             let _ = events.send(
                 serde_json::json!({
                     "type": "state",

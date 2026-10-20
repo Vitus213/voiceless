@@ -45,8 +45,13 @@ pub struct InjectionResult {
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
     Ready,
+    /// Mic level (RMS, 0..1) while recording, at most ~15 Hz; only when
+    /// `SessionPlan::emit_levels` (live UIs) is set.
+    Level(f32),
     Transcript(TranscriptSnapshot),
-    Finalized { injection: Option<InjectionResult> },
+    Finalized {
+        injection: Option<InjectionResult>,
+    },
     Warning(String),
     Error(String),
     Cancelled,
@@ -65,7 +70,11 @@ pub struct SessionPlan {
     /// Directory where each successful session's WAV recording is saved;
     /// `None` disables audio retention.
     pub save_audio_dir: Option<PathBuf>,
+    pub emit_levels: bool,
 }
+
+/// Minimum spacing of `OutputEvent::Level`.
+const LEVEL_INTERVAL: Duration = Duration::from_millis(66);
 
 impl SessionPlan {
     pub fn new(backend: impl Into<String>, inject: bool) -> Self {
@@ -78,8 +87,25 @@ impl SessionPlan {
             finish_timeout: DEFAULT_FINISH_TIMEOUT,
             ready_timeout: DEFAULT_READY_TIMEOUT,
             save_audio_dir: None,
+            emit_levels: false,
         }
     }
+}
+
+/// RMS of a PCM16 little-endian chunk, scaled to 0..1.
+fn pcm_rms(pcm: &[u8]) -> f32 {
+    let samples = pcm.len() / 2;
+    if samples == 0 {
+        return 0.0;
+    }
+    let sum: f64 = pcm
+        .chunks_exact(2)
+        .map(|bytes| {
+            let sample = f64::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0;
+            sample * sample
+        })
+        .sum();
+    (sum / samples as f64).sqrt() as f32
 }
 
 /// Audio source boundary. `start` MUST be called only after the backend is
@@ -236,6 +262,7 @@ where
 
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
     let mut audio_bytes: u64 = 0;
+    let mut last_level = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -263,6 +290,10 @@ where
                         return overrun(&mut capture, &mut transport, sink).await;
                     }
                     audio_bytes += pcm.len() as u64;
+                    if plan.emit_levels && last_level.elapsed() >= LEVEL_INTERVAL {
+                        last_level = tokio::time::Instant::now();
+                        let _ = sink.emit(OutputEvent::Level(pcm_rms(&pcm)));
+                    }
                     queue.push_back(pcm);
                 }
                 Ok(None) => {

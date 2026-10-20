@@ -61,6 +61,25 @@ impl WarmEngine {
         }
     }
 
+    /// Catalog ids this engine keeps loaded (model and VAD).
+    pub fn model_ids(&self) -> Vec<String> {
+        match self {
+            Self::Offline { local, .. } => vec![local.model.clone(), "silero-vad".to_owned()],
+        }
+    }
+
+    /// The warm decoder and VAD model, for offline jobs (re-transcription,
+    /// benchmarks) and the text cleanup config of the session.
+    pub fn decoder(&self) -> (Arc<dyn Decoder>, PathBuf, f32) {
+        match self {
+            Self::Offline {
+                local,
+                recognizer,
+                vad_model,
+            } => (recognizer.clone(), vad_model.clone(), local.segment_limit()),
+        }
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Self::Offline { local, .. } => format!("{} on {}", local.model, local.device()),

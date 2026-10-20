@@ -38,6 +38,7 @@ pub struct AppConfig {
     pub text: TextConfig,
     pub hotkey: HotkeyConfig,
     pub audio: AudioConfig,
+    pub console: ConsoleConfig,
     pub inject: InjectConfig,
     pub processing: ProcessingConfig,
     pub history: HistoryConfig,
@@ -119,6 +120,25 @@ impl Default for HotkeyConfig {
             mode: String::new(),
             ctrl_mode: "prompt-optimize".to_owned(),
             hold_threshold_ms: 350,
+        }
+    }
+}
+
+/// Web console served by the daemon (loopback only by default).
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConsoleConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for ConsoleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            host: "127.0.0.1".to_owned(),
+            port: 8790,
         }
     }
 }

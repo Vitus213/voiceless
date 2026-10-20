@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/history-console-playing.png" alt="Voiceless history console playing a recording" width="760">
+  <img src="docs/images/console-live.png" alt="Voiceless console: live page while recording, with the mic level meter and the GPU engine card" width="760">
 </p>
 
 <p align="center">
@@ -151,7 +151,7 @@ voiceless stream --backend local-streaming
 | `voiceless model list\|install\|check\|remove` | Manage the model catalog (pinned URLs, byte counts, SRI SHA-256, member allowlist) |
 | `voiceless mode list\|reload\|add\|update\|remove` | Manage text processing modes |
 | `voiceless history list\|delete\|export\|totals\|usage` | Query the recognition history (SQLite) |
-| `voiceless history serve` | Start the local web console. Options: `--host`, `--port`. Default: `http://127.0.0.1:8790` |
+| `voiceless history serve` | Serve the web console without the daemon (no live pages). Options: `--host`, `--port`. Default: `http://127.0.0.1:8790` |
 | `voiceless daemon` | Run the resident daemon: it loads the local model once at startup (sessions never wait for a model load), exports `dev.voiceless.Daemon.Controller` on D-Bus and broadcasts every session event as an `Event` signal. Options: `--mode` (default `quick`), `--no-inject` |
 | `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | Control the daemon with one D-Bus call (bind hotkeys to these). `toggle`/`start` take `--mode`; `start`/`stop` are hold-to-talk press/release; `watch` prints every event as a JSON line (the `stream --json` schema plus `{"type":"state","state":...,"mode":...}`) |
 | `voiceless doctor` | Check dependencies and the data directory |
@@ -271,27 +271,23 @@ Each successful streaming session saves its audio. Voiceless writes a 16 kHz mon
 
 Cancelled, failed and empty sessions save no file. `history delete` and `delete --all` remove the recordings together with their rows. `[history] save_audio = false` disables the retention.
 
-Start the console:
+Open the console at <http://127.0.0.1:8790/>. `voiceless daemon` serves it (`[console]` `enabled`, `host`, `port`); without the daemon, `voiceless history serve [--port 9000]` serves everything except the live pages.
 
-```bash
-voiceless history serve            # http://127.0.0.1:8790/
-voiceless history serve --port 9000
-```
+![Console history page with demo records grouped by day; the oldest row predates audio retention and shows the no-recording chip](docs/images/history-console.png)
 
-![Voiceless history console with a real history: records grouped by day; rows recorded before audio retention show the no-recording chip](docs/images/history-console.png)
+![An expanded demo record: waveform, progress bar, final text, and the re-transcribe / fix / delete actions](docs/images/history-console-playing.png)
 
-![Console playback with synthetic demo audio: expanded record with waveform, progress bar and final text](docs/images/history-console-playing.png)
+Seven pages, one embedded app (no CDN, works offline):
 
-The console is one embedded page. It listens only on the loopback address. It shows:
+- **实时 / Live**: session state, start/stop/cancel with a mode picker, the transcript as it forms, a mic level meter, the last session's stop-to-text latency, the loaded engine and GPU memory, live daemon logs.
+- **识别引擎 / Engine**: primary and fallback backend, the local model and device, Doubao/cloud credentials (write-only), model installs with progress.
+- **词库 / Vocabulary**: hotwords, replacements and regex rules with a live "try it" preview of the cleanup.
+- **模式与提示词 / Modes**: custom modes and the organize prompt.
+- **快捷键与上屏 / Hotkey & typing**: record the push-to-talk key, hold threshold, injection method, preedit, media pause and cues, and a test-injection button.
+- **历史 / History**: records by day with waveform playback; delete; re-transcribe a recording with the current engine; fix a transcript and turn the fix into a replacement or hotword in one click.
+- **诊断 / Diagnostics**: `doctor` checks, GPU, logs, and a replay benchmark of the current engine over your saved recordings (RTF and CER against the original transcripts).
 
-- Records grouped by day.
-- Waveforms rendered from the saved WAV files.
-- Playback on click, with a seekable progress bar.
-- Totals for records, characters and audio time.
-- Cursor pagination.
-- Edit and save the organizing prompt template; the next voice session picks it up immediately.
-
-Audio URLs contain only the record id. The server reads the file path from the database row. It supports `Range` requests, so browsers can play while they download.
+Security: the console listens on loopback, rejects any non-loopback `Host` (DNS rebinding), requires a per-start token embedded in the page on every API call (other websites cannot read it), refuses cross-origin writes, and never returns API keys. Settings are written back into `config.toml` preserving its comments. The API is documented in `docs/console-api.md`.
 
 ## Model catalog
 
@@ -329,7 +325,7 @@ flowchart TB
     coord --> lasr[local_asr.rs — Sherpa-ONNX online]
     coord --> sess[session.rs — transcript state machine]
     cmd --> hist[history.rs — SQLite schema v2]
-    cmd --> web[history_web.rs — loopback HTTP console]
+    cmd --> web[console/ — loopback axum console inside the daemon]
     cmd --> models[models.rs — pinned supply chain]
     web --> hist
 ```
@@ -342,7 +338,7 @@ Design decisions:
 4. **Recording as a decorator.** `WavRecorder` wraps `AudioCapture` and mirrors chunks into a `.partial` file. Only successful sessions finalize the WAV. A mirror failure disables only the saving; it never affects recognition, injection or history. Cancel and drop remove the temporary file. Audio rows and files are created and deleted together.
 5. **Parameterized control source.** `stream::run_with_control` receives the command channel. The CLI maps SIGINT and SIGTERM (first signal stops, second cancels). The daemon maps the hotkey Activate and Cancel through a gateway state machine. The gateway allows only one session at a time.
 6. **Private XDG persistence.** The configuration has a 0600 key gate. The history is a WAL SQLite file with mode 0600. Recordings live in `data/audio/`. Models activate atomically and Voiceless verifies them before each session. User data never lives in the Nix store.
-7. **Zero-dependency console.** `history_web` is a hand-written HTTP/1.1 server on tokio TCP. It accepts only GET, sends one response per connection and listens only on loopback. The frontend is embedded with `include_str!`. Audio URLs contain only the record id; the server reads the file path from the database row.
+7. **Embedded console.** `console/` is an axum server inside the daemon: loopback only, `Host` checked, a token per start, no cross-origin writes, write-only secrets. The frontend is embedded with `include_str!`. Audio URLs contain only the record id; the server reads the file path from the database row.
 8. **Strict configuration contract.** Unknown keys are errors. Removed legacy values are rejected; Voiceless never rewrites them silently.
 
 The full runtime, persistence and integration contract is in [`docs/architecture.md`](docs/architecture.md). It includes the session lifecycle diagram and the measured quality gates.

@@ -54,6 +54,8 @@ struct JsonEvent<'a> {
     transcript: Option<&'a TranscriptSnapshot>,
     message: Option<&'a str>,
     injection: Option<&'a InjectionResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rms: Option<f32>,
 }
 
 pub async fn run(options: StreamOptions) -> Result<i32, StreamError> {
@@ -138,6 +140,8 @@ pub async fn run_with_env(
         }
     };
     let mut plan = session_plan(&config, &options, &backend, &pipeline.mode_id);
+    // Live UIs (daemon console, overlay) draw a mic level meter.
+    plan.emit_levels = env.events.is_some();
     if backend == "local-offline" {
         // The final waits for the last segment's decode, and for the model
         // load when the utterance is shorter than it.
@@ -362,7 +366,7 @@ fn build_pipeline(config: &AppConfig, options: &StreamOptions) -> Result<Pipelin
     })
 }
 
-fn modes_path() -> std::path::PathBuf {
+pub fn modes_path() -> std::path::PathBuf {
     let root = std::env::var("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -711,52 +715,42 @@ struct BroadcastSink {
 impl EventSink for BroadcastSink {
     fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
         self.sequence += 1;
-        let (kind, transcript, message, injection) = event_fields(&event);
-        let line = serde_json::to_string(&JsonEvent {
-            kind,
-            sequence: self.sequence,
-            transcript,
-            message,
-            injection,
-        })?;
+        let line = serde_json::to_string(&json_event(&event, self.sequence))?;
         // No subscriber is fine: nobody is watching.
         let _ = self.events.send(line);
         Ok(())
     }
 }
 
-type EventFields<'a> = (
-    &'a str,
-    Option<&'a TranscriptSnapshot>,
-    Option<&'a str>,
-    Option<&'a InjectionResult>,
-);
-
-fn event_fields(event: &OutputEvent) -> EventFields<'_> {
-    match event {
-        OutputEvent::Ready => ("ready", None, None, None),
-        OutputEvent::Transcript(snapshot) => ("transcript", Some(snapshot), None, None),
-        OutputEvent::Finalized { injection } => ("finalized", None, None, injection.as_ref()),
-        OutputEvent::Warning(message) => ("warning", None, Some(message.as_str()), None),
-        OutputEvent::Error(message) => ("error", None, Some(message.as_str()), None),
-        OutputEvent::Cancelled => ("cancelled", None, None, None),
-        OutputEvent::Completed => ("completed", None, None, None),
+fn json_event(event: &OutputEvent, sequence: u64) -> JsonEvent<'_> {
+    let (kind, transcript, message, injection, rms) = match event {
+        OutputEvent::Ready => ("ready", None, None, None, None),
+        OutputEvent::Level(rms) => ("level", None, None, None, Some(*rms)),
+        OutputEvent::Transcript(snapshot) => ("transcript", Some(snapshot), None, None, None),
+        OutputEvent::Finalized { injection } => ("finalized", None, None, injection.as_ref(), None),
+        OutputEvent::Warning(message) => ("warning", None, Some(message.as_str()), None, None),
+        OutputEvent::Error(message) => ("error", None, Some(message.as_str()), None, None),
+        OutputEvent::Cancelled => ("cancelled", None, None, None, None),
+        OutputEvent::Completed => ("completed", None, None, None, None),
+    };
+    JsonEvent {
+        kind,
+        sequence,
+        transcript,
+        message,
+        injection,
+        rms,
     }
 }
 
 impl EventSink for StdoutSink {
     fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
         self.sequence += 1;
-        let (kind, transcript, message, injection) = event_fields(&event);
         if self.json {
-            let payload = JsonEvent {
-                kind,
-                sequence: self.sequence,
-                transcript,
-                message,
-                injection,
-            };
-            println!("{}", serde_json::to_string(&payload)?);
+            println!(
+                "{}",
+                serde_json::to_string(&json_event(&event, self.sequence))?
+            );
             return Ok(());
         }
         match &event {

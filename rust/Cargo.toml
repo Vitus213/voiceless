@@ -17,12 +17,14 @@ transcribe = ["dep:transcribe-cpp"]
 cuda = ["transcribe", "transcribe-cpp/cuda"]
 
 [dependencies]
+axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 evdev = { version = "0.13", features = ["tokio"] }
 flate2 = "1"
 pinyin = { version = "0.10", default-features = false, features = ["plain"] }
 regex = "1"
+toml_edit = "0.22"
 futures-util = "0.3"
 libc = "0.2"
 parking_lot = "0.12"

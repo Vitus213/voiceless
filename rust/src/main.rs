@@ -265,12 +265,10 @@ async fn main() {
             )
         }
         Command::History(args) if matches!(args.action, HistoryAction::Serve) => {
-            match voiceless::history_web::serve(
+            match voiceless::console::serve_standalone(
                 voiceless::models::default_data_dir().join("history.sqlite3"),
-                voiceless::history_web::ServeOptions {
-                    host: args.host,
-                    port: args.port,
-                },
+                &args.host,
+                args.port,
             )
             .await
             {

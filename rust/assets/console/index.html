@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="voiceless-token" content="{{VOICELESS_TOKEN}}">
+<meta name="color-scheme" content="dark light">
+<title>Voiceless 控制台</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#view">跳到主要内容</a>
+<div class="layout">
+  <aside class="sidebar" aria-label="导航">
+    <div class="brand">
+      <span class="moon-mark" aria-hidden="true">☾</span>
+      <div>
+        <div class="brand-name">Voiceless</div>
+        <div class="brand-sub">控制台</div>
+      </div>
+    </div>
+    <div class="nav-status" id="navStatus" role="status" aria-live="polite">
+      <span class="dot"></span><span class="label">连接中…</span>
+    </div>
+    <nav>
+      <ul class="nav" id="nav"></ul>
+    </nav>
+    <div class="sidebar-foot" id="version"></div>
+  </aside>
+  <main id="view" class="view" tabindex="-1"></main>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<dialog id="dialog" aria-modal="true"></dialog>
+<noscript><p class="noscript">控制台需要启用 JavaScript。</p></noscript>
+</body>
+</html>

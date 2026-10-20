@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/history-console-playing.png" alt="Voiceless 夜声档案播放录音" width="760">
+  <img src="docs/images/console-live.png" alt="Voiceless 控制台实时页：录音中，带麦克风音量条和 GPU 引擎卡片" width="760">
 </p>
 
 <p align="center">
@@ -151,7 +151,7 @@ voiceless stream --backend local-streaming
 | `voiceless model list\|install\|check\|remove` | 管理模型目录（固定 URL、字节数、SRI SHA-256、成员白名单） |
 | `voiceless mode list\|reload\|add\|update\|remove` | 管理文本处理模式 |
 | `voiceless history list\|delete\|export\|totals\|usage` | 查询识别历史（SQLite） |
-| `voiceless history serve` | 启动本地 Web 控制台。选项：`--host`、`--port`。默认：`http://127.0.0.1:8790` |
+| `voiceless history serve` | 不启动 daemon 时单独提供 Web 控制台（无实时页）。选项：`--host`、`--port`。默认：`http://127.0.0.1:8790` |
 | `voiceless daemon` | 运行常驻 daemon：启动时加载一次本地模型（会话不再等待模型加载），在 D-Bus 导出 `dev.voiceless.Daemon.Controller`，并把每个会话事件作为 `Event` 信号广播。选项：`--mode`（默认 `quick`）、`--no-inject` |
 | `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | 一次 D-Bus 调用控制 daemon（快捷键绑定这些命令）。`toggle`/`start` 接受 `--mode`；`start`/`stop` 对应按住说话的按下/松开；`watch` 把每个事件输出为一行 JSON（`stream --json` 格式，外加 `{"type":"state","state":...,"mode":...}`） |
 | `voiceless doctor` | 检查依赖与数据目录 |
@@ -271,27 +271,23 @@ i18n.inputMethod.fcitx5.addons = [ pkgs.voiceless-fcitx5-bridge ];
 
 取消、失败、空会话不保存文件。`history delete` 与 `delete --all` 连同录音一起删除。`[history] save_audio = false` 关闭保留。
 
-启动控制台：
+在 <http://127.0.0.1:8790/> 打开控制台。由 `voiceless daemon` 提供（`[console]` 的 `enabled`、`host`、`port`）；没有 daemon 时，`voiceless history serve [--port 9000]` 提供除实时页以外的全部功能。
 
-```bash
-voiceless history serve            # http://127.0.0.1:8790/
-voiceless history serve --port 9000
-```
+![控制台历史页（演示数据）：按天分组；最早一条早于录音保留功能，显示无录音标签](docs/images/history-console.png)
 
-![Voiceless 夜声档案真实历史：按天分组；录音保留上线前的记录显示无录音标签](docs/images/history-console.png)
+![展开的演示记录：波形、进度条、最终文本，以及重新识别 / 纠错 / 删除操作](docs/images/history-console-playing.png)
 
-![控制台播放态（合成演示音频）：展开的记录，含波形、进度条与最终文本](docs/images/history-console-playing.png)
+七个页面，一个内嵌应用（不依赖 CDN，离线可用）：
 
-控制台是单个内嵌页面，只监听回环地址。它显示：
+- **实时**：会话状态、开始/停止/取消与模式选择、识别中的文字实时滚动、麦克风音量条、上一次松手到出字的延迟、已加载的引擎与显存、实时日志。
+- **识别引擎**：主引擎与备用引擎、本地模型与设备、豆包/云端密钥（只写不读）、模型安装与进度。
+- **词库**：热词、精确替换、正则规则，带“试一试”实时预览清理效果。
+- **模式与提示词**：自定义模式与整理提示词。
+- **快捷键与上屏**：录制按住说话的按键、按住阈值、上屏方式、预编辑、暂停媒体与提示音，以及“测试上屏”。
+- **历史**：按天分组、波形回放；删除；用当前引擎重新识别某条录音；改正识别结果并一键加入替换规则或热词。
+- **诊断**：`doctor` 检查、GPU、日志，以及用当前引擎回放你保存的录音做基准测试（实时率与相对原转写的字差异率）。
 
-- 按天分组的记录。
-- 从保存的 WAV 渲染的波形。
-- 点击播放，进度可拖拽。
-- 记录数、字数、语音时长统计。
-- 游标分页。
-- 编辑并保存「转写提示词」（整理用提示词模板），保存后下次语音输入立即生效。
-
-音频 URL 只含 record id。服务端从数据库行读取文件路径。支持 `Range` 请求，浏览器可边下边播。
+安全：只监听回环地址，拒绝非回环的 `Host`（防 DNS 重绑定），每个 API 请求都要带页面内嵌的本次启动令牌（其他网站读不到），拒绝跨站写入，永不返回 API 密钥。设置写回 `config.toml` 时保留原有注释。接口见 `docs/console-api.md`。
 
 ## 模型目录
 
@@ -329,7 +325,7 @@ flowchart TB
     coord --> lasr[local_asr.rs — Sherpa-ONNX 在线]
     coord --> sess[session.rs — 转写状态机]
     cmd --> hist[history.rs — SQLite schema v2]
-    cmd --> web[history_web.rs — 回环 HTTP 控制台]
+    cmd --> web[console/ — 回环 axum 控制台（daemon 内）]
     cmd --> models[models.rs — 固定供应链]
     web --> hist
 ```
@@ -342,7 +338,7 @@ flowchart TB
 4. **录音是装饰器。** `WavRecorder` 包装 `AudioCapture`，把 chunk 镜像进 `.partial` 文件。只有成功会话 finalize WAV。镜像失败只禁用保存，不影响识别、注入、历史。cancel 与 drop 删除临时文件。音频行与文件同生同死。
 5. **控制源参数化。** `stream::run_with_control` 接收命令 channel。CLI 映射 SIGINT/SIGTERM（第一次停止、第二次取消）；daemon 映射热键 Activate/Cancel，gateway 状态机保证同一时刻至多一个会话。
 6. **私有 XDG 持久化。** 配置带 0600 密钥门禁；历史为 WAL SQLite、权限 0600；录音在 `data/audio/`；模型原子激活且每次会话前校验。用户数据不进 Nix store。
-7. **零依赖控制台。** `history_web` 是 tokio TCP 上的手写 HTTP/1.1：只接受 GET、每连接单响应、仅监听回环。前端经 `include_str!` 内嵌。音频 URL 只含 record id，文件路径从数据库行读取。
+7. **内嵌控制台。** `console/` 是 daemon 内的 axum 服务：仅监听回环、校验 `Host`、每次启动生成令牌、拒绝跨站写入、密钥只写不读。前端经 `include_str!` 内嵌。音频 URL 只含 record id，文件路径从数据库行读取。
 8. **严格配置契约。** 未知键报错；已移除的旧值被拒绝，Voiceless 不静默改写。
 
 完整运行时、持久化与集成契约见 [`docs/architecture.md`](docs/architecture.md)，含会话生命周期图与实测质量门禁。

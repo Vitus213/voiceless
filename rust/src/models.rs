@@ -351,9 +351,7 @@ impl ModelManager {
         }
 
         fs::create_dir_all(&self.downloads_root)?;
-        let partial = self
-            .downloads_root
-            .join(format!("{}-{}.partial", spec.id, spec.version));
+        let partial = self.download_path(spec);
         let staging = model_versions.join(format!(".staging-{}", unique_suffix()));
         let result = self.install_from_network(spec, downloader, &partial, &staging, &digest_hex);
         let _ = fs::remove_file(&partial);
@@ -416,6 +414,13 @@ impl ModelManager {
         }
         fs::rename(staging, &destination)?;
         Ok(destination)
+    }
+
+    /// Where an in-flight download is written; its size over
+    /// `spec.size_bytes` is the install progress.
+    pub fn download_path(&self, spec: &ModelSpec) -> PathBuf {
+        self.downloads_root
+            .join(format!("{}-{}.partial", spec.id, spec.version))
     }
 
     pub fn check(&self, spec: &ModelSpec) -> Result<(PathBuf, CheckReport), ModelError> {

@@ -3,14 +3,13 @@
 //! docs/images/ screenshots never contain real recordings.
 //!
 //! cargo run --example console_shot   # then screenshot the page
-use std::sync::Arc;
 
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 use voiceless::capture::wav_header;
+use voiceless::console::serve_listener;
 use voiceless::coordinator::HistoryEntry;
 use voiceless::history::HistoryStore;
-use voiceless::history_web::serve_listener;
 
 fn synth_wav(seconds: f64, freq: f64) -> Vec<u8> {
     let n = (seconds * 16_000.0) as usize;
@@ -101,11 +100,15 @@ async fn main() {
         .expect("redate");
     drop(connection);
 
-    let store =
-        Arc::new(HistoryStore::open(root.path().join("history.sqlite3")).expect("reopen store"));
     let listener = TcpListener::bind("127.0.0.1:18792").await.expect("bind");
     println!("console-shot ready on 18792");
-    serve_listener(listener, store, root.path().join("config.toml"))
-        .await
-        .expect("serve");
+    serve_listener(
+        listener,
+        None,
+        root.path().join("history.sqlite3"),
+        root.path().join("config.toml"),
+        "console-shot".to_owned(),
+    )
+    .await
+    .expect("serve");
 }
