@@ -161,7 +161,7 @@ voiceless stream --backend local-streaming
 
 ```toml
 [asr]
-streaming_backend = "cloud-realtime"   # cloud-realtime | local-streaming
+streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming
 batch_backend = "cloud"                # cloud | local（SenseVoice）
 # local_model_dir / batch_model_dir：覆盖托管模型位置
 
@@ -172,6 +172,19 @@ model = "qwen3-asr-flash-2026-02-10"
 timeout_seconds = 60.0
 realtime_endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 realtime_model = "qwen3-asr-flash-realtime"
+
+[doubao]                               # 火山引擎（豆包）大模型流式语音识别
+endpoint = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+api_key = ""                           # 新版控制台：APP Key（X-Api-Key）
+app_key = ""                           # 旧版控制台：App ID ……
+access_key = ""                        # ……和 Access Token
+resource_id = "volc.seedasr.sauc.duration"  # Seed ASR 2.0；1.0 用 volc.bigasr.sauc.*；并发计费用 .concurrent
+enable_itn = true
+enable_punc = true
+enable_ddc = false                     # 语义顺滑（去掉语气词）
+enable_nonstream = false               # 每句二遍识别，确认文本更准
+# end_window_size = 800                # 静音多少毫秒判定一句结束
+hotwords = []                          # 例如 ["Voiceless", "NixOS"]
 
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5

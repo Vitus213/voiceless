@@ -6,6 +6,8 @@ use thiserror::Error;
 
 const DEFAULT_REALTIME_ENDPOINT: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
 const DEFAULT_REALTIME_MODEL: &str = "qwen3-asr-flash-realtime";
+const DEFAULT_DOUBAO_ENDPOINT: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+const DEFAULT_DOUBAO_RESOURCE_ID: &str = "volc.seedasr.sauc.duration";
 const DEFAULT_PROCESSING_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_PROCESSING_MODEL: &str = "deepseek-v4-flash-0731";
 
@@ -31,6 +33,7 @@ pub enum ConfigError {
 pub struct AppConfig {
     pub asr: AsrConfig,
     pub cloud: CloudConfig,
+    pub doubao: DoubaoConfig,
     pub inject: InjectConfig,
     pub processing: ProcessingConfig,
     pub history: HistoryConfig,
@@ -82,6 +85,55 @@ impl Default for CloudConfig {
             realtime_endpoint: DEFAULT_REALTIME_ENDPOINT.to_owned(),
             realtime_model: DEFAULT_REALTIME_MODEL.to_owned(),
         }
+    }
+}
+
+/// Volcengine (Doubao) bigmodel streaming ASR. New-console keys go in
+/// `api_key` (`X-Api-Key`); legacy-console apps use `app_key` (App ID) and
+/// `access_key` (Access Token). `resource_id` must match the activated
+/// service: `volc.seedasr.sauc.*` for Seed ASR 2.0, `volc.bigasr.sauc.*`
+/// for 1.0, `.duration` (hourly) or `.concurrent` billing.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DoubaoConfig {
+    pub endpoint: String,
+    pub api_key: String,
+    pub app_key: String,
+    pub access_key: String,
+    pub resource_id: String,
+    pub enable_itn: bool,
+    pub enable_punc: bool,
+    pub enable_ddc: bool,
+    /// Second-pass (nonstream) recognition on each sentence; more accurate
+    /// confirmed text, only on the bigmodel_async endpoint.
+    pub enable_nonstream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_window_size: Option<u32>,
+    pub hotwords: Vec<String>,
+}
+
+impl Default for DoubaoConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: DEFAULT_DOUBAO_ENDPOINT.to_owned(),
+            api_key: String::new(),
+            app_key: String::new(),
+            access_key: String::new(),
+            resource_id: DEFAULT_DOUBAO_RESOURCE_ID.to_owned(),
+            enable_itn: true,
+            enable_punc: true,
+            enable_ddc: false,
+            enable_nonstream: false,
+            end_window_size: None,
+            hotwords: Vec::new(),
+        }
+    }
+}
+
+impl DoubaoConfig {
+    pub fn has_credentials(&self) -> bool {
+        !self.api_key.trim().is_empty()
+            || (!self.app_key.trim().is_empty() && !self.access_key.trim().is_empty())
     }
 }
 
@@ -181,7 +233,7 @@ impl AppConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let input = fs::read_to_string(path)?;
         #[cfg(unix)]
-        if !input.is_empty() && input.contains("api_key") {
+        if !input.is_empty() && (input.contains("api_key") || input.contains("access_key")) {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(path)?.permissions().mode();
             if mode & 0o077 != 0 {
@@ -210,10 +262,10 @@ impl AppConfig {
 
     fn validate(self) -> Result<Self, ConfigError> {
         match self.asr.streaming_backend.as_str() {
-            "cloud-realtime" | "local-streaming" => {}
+            "cloud-realtime" | "doubao-realtime" | "local-streaming" => {}
             value => {
                 return Err(ConfigError::Invalid(format!(
-                    "asr.streaming_backend={value:?}; expected cloud-realtime or local-streaming"
+                    "asr.streaming_backend={value:?}; expected cloud-realtime, doubao-realtime or local-streaming"
                 )))
             }
         }
@@ -230,6 +282,11 @@ impl AppConfig {
                     "inject.prefer={value:?}; expected wtype, clipboard or fcitx5"
                 )))
             }
+        }
+        if !self.doubao.endpoint.starts_with("wss://") {
+            return Err(ConfigError::Invalid(
+                "doubao.endpoint must use wss://".to_owned(),
+            ));
         }
         if !self.cloud.realtime_endpoint.starts_with("wss://") {
             return Err(ConfigError::Invalid(

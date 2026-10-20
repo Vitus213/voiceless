@@ -38,6 +38,8 @@ pub enum StreamError {
     UnsupportedBackend(String),
     #[error("cloud realtime API key is missing")]
     MissingApiKey,
+    #[error("doubao credentials are missing: set doubao.api_key, or doubao.app_key and doubao.access_key")]
+    MissingDoubaoCredentials,
     #[error("realtime session: {0}")]
     Realtime(#[from] io::Error),
     #[error("capture: {0}")]
@@ -74,6 +76,7 @@ pub async fn run_with_control(
     }
     match config.asr.streaming_backend.as_str() {
         "cloud-realtime" => run_cloud(config, options, control).await,
+        "doubao-realtime" => run_doubao(config, options, control).await,
         "local-streaming" => run_local(config, options, control).await,
         value => Err(StreamError::UnsupportedBackend(value.to_owned())),
     }
@@ -99,6 +102,31 @@ async fn run_cloud(
         plan,
         PwCapture::default(),
         CloudTransport(transport),
+        pipeline.processor,
+        ConfiguredInjector::new(config.inject.clone()),
+        pipeline.history,
+        control,
+        &mut StdoutSink::new(options.json),
+    )
+    .await;
+    Ok(code)
+}
+
+async fn run_doubao(
+    config: AppConfig,
+    options: StreamOptions,
+    control: tokio::sync::mpsc::Receiver<ControlCommand>,
+) -> Result<i32, StreamError> {
+    if !config.doubao.has_credentials() {
+        return Err(StreamError::MissingDoubaoCredentials);
+    }
+    let pipeline = build_pipeline(&config, &options)?;
+    let transport = crate::doubao::DoubaoSession::connect(&config.doubao).await?;
+    let plan = session_plan(&config, &options, "doubao-realtime", &pipeline.mode_id);
+    let code = crate::coordinator::run_session(
+        plan,
+        PwCapture::default(),
+        DoubaoTransport(transport),
         pipeline.processor,
         ConfiguredInjector::new(config.inject.clone()),
         pipeline.history,
@@ -392,6 +420,26 @@ impl AudioCapture for PwCapture {
 struct CloudTransport(RealtimeSession);
 
 impl BackendTransport for CloudTransport {
+    async fn send_audio(&self, pcm: &[u8]) -> io::Result<()> {
+        self.0.send_audio(pcm).await
+    }
+
+    async fn next_event(&self) -> io::Result<RealtimeEvent> {
+        self.0.next_event().await
+    }
+
+    async fn finish(&mut self) -> io::Result<()> {
+        self.0.finish().await
+    }
+
+    async fn cancel(&mut self) -> io::Result<()> {
+        self.0.cancel().await
+    }
+}
+
+struct DoubaoTransport(crate::doubao::DoubaoSession);
+
+impl BackendTransport for DoubaoTransport {
     async fn send_audio(&self, pcm: &[u8]) -> io::Result<()> {
         self.0.send_audio(pcm).await
     }

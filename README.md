@@ -161,7 +161,7 @@ Full key reference. All keys are optional; the values below are the defaults:
 
 ```toml
 [asr]
-streaming_backend = "cloud-realtime"   # cloud-realtime | local-streaming
+streaming_backend = "cloud-realtime"   # cloud-realtime | doubao-realtime | local-streaming
 batch_backend = "cloud"                # cloud | local (SenseVoice)
 # local_model_dir / batch_model_dir: override the managed model locations
 
@@ -172,6 +172,19 @@ model = "qwen3-asr-flash-2026-02-10"
 timeout_seconds = 60.0
 realtime_endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 realtime_model = "qwen3-asr-flash-realtime"
+
+[doubao]                               # Volcengine (Doubao) bigmodel streaming ASR
+endpoint = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+api_key = ""                           # new console: APP Key (X-Api-Key)
+app_key = ""                           # legacy console: App ID ...
+access_key = ""                        # ... and Access Token
+resource_id = "volc.seedasr.sauc.duration"  # Seed ASR 2.0; volc.bigasr.sauc.* for 1.0; .concurrent for concurrency billing
+enable_itn = true
+enable_punc = true
+enable_ddc = false                     # semantic smoothing (drops filler words)
+enable_nonstream = false               # second-pass recognition of each sentence
+# end_window_size = 800                # ms of silence that closes a sentence
+hotwords = []                          # e.g. ["Voiceless", "NixOS"]
 
 [inject]
 prefer = "wtype"                       # wtype | clipboard | fcitx5

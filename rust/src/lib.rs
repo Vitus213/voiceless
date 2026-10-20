@@ -7,6 +7,7 @@ pub mod config;
 pub mod coordinator;
 pub mod daemon;
 pub mod doctor;
+pub mod doubao;
 pub mod history;
 pub mod history_cmd;
 pub mod history_web;
