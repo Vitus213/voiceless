@@ -178,6 +178,10 @@
                 pkgs.nixfmt
                 pkgs.cargo
                 pkgs.rustc
+                # Same toolchain as rustc: a clippy from the user profile
+                # rejects crates built here (E0514).
+                pkgs.clippy
+                pkgs.rustfmt
                 pkgs.pipewire
                 stack.sherpaOnnx
                 stack.onnxruntime

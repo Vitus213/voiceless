@@ -25,11 +25,13 @@ pub enum ActivateOutcome {
 }
 
 /// Session factory boundary. Production wraps the stream coordinator;
-/// tests inject scripted fixtures.
+/// tests inject scripted fixtures. `inject` overrides the daemon's
+/// injection setting for this session only.
 pub trait SessionRunner {
     fn start(
         &mut self,
         mode: &str,
+        inject: Option<bool>,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>>;
 }
@@ -86,11 +88,20 @@ impl<R: SessionRunner> Gateway<R> {
 
     /// Start a session in `mode`; only valid when idle (hold-to-talk press).
     pub fn start(&mut self, mode: &str) -> Result<ActivateOutcome, String> {
+        self.start_with(mode, None)
+    }
+
+    /// [`Gateway::start`] with a per-session injection override.
+    pub fn start_with(
+        &mut self,
+        mode: &str,
+        inject: Option<bool>,
+    ) -> Result<ActivateOutcome, String> {
         if self.state != State::Idle {
             return Err(format!("cannot start: session is {}", self.state.name()));
         }
         let (tx, rx) = mpsc::channel(8);
-        let future = self.runner.start(mode, rx);
+        let future = self.runner.start(mode, inject, rx);
         self.task = Some(tokio::spawn(future));
         self.control_tx = Some(tx);
         self.state = State::Recording;
@@ -170,10 +181,14 @@ impl SessionRunner for StreamRunner {
     fn start(
         &mut self,
         mode: &str,
+        inject: Option<bool>,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> {
         let mut options = self.options.clone();
         options.mode = mode.to_owned();
+        if let Some(inject) = inject {
+            options.inject = inject;
+        }
         // The engine current at session start (a reload may swap it later).
         let env = crate::stream::SessionEnv {
             warm: self.shared.warm(),
@@ -206,6 +221,15 @@ impl ControllerInterface {
 
     fn start(&self, mode: &str) -> zbus::fdo::Result<String> {
         self.queue(DaemonCommand::Start(mode.to_owned()))
+    }
+
+    /// Start with an explicit injection choice (`voiceless stream`
+    /// delegating to the daemon, e.g. with `--no-inject`).
+    fn start_session(&self, mode: &str, inject: bool) -> zbus::fdo::Result<String> {
+        self.queue(DaemonCommand::StartSession {
+            mode: mode.to_owned(),
+            inject,
+        })
     }
 
     fn stop(&self) -> zbus::fdo::Result<String> {
@@ -246,6 +270,10 @@ impl ControllerInterface {
 pub enum DaemonCommand {
     Toggle(String),
     Start(String),
+    StartSession {
+        mode: String,
+        inject: bool,
+    },
     Stop,
     Cancel,
     Key(crate::hotkey::KeyEvent),
@@ -708,8 +736,11 @@ where
                     if requested.is_empty() { default_mode.clone() } else { requested }
                 };
                 if gateway.state() == State::Idle {
-                    if let DaemonCommand::Toggle(requested) | DaemonCommand::Start(requested) =
-                        &command
+                    if let DaemonCommand::Toggle(requested)
+                    | DaemonCommand::Start(requested)
+                    | DaemonCommand::StartSession {
+                        mode: requested, ..
+                    } = &command
                     {
                         session_mode = mode(requested.clone());
                     }
@@ -761,6 +792,9 @@ where
                 let result = match command {
                     DaemonCommand::Toggle(requested) => gateway.toggle(&mode(requested)).map(Some),
                     DaemonCommand::Start(requested) => gateway.start(&mode(requested)).map(Some),
+                    DaemonCommand::StartSession { mode: requested, inject } => {
+                        gateway.start_with(&mode(requested), Some(inject)).map(Some)
+                    }
                     DaemonCommand::Stop => gateway.stop().map(Some),
                     DaemonCommand::Key(_) | DaemonCommand::Reload(_) => {
                         unreachable!("handled above")

@@ -26,6 +26,7 @@ impl SessionRunner for FixtureRunner {
     fn start(
         &mut self,
         _mode: &str,
+        _inject: Option<bool>,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> {
         self.sessions_started += 1;

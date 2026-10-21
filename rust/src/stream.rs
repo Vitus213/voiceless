@@ -463,7 +463,7 @@ fn session_plan(
     plan
 }
 
-fn control_receiver() -> tokio::sync::mpsc::Receiver<ControlCommand> {
+pub(crate) fn control_receiver() -> tokio::sync::mpsc::Receiver<ControlCommand> {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
         let mut first_stop = false;

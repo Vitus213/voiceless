@@ -204,21 +204,17 @@ enum HistoryAction {
 async fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        Command::Stream(args) => match voiceless::stream::run(voiceless::stream::StreamOptions {
-            config_path: cli.config,
-            backend: args.backend,
-            json: args.json,
-            inject: !args.no_inject,
-            mode: args.mode,
-        })
-        .await
-        {
-            Ok(code) => code,
-            Err(error) => {
-                eprintln!("Voiceless: {error}");
-                1
+        Command::Stream(args) if uses_local_model(&cli.config, &args) => {
+            match voiceless::ctl::stream_via_daemon(&args.mode, !args.no_inject, args.json).await {
+                Some(Ok(code)) => code,
+                Some(Err(error)) => {
+                    eprintln!("Voiceless: {error}");
+                    1
+                }
+                None => run_stream(cli.config, args).await,
             }
-        },
+        }
+        Command::Stream(args) => run_stream(cli.config, args).await,
         Command::Transcribe(args) => {
             voiceless::batch_cmd::transcribe(voiceless::batch_cmd::TranscribeArgs {
                 wav: args.wav,
@@ -373,4 +369,38 @@ async fn main() {
         },
     };
     std::process::exit(code);
+}
+
+/// Whether `stream` would load the local model that a running daemon already
+/// holds; such sessions run in the daemon instead (see `ctl::stream_via_daemon`).
+/// An explicit `--config` or `--backend` asks for something the daemon's own
+/// configuration may not be, so those always run standalone.
+fn uses_local_model(config: &Option<PathBuf>, args: &StreamArgs) -> bool {
+    if config.is_some() || args.backend.is_some() {
+        return false;
+    }
+    voiceless::config::AppConfig::load_optional(None).is_ok_and(|config| {
+        matches!(
+            config.asr.streaming_backend.as_str(),
+            "local-offline" | "local-streaming"
+        )
+    })
+}
+
+async fn run_stream(config_path: Option<PathBuf>, args: StreamArgs) -> i32 {
+    match voiceless::stream::run(voiceless::stream::StreamOptions {
+        config_path,
+        backend: args.backend,
+        json: args.json,
+        inject: !args.no_inject,
+        mode: args.mode,
+    })
+    .await
+    {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Voiceless: {error}");
+            1
+        }
+    }
 }
