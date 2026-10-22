@@ -4,6 +4,32 @@
 // (underlined, uncommitted text) in that field while the user speaks.
 // Exposed on Fcitx5's own session-bus name (org.fcitx.Fcitx5) at
 // /voiceless, interface dev.voiceless.Fcitx5Bridge1.
+//
+// D-Bus contract. Every method returns the tuple (b ok, s detail); the
+// Rust client (rust/src/fcitx5.rs) deserializes exactly `(bool, String)`
+// and `voiceless doctor` calls Status.
+//   CommitString(s text) -> (b, s)  Commit text into the focused input
+//       context after clearing this bridge's preedit. detail is the target
+//       program as "name (frontend)" on success, the reason on failure
+//       ("empty text", "no focused input context").
+//   SetPreedit(s text) -> (b, s)    Show text underlined as preedit in the
+//       focused context; empty text clears it. detail as above.
+//   ClearPreedit() -> (b, s)        Remove the preedit; always (true, "").
+//   Status() -> (b, s)              (true, program) while a context has
+//       focus, (false, "no focused input context") otherwise. No effects.
+// Calls are dispatched on Fcitx5's single event loop in bus order, so a
+// client that sends SetPreedit then CommitString on one connection sees
+// them applied in that order: a stale partial never lands after the final.
+//
+// Preedit lifecycle. SetPreedit remembers the context it drew into
+// (preeditContext_, a tracking reference that turns null when Fcitx5
+// destroys the context, so no dangling pointer is ever touched). The
+// preedit is cleared from that context before any of: a SetPreedit while a
+// different context has focus, a SetPreedit with no focused context, a
+// CommitString, or a ClearPreedit. Clearing resets both the client-side
+// and the panel preedit and refreshes the UI. The module is loaded at
+// Fcitx5 start (OnDemand=False in voiceless-bridge.conf) and uses the dbus
+// addon's bus connection to register the object.
 
 #include <string>
 #include <tuple>
@@ -63,7 +89,11 @@ public:
             return {true, describe(ic)};
         }
         fcitx::Text preedit(text, fcitx::TextFormatFlag::Underline);
+        // Cursor at the end (byte offset into the UTF-8 text) so the caret
+        // follows the growing transcript.
         preedit.setCursor(static_cast<int>(text.size()));
+        // Clients that advertise preedit support render it inline; others
+        // (plain X11 apps, some terminals) only see the Fcitx5 panel.
         if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
             ic->inputPanel().setClientPreedit(preedit);
         } else {
@@ -74,6 +104,7 @@ public:
         return {true, describe(ic)};
     }
 
+    // D-Bus ClearPreedit: idempotent, never fails.
     std::tuple<bool, std::string> clearPreeditMethod() {
         clearPreedit();
         return {true, ""};
@@ -89,6 +120,10 @@ public:
     }
 
 private:
+    // Remove the preedit from whichever context still shows it (if that
+    // context is already gone the reference is null and only the watch is
+    // dropped). Both preedit slots are reset because setPreedit may have
+    // used either, depending on the client's capability at the time.
     void clearPreedit() {
         if (auto *ic = preeditContext_.get()) {
             ic->inputPanel().setClientPreedit(fcitx::Text());
@@ -98,16 +133,24 @@ private:
         preeditContext_.unwatch();
     }
 
+    // Push the input panel state to the client (inline preedit) and to the
+    // UI addon (panel); neither updates on its own after a set*Preedit.
     static void refresh(fcitx::InputContext *ic) {
         ic->updatePreedit();
         ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
     }
 
+    // mostRecentInputContext may still name a context that lost focus (the
+    // user switched to a window without one); only act on it while it
+    // actually has focus, otherwise text would go to the wrong field.
     fcitx::InputContext *focusedInputContext() {
         auto *ic = instance_->mostRecentInputContext();
         return ic && ic->hasFocus() ? ic : nullptr;
     }
 
+    // "program (frontend)": the client-reported program name ("unknown"
+    // when it reported none) and the Fcitx5 frontend addon it connected
+    // through. Returned as the detail string of every successful call.
     static std::string describe(fcitx::InputContext *ic) {
         std::string program = ic->program();
         if (program.empty()) {
@@ -119,12 +162,18 @@ private:
     fcitx::Instance *instance_;
     // The context showing this bridge's preedit, if it still exists.
     fcitx::TrackableObjectReference<fcitx::InputContext> preeditContext_;
+    // Method table: (C++ member, D-Bus name, in signature, out signature).
+    // The "bs" out signature is the (ok, detail) tuple every method returns;
+    // changing it breaks rust/src/fcitx5.rs.
     FCITX_OBJECT_VTABLE_METHOD(commitString, "CommitString", "s", "bs");
     FCITX_OBJECT_VTABLE_METHOD(setPreedit, "SetPreedit", "s", "bs");
     FCITX_OBJECT_VTABLE_METHOD(clearPreeditMethod, "ClearPreedit", "", "bs");
     FCITX_OBJECT_VTABLE_METHOD(status, "Status", "", "bs");
 };
 
+// Addon instance: resolves the dbus addon (declared as a dependency in
+// voiceless-bridge.conf, so it is loaded first) and registers the object
+// on Fcitx5's own session-bus connection; no extra bus name is claimed.
 class VoicelessBridge : public fcitx::AddonInstance {
     fcitx::Instance *instance_;
     FCITX_ADDON_DEPENDENCY_LOADER(dbus, instance_->addonManager());
@@ -138,6 +187,7 @@ public:
     }
 };
 
+// Entry point Fcitx5's addon manager uses to instantiate the module.
 class VoicelessBridgeFactory : public fcitx::AddonFactory {
 public:
     fcitx::AddonInstance *create(fcitx::AddonManager *manager) override {

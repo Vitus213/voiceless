@@ -6,6 +6,14 @@
 # (re)opened window always shows the default state and never the previous
 # session's transcript. The border colour follows the current mode, which the
 # pump writes to the mode file before opening the window.
+#
+# The pump is voiceless-overlay.py (its `frame` function writes the JSON,
+# `open_fifo` holds the write end for the whole run). eww starts this
+# script once when it loads eww.yuck; `cat` blocks on the FIFO until the
+# pump opens it and returns when the pump exits, after which the loop
+# re-emits the fresh frame and waits again (sleep 1 only if the FIFO does
+# not exist yet). The frame's field names and colour values must stay in
+# sync with `frame` and `STATE_COLORS` in the pump.
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 MODEFILE="$RUNTIME/voiceless-overlay.mode"
 FIFO="$RUNTIME/voiceless-overlay.fifo"

@@ -10,10 +10,25 @@
 ;; Notes: JSON fields are read via ${stream.x} interpolation (bare dotted
 ;; expressions are not resolved); the listen command uses bare
 ;; $XDG_RUNTIME_DIR because eww would interpolate a ${...} itself.
+;;
+;; Data flow: voiceless-overlay.py (started by the voiceless-overlay user
+;; unit) follows `voiceless ctl watch`, writes one JSON frame per change
+;; into $XDG_RUNTIME_DIR/voiceless-overlay.fifo and runs `eww open|close
+;; voiceless-overlay` around each session. voiceless-overlay-listen.sh
+;; tails that FIFO for `deflisten`, so `stream` is always the latest frame:
+;;   text       - the (windowed) transcript or a status word
+;;   width      - eased pill width in px
+;;   pillbg     - background colour for the current state
+;;   pillborder - border colour (the only state indicator)
+;; `:initial` must be a valid frame because the widget renders before the
+;; listener's first line. This file is used by a dedicated eww daemon
+;; (`eww --config ~/.config/eww-voiceless`), never the user's main one.
 
 (deflisten stream :initial "{\"text\":\"聆听中…\",\"width\":170,\"pillbg\":\"rgba(28, 37, 48, 0.78)\",\"pillborder\":\"rgba(98, 160, 234, 0.85)\"}"
   "~/.config/eww-voiceless/voiceless-overlay-listen.sh")
 
+;; The pill: colours come from the frame via :style, width from the frame,
+;; the label truncates on the left so the newest words stay visible.
 (defwidget voiceless-pill []
   (box :class "ov"
     :style "background-color: ${stream.pillbg}; border-color: ${stream.pillborder};"
@@ -25,6 +40,10 @@
     (label :class "text" :text "${stream.text}" :wrap false :halign "center"
       :truncate true :truncate-left true :show-truncated false)))
 
+;; Layer-shell window on the primary monitor, 28 px above the bottom edge,
+;; overlay stacking and wm-ignore so it floats above fullscreen apps and
+;; never takes focus away from the field being dictated into. The 720 px
+;; width is the maximum; the pill inside is narrower and centered.
 (defwindow voiceless-overlay
   :monitor 0
   :geometry (geometry :x "0%" :y "28px" :width "720px" :height "60px" :anchor "bottom center")

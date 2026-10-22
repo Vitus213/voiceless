@@ -2,17 +2,57 @@
 // local API (docs/console-api.md). Hash routing, one module-level object
 // per page, shared components (api, toast, dialogs, tag input, table
 // editor, save bar) at the top.
+//
+// Structure (top to bottom):
+//   basics      - DOM helpers (h, $, $$), the localStorage wrapper, number
+//                 formatters, backend and state labels.
+//   API         - api() wraps fetch: token header, JSON in/out; a non-2xx
+//                 {"error"} body becomes an ApiError (503 = no daemon,
+//                 403 = stale token, 0 = network). withToken() appends
+//                 ?token= for URLs the browser loads itself (EventSource,
+//                 <audio src>, waveform fetch).
+//   components  - toast, modal dialog, busy buttons, cards/fields, form
+//                 bindings that write into a draft object and call
+//                 changed(), tag input, table editor, save bar, char diff.
+//   live        - `app` (daemon state/mode/last status) and `live`, the one
+//                 EventSource over /api/events shared by every page, with
+//                 exponential reconnect; fetchStatus() keeps the sidebar
+//                 badge current.
+//   config help - saveSections() diffs a draft against its saved copy and
+//                 PUTs only the changed sections; offerEngineReload() when
+//                 the server answers restart_engine.
+//   pages       - one factory per page (LivePage ... DiagnosticsPage), each
+//                 returning { mount(view), unmount?(), isDirty?() }.
+//                 Settings pages keep `saved`/`draft` copies of their
+//                 config sections; the history page keeps playback and
+//                 waveform state.
+//   router      - PAGES, hash navigation with an unsaved-changes prompt.
+//
+// Token: the server substitutes it into <meta name="voiceless-token"> on
+// every page load; it is read once into TOKEN and sent on every /api call.
+// The server also refuses cross-origin writes, so the page needs no CSRF
+// handling of its own. No build step: this file is served verbatim
+// (embedded in the binary).
 "use strict";
 
 /* ====================================================================== */
 /* basics                                                                 */
 /* ====================================================================== */
+// Tiny DOM/utility layer; nothing here touches the network.
 
+/** Session token the server substituted into the page; "" if absent (API calls then 403). */
 const TOKEN = document.querySelector('meta[name="voiceless-token"]')?.content || "";
+/** querySelector / querySelectorAll shorthands scoped to `root`. */
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-/// Element builder: h("div", { class: "x", onclick: fn }, child, "text").
+/**
+ * Element builder: h("div", { class: "x", onclick: fn }, child, "text").
+ * Attrs: class, text, value, checked, dataset, style (object) are set as
+ * properties; on* functions become listeners; `true` sets a bare attribute;
+ * null/false skip. Children are flattened; strings become text nodes (never
+ * HTML), which is what keeps transcripts and config values safe to display.
+ */
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
@@ -34,6 +74,7 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+/** localStorage under a "voiceless." prefix, JSON-encoded; silent when storage is blocked. */
 const storage = {
   get(key, fallback = null) {
     try {
@@ -50,10 +91,12 @@ const storage = {
   },
 };
 
+/** Deep copy / structural equality via JSON (config sections are plain data); promise sleep. */
 const clone = (value) => (value == null ? value : JSON.parse(JSON.stringify(value)));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Trailing debounce with a cancel() for unmount. */
 function debounce(fn, ms) {
   let timer = null;
   const wrapped = (...args) => {
@@ -64,17 +107,20 @@ function debounce(fn, ms) {
   return wrapped;
 }
 
+/** Seconds -> "m:ss"; "–:––" when unknown. */
 function fmtDuration(seconds) {
   if (seconds == null || Number.isNaN(seconds)) return "–:––";
   const s = Math.round(seconds);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** Seconds -> fixed decimals as a string; "–" when unknown. */
 function fmtSeconds(seconds, digits = 1) {
   if (seconds == null || Number.isNaN(seconds)) return "–";
   return `${Number(seconds).toFixed(digits)}`;
 }
 
+/** Bytes -> "1.23 GB" / "456 MB" / "12 KB" (decimal units, matching the model catalog). */
 function fmtBytes(bytes) {
   if (bytes == null) return "–";
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
@@ -82,6 +128,7 @@ function fmtBytes(bytes) {
   return `${(bytes / 1e3).toFixed(0)} KB`;
 }
 
+/** Seconds -> "d 天 h 小时" / "h 小时 m 分" / "m 分钟". */
 function fmtUptime(seconds) {
   if (seconds == null) return "–";
   const d = Math.floor(seconds / 86400);
@@ -92,6 +139,7 @@ function fmtUptime(seconds) {
   return `${min} 分钟`;
 }
 
+/** [id, label] pairs for the streaming_backend / fallback_backend selects, in menu order. */
 const BACKENDS = [
   ["local-offline", "本地离线模型（GPU，推荐）"],
   ["doubao-realtime", "豆包流式（火山引擎）"],
@@ -99,6 +147,7 @@ const BACKENDS = [
   ["local-streaming", "本地流式 Paraformer（CPU）"],
 ];
 
+/** Short label for a backend id (also used for history rows' asr_provider). */
 function backendLabel(id) {
   return {
     "local-offline": "本地离线",
@@ -108,12 +157,15 @@ function backendLabel(id) {
   }[id] || id || "未知";
 }
 
+/** Daemon session states (plus the page's own "down") -> badge text. */
 const STATE_LABELS = { idle: "空闲", recording: "录音中", stopping: "识别中", down: "后台未运行" };
 
 /* ====================================================================== */
 /* API                                                                    */
 /* ====================================================================== */
+// One HTTP helper; every page goes through api() so errors toast consistently.
 
+/** Error from api(): status 0 = network failure, else the HTTP status; message from {"error"}. */
 class ApiError extends Error {
   constructor(status, message) {
     super(message);
@@ -121,17 +173,22 @@ class ApiError extends Error {
   }
 }
 
+/** 503 = no daemon (history serve). withToken() appends ?token= for browser-loaded URLs. */
 const isDaemonDown = (error) => error instanceof ApiError && error.status === 503;
 const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}`;
 
+/** User-facing text for an ApiError: daemon down, stale token, else the server's message. */
 function humanError(error) {
   if (isDaemonDown(error)) return "后台进程未运行（voiceless daemon），该功能暂不可用";
   if (error instanceof ApiError && error.status === 403) return "令牌无效，请刷新页面";
   return error.message || String(error);
 }
 
-/// Every /api call: token header, JSON in and out, `{"error"}` on non-2xx
-/// becomes an ApiError (and a toast unless `quiet`).
+/**
+ * Every /api call: token header, JSON in and out, `{"error"}` on non-2xx
+ * becomes an ApiError (and a toast unless `quiet`). A network failure is an
+ * ApiError with status 0. Resolves with the parsed body (null when empty).
+ */
 async function api(path, { method = "GET", body, quiet = false } = {}) {
   const init = { method, headers: { "X-Voiceless-Token": TOKEN } };
   if (body !== undefined) {
@@ -166,7 +223,9 @@ async function api(path, { method = "GET", body, quiet = false } = {}) {
 /* ====================================================================== */
 /* components                                                             */
 /* ====================================================================== */
+// Reusable UI pieces. Form bindings mutate a draft object in place and call changed().
 
+/** Transient notice bottom-right; kind "info" | "ok" | "warn" | "err" (err is an aria alert). */
 function toast(message, kind = "info", ms = 4200) {
   const el = h("div", { class: `toast ${kind}`, role: kind === "err" ? "alert" : "status" }, message);
   $("#toasts").append(el);
@@ -177,8 +236,11 @@ function toast(message, kind = "info", ms = 4200) {
   }, ms);
 }
 
-/// Modal dialog. `actions`: [{ label, value, class, close: false, onClick }].
-/// Resolves with the value of the closing action ("" on Escape).
+/**
+ * Modal dialog. `actions`: [{ label, value, class, close: false, onClick }].
+ * Resolves with the value of the closing action ("" on Escape). An action
+ * with `close: false` keeps the dialog open (used for "generate suggestions").
+ */
 function openDialog({ title, body, actions = [], onOpen }) {
   const dialog = $("#dialog");
   const buttons = actions.map((action) =>
@@ -205,6 +267,7 @@ function openDialog({ title, body, actions = [], onOpen }) {
   });
 }
 
+/** Yes/no dialog; resolves true only for the confirming button. */
 async function confirmDialog(message, { title = "请确认", okText = "确定", danger = false } = {}) {
   const result = await openDialog({
     title,
@@ -217,7 +280,7 @@ async function confirmDialog(message, { title = "请确认", okText = "确定", 
   return result === "ok";
 }
 
-/// Runs `fn` with `button` in its loading state.
+/** Runs `fn` with `button` in its loading state (disabled, spinner, aria-busy), restored after. */
 async function busy(button, fn) {
   if (!button) return fn();
   button.disabled = true;
@@ -232,6 +295,7 @@ async function busy(button, fn) {
   }
 }
 
+/** Card section with a serif title and an optional mono "[section]" tag naming the config table. */
 function card(title, section, ...children) {
   return h(
     "section",
@@ -241,6 +305,7 @@ function card(title, section, ...children) {
   );
 }
 
+/** Label + control (+ help); wires `for` to the control's input, generating an id when needed. */
 function field(label, control, { help, wide = false } = {}) {
   const id = control.id || `f-${Math.random().toString(36).slice(2, 9)}`;
   const target = control.matches?.("input, select, textarea") ? control : control.querySelector?.("input, select, textarea");
@@ -254,6 +319,7 @@ function field(label, control, { help, wide = false } = {}) {
   );
 }
 
+/** Page title row with optional subtitle and right-aligned action buttons. */
 function pageHead(title, sub, ...actions) {
   return h(
     "header",
@@ -263,12 +329,14 @@ function pageHead(title, sub, ...actions) {
   );
 }
 
+/** Centred placeholder for empty lists and load failures. */
 function emptyState(big, text) {
   return h("div", { class: "empty" }, h("div", { class: "big", text: big }), text ? h("div", {}, text) : null);
 }
 
 /* ---- form bindings on a draft object; each calls `changed()` ---- */
 
+/** Text input bound to obj[key]; `nullable` turns a blank into null (optional config keys). */
 function textInput(obj, key, changed, { placeholder = "", mono = false, type = "text", nullable = false } = {}) {
   return h("input", {
     type,
@@ -284,6 +352,7 @@ function textInput(obj, key, changed, { placeholder = "", mono = false, type = "
   });
 }
 
+/** Number input bound to obj[key]; a blank becomes null when nullable, else 0. */
 function numberInput(obj, key, changed, { min, max, step = 1, nullable = false, placeholder = "" } = {}) {
   return h("input", {
     type: "number",
@@ -301,7 +370,7 @@ function numberInput(obj, key, changed, { min, max, step = 1, nullable = false, 
   });
 }
 
-/// options: [[value, label]]; value null maps to "" in the DOM.
+/** Select bound to obj[key]. options: [[value, label]]; a null value maps to "" in the DOM. */
 function selectInput(obj, key, options, changed) {
   const select = h(
     "select",
@@ -319,6 +388,7 @@ function selectInput(obj, key, options, changed) {
   return select;
 }
 
+/** Switch bound to a boolean obj[key], with label and optional sub-label. */
 function toggleInput(obj, key, changed, label, sub) {
   return h(
     "label",
@@ -336,6 +406,7 @@ function toggleInput(obj, key, changed, label, sub) {
   );
 }
 
+/** Range slider bound to a numeric obj[key] with a live formatted readout. */
 function rangeInput(obj, key, changed, { min, max, step, format = (v) => v }) {
   const output = h("output", { text: format(obj[key]) });
   const input = h("input", {
@@ -355,7 +426,12 @@ function rangeInput(obj, key, changed, { min, max, step, format = (v) => v }) {
   return h("div", { class: "range-line" }, input, output);
 }
 
-/// Write-only secret: "" keeps the stored value, null clears it.
+/**
+ * Write-only secret: "" keeps the stored value, null clears it (the server's
+ * PUT /api/config contract). `hasValue` is the server's has_<key> flag. The
+ * chip shows the pending outcome; the button toggles between clear (null)
+ * and undo (back to "").
+ */
 function secretInput(obj, key, hasValue, changed) {
   if (obj[key] === undefined) obj[key] = "";
   const chip = h("span", { class: "chip" });
@@ -406,6 +482,12 @@ function secretInput(obj, key, hasValue, changed) {
 
 /* ---- tag input ---- */
 
+/**
+ * Chip list editor for string arrays (hotwords). Enter, comma (ASCII or
+ * full-width), blur and pastes containing separators add; Backspace on an
+ * empty entry removes the last chip; duplicates are ignored. Returns
+ * { el, set(values) }; `onChange` receives a copy of the list.
+ */
 function tagInput(values, onChange, placeholder = "输入后按回车添加") {
   let tags = [...(values || [])];
   const list = h("div", { class: "tags" });
@@ -491,7 +573,12 @@ function tagInput(values, onChange, placeholder = "输入后按回车添加") {
 
 /* ---- table editor ---- */
 
-/// columns: [{ key, label, placeholder, mono }]. Rows are plain objects.
+/**
+ * Editable rows of text inputs (replacements, regex rules).
+ * columns: [{ key, label, placeholder, mono }]. Rows are plain objects;
+ * `onChange` gets a fresh copy. markInvalid/clearInvalid highlight the row
+ * the server's preview error points at.
+ */
 function tableEditor({ columns, rows, onChange, emptyText = "还没有条目", addLabel = "添加一行" }) {
   let data = (rows || []).map((row) => ({ ...row }));
   const tbody = h("tbody");
@@ -584,6 +671,7 @@ function tableEditor({ columns, rows, onChange, emptyText = "还没有条目", a
 
 /* ---- save bar ---- */
 
+/** Floating unsaved-changes bar on <body>: set(dirty) shows/hides it; remove() on unmount. */
 function saveBar({ onSave, onDiscard, message = "有未保存的更改" }) {
   const save = h("button", { type: "button", class: "btn primary small" }, "保存");
   const discard = h("button", { type: "button", class: "btn ghost small" }, "放弃");
@@ -607,6 +695,11 @@ function saveBar({ onSave, onDiscard, message = "有未保存的更改" }) {
 
 /* ---- character diff (LCS) for comparisons ---- */
 
+/**
+ * Character-level diff via an LCS table (the same walk as the server's
+ * suggest_replacements): [[op, text]] with op "=", "-" or "+", runs merged.
+ * Falls back to whole-string delete + insert above 4M table cells.
+ */
 function diffChars(a, b) {
   const A = [...(a || "")];
   const B = [...(b || "")];
@@ -643,6 +736,7 @@ function diffChars(a, b) {
   return parts;
 }
 
+/** diffChars() rendered as <del>/<ins> spans inside a .diff block. */
 function renderDiff(before, after) {
   return h(
     "div",
@@ -656,13 +750,23 @@ function renderDiff(before, after) {
 /* ====================================================================== */
 /* live connection: one EventSource shared by every page                  */
 /* ====================================================================== */
+// Daemon connection shared by all pages: EventSource with backoff + status polling.
 
+/** Shared daemon view: state (idle | recording | stopping | down | null), mode, last status. */
 const app = {
   state: null, // idle | recording | stopping | down | null (unknown)
   mode: "quick",
   status: null,
 };
 
+/**
+ * The one EventSource over /api/events (token in the query string, since
+ * EventSource cannot set headers). connect() is idempotent; on error the
+ * source is closed and reopened after `retry` ms, doubling up to 10 s and
+ * resetting on open. State events update `app` and the sidebar before the
+ * fan-out; page listeners are isolated from each other's exceptions.
+ * subscribe() returns the unsubscribe function for unmount.
+ */
 const live = {
   source: null,
   listeners: new Set(),
@@ -712,6 +816,7 @@ const live = {
   },
 };
 
+/** GET /api/status into `app`; a 503 marks the daemon "down". Rethrows for callers to branch. */
 async function fetchStatus() {
   try {
     const status = await api("/api/status", { quiet: true });
@@ -729,8 +834,10 @@ async function fetchStatus() {
   }
 }
 
+/** Debounced status refresh, fired by SSE open/error and after engine reloads. */
 const refreshNavStatus = debounce(() => fetchStatus().catch(() => {}), 300);
 
+/** Sidebar badge from app.state; with no known state it shows the SSE connection instead. */
 function renderNavStatus() {
   const el = $("#navStatus");
   const state = app.state || "unknown";
@@ -741,7 +848,9 @@ function renderNavStatus() {
 /* ====================================================================== */
 /* shared helpers for config pages                                        */
 /* ====================================================================== */
+// Config-page plumbing: load modes, diff/save sections, engine reload prompt.
 
+/** Modes sorted by sort_order; falls back to the built-in "快速" entry when the API fails. */
 async function loadModes() {
   try {
     const modes = await api("/api/modes", { quiet: true });
@@ -751,7 +860,7 @@ async function loadModes() {
   }
 }
 
-/// Removes the masked-secret markers before a config section is sent back.
+/** Removes the masked-secret markers (has_*) before a config section is sent back. */
 function stripMarkers(section) {
   const out = {};
   for (const [key, value] of Object.entries(section || {})) {
@@ -760,7 +869,11 @@ function stripMarkers(section) {
   return out;
 }
 
-/// PUT the changed sections of `draft` relative to `saved`.
+/**
+ * PUT the changed sections of `draft` relative to `saved` (compared as
+ * JSON); no request when nothing differs. Secrets left "" go as "" = keep.
+ * Returns the server's { ok, restart_engine } plus `changed`.
+ */
 async function saveSections(saved, draft, sections) {
   const patch = {};
   for (const name of sections) {
@@ -771,6 +884,7 @@ async function saveSections(saved, draft, sections) {
   return { ...result, changed: true };
 }
 
+/** After a save flagged restart_engine: ask, then POST /api/engine/reload on confirmation. */
 async function offerEngineReload() {
   const choice = await openDialog({
     title: "需要重新加载引擎",
@@ -783,6 +897,7 @@ async function offerEngineReload() {
   if (choice === "reload") await reloadEngine();
 }
 
+/** POST /api/engine/reload, toasting the new engine and load time; resolves null on failure. */
 async function reloadEngine(button) {
   return busy(button, async () => {
     try {
@@ -796,7 +911,7 @@ async function reloadEngine(button) {
   });
 }
 
-/// Secrets come back as "" plus has_<key>; keep "" in the draft (= unchanged).
+/** Secrets come back as "" plus has_<key>; keep "" in the draft (= unchanged). */
 function secretFlag(section, key) {
   return Boolean(section?.[`has_${key}`]);
 }
@@ -804,7 +919,14 @@ function secretFlag(section, key) {
 /* ====================================================================== */
 /* page: 实时                                                              */
 /* ====================================================================== */
+// Live page: session control, streaming transcript, mic meter, engine card, daemon logs.
 
+/**
+ * Live page. Subscribes to the SSE stream for state/transcript/level/log
+ * events, polls /api/status every 5 s for engine and GPU, and drives the
+ * start/stop/cancel buttons. Without a daemon it shows the banner and
+ * disables control.
+ */
 function LivePage() {
   const els = {};
   let unsubscribe = null;
@@ -816,6 +938,7 @@ function LivePage() {
   let state = null;
   let modes = [];
 
+  /** Reflect a session state in badge, buttons and mode picker; clears the meter when idle. */
   function setState(next) {
     state = next;
     const badge = els.badge;
@@ -839,6 +962,7 @@ function LivePage() {
     if (next !== "recording") levelTarget = 0;
   }
 
+  /** Render a transcript snapshot: confirmed segments + underlined partial until is_final. */
   function showTranscript(snapshot) {
     const box = els.transcript;
     const final = Boolean(snapshot.is_final);
@@ -869,6 +993,7 @@ function LivePage() {
     els.note.className = `transcript-note ${kind}`;
   }
 
+  /** Last-session stats: stop-to-text ms, audio seconds, characters. */
   function showSession(session) {
     if (!session) {
       els.statFinal.replaceChildren("–");
@@ -881,6 +1006,7 @@ function LivePage() {
     els.statChars.replaceChildren(session.chars != null ? String(session.chars) : "–", h("small", { text: "字" }));
   }
 
+  /** Engine card: backend/fallback, model, load time, uptime, load error, GPU bars. */
   function renderEngine(status) {
     const engine = status.engine || {};
     const rows = [
@@ -900,11 +1026,13 @@ function LivePage() {
     els.engine.replaceChildren(...children);
   }
 
+  /** Mic level event (RMS 0..1) -> meter target with perceptual scaling. */
   function setLevel(rms) {
     // Perceptual scaling: speech RMS sits around 0.02–0.3.
     levelTarget = Math.min(1, Math.pow(Math.max(0, rms) * 3, 0.6));
   }
 
+  /** rAF loop: fast attack, slow release, plus decay so the meter falls between events. */
   function animate() {
     level += (levelTarget - level) * (levelTarget > level ? 0.5 : 0.12);
     levelTarget *= 0.92; // decays between level events
@@ -912,6 +1040,7 @@ function LivePage() {
     frame = requestAnimationFrame(animate);
   }
 
+  /** Append a log line (keep 300); auto-scroll only when the view was already at the bottom. */
   function appendLog(line) {
     logLines.push(line);
     if (logLines.length > 300) logLines = logLines.slice(-300);
@@ -920,6 +1049,7 @@ function LivePage() {
     if (atBottom) els.log.scrollTop = els.log.scrollHeight;
   }
 
+  /** SSE dispatcher for this page: one case per event type in docs/console-api.md. */
   function onEvent(event) {
     switch (event.type) {
       case "state":
@@ -966,6 +1096,7 @@ function LivePage() {
     }
   }
 
+  /** Poll /api/status; a 503 flips the page into its "daemon down" presentation. */
   async function refresh() {
     try {
       const status = await fetchStatus();
@@ -981,6 +1112,7 @@ function LivePage() {
     }
   }
 
+  /** Start (with the picked mode) or stop, depending on the current state. */
   async function primaryAction() {
     const mode = els.mode.value;
     storage.set("liveMode", mode);
@@ -1068,6 +1200,7 @@ function LivePage() {
   };
 }
 
+/** One GPU row: name, used/total GB and a meter bar. */
 function gpuBar(gpu) {
   const used = gpu.memory_used_mib ?? 0;
   const total = gpu.memory_total_mib || 1;
@@ -1083,7 +1216,9 @@ function gpuBar(gpu) {
 /* ====================================================================== */
 /* page: 识别引擎                                                          */
 /* ====================================================================== */
+// Engine page: [asr]/[local]/[doubao]/[cloud] settings and the model catalog with installs.
 
+/** Model `kind` -> [label, chip class]. */
 const MODEL_KIND = {
   gguf: ["GPU · GGUF", "ok"],
   sherpa: ["CPU · Sherpa", ""],
@@ -1091,6 +1226,7 @@ const MODEL_KIND = {
   streaming: ["流式 · CPU", ""],
 };
 
+/** Known Doubao resource ids offered as datalist suggestions. */
 const DOUBAO_RESOURCES = [
   ["volc.seedasr.sauc.duration", "Seed ASR 2.0 · 按时长"],
   ["volc.seedasr.sauc.concurrent", "Seed ASR 2.0 · 按并发"],
@@ -1098,6 +1234,12 @@ const DOUBAO_RESOURCES = [
   ["volc.bigasr.sauc.concurrent", "ASR 1.0 · 按并发"],
 ];
 
+/**
+ * Engine page: [asr], [local], [doubao], [cloud] as one draft saved through
+ * saveSections(), plus the model catalog. Installs run on the server; the
+ * table polls /api/models every 1.5 s while any model is installing and
+ * toasts completion or failure.
+ */
 function EnginePage() {
   const SECTIONS = ["asr", "local", "doubao", "cloud"];
   let saved = null;
@@ -1111,6 +1253,7 @@ function EnginePage() {
   const dirty = () => saved && !same(saved, draft);
   const changed = () => bar?.set(dirty());
 
+  /** Installed offline models for the [local] select; an uninstalled current value stays listed. */
   function localModelOptions() {
     const offline = models.filter((model) => (model.kind === "gguf" || model.kind === "sherpa"));
     const options = offline
@@ -1122,6 +1265,7 @@ function EnginePage() {
     return options;
   }
 
+  /** (Re)build the whole page from `draft`; called after load, discard and save. */
   function build() {
     const a = draft.asr;
     const l = draft.local;
@@ -1208,6 +1352,7 @@ function EnginePage() {
     renderModels();
   }
 
+  /** Model table; while installing, the status cell is a progress bar fed by the server's 0..1. */
   function renderModels() {
     if (!modelTable) return;
     if (!models.length) {
@@ -1262,6 +1407,7 @@ function EnginePage() {
     schedulePoll();
   }
 
+  /** While any install is running, refetch /api/models every 1.5 s and toast state changes. */
   function schedulePoll() {
     clearTimeout(pollTimer);
     if (models.some((model) => model.installing)) {
@@ -1281,6 +1427,7 @@ function EnginePage() {
     }
   }
 
+  /** POST .../install, then refresh the table; the poll takes over from there. */
   async function installModel(model, button) {
     await busy(button, async () => {
       try {
@@ -1292,6 +1439,7 @@ function EnginePage() {
     renderModels();
   }
 
+  /** Confirm, DELETE, refresh (a 409 for the loaded model surfaces as a toast). */
   async function deleteModel(model, button) {
     if (!(await confirmDialog(`删除模型 ${model.id}？之后要用需要重新下载 ${fmtBytes(model.size_bytes)}。`, { okText: "删除", danger: true }))) return;
     await busy(button, async () => {
@@ -1304,6 +1452,7 @@ function EnginePage() {
     renderModels();
   }
 
+  /** Save changed sections, reload the saved copy, offer an engine reload if flagged. */
   async function save() {
     try {
       const result = await saveSections(saved, draft, SECTIONS);
@@ -1313,6 +1462,7 @@ function EnginePage() {
     } catch { /* toast shown; draft kept */ }
   }
 
+  /** Fetch /api/config into saved/draft; secrets start as "" (= keep) so the draft is clean. */
   async function reloadConfig() {
     const config = await api("/api/config");
     saved = Object.fromEntries(SECTIONS.map((name) => [name, clone(config[name] || {})]));
@@ -1354,7 +1504,13 @@ function EnginePage() {
 /* ====================================================================== */
 /* page: 词库                                                              */
 /* ====================================================================== */
+// Vocabulary page: [text] hotwords, cleanup toggles, replacements, regex rules + live preview.
 
+/**
+ * Vocabulary page: the [text] section as a draft with a debounced live
+ * preview (POST /api/text/preview with the unsaved config) shown as a
+ * diff; a regex error highlights the offending rule row.
+ */
 function TextPage() {
   let saved = null;
   let draft = null;
@@ -1373,6 +1529,7 @@ function TextPage() {
 
   const schedulePreview = debounce(runPreview, 300);
 
+  /** Preview the sample through the unsaved rules; on error, point at the bad regex row. */
   async function runPreview() {
     if (!draft) return;
     const started = performance.now();
@@ -1392,6 +1549,7 @@ function TextPage() {
     }
   }
 
+  /** (Re)build the page from `draft` and run the preview once. */
   function build() {
     const t = draft.text;
     rulesTable = tableEditor({
@@ -1472,6 +1630,7 @@ function TextPage() {
     runPreview();
   }
 
+  /** Save [text], reload, offer an engine reload when hotwords changed. */
   async function save() {
     try {
       const result = await saveSections(saved, draft, ["text"]);
@@ -1481,6 +1640,7 @@ function TextPage() {
     } catch { /* toast shown */ }
   }
 
+  /** Fetch [text] into saved/draft, defaulting the list fields so the editors can bind. */
   async function reloadConfig() {
     const config = await api("/api/config");
     const text = config.text || {};
@@ -1519,7 +1679,13 @@ function TextPage() {
 /* ====================================================================== */
 /* page: 模式与提示词                                                       */
 /* ====================================================================== */
+// Modes page: custom modes (modes.json via /api/modes), organize prompt and [processing].
 
+/**
+ * Modes page: custom modes are edited one at a time in dialogs and saved
+ * immediately through /api/modes; the organize prompt (/api/prompt) and
+ * the [processing] section form a draft saved by the save bar.
+ */
 function ModesPage() {
   let view = null;
   let modes = [];
@@ -1531,6 +1697,7 @@ function ModesPage() {
   const dirty = () => saved && !same(saved, draft);
   const changed = () => bar?.set(dirty());
 
+  /** Mode list; built-ins are read-only (expand only), custom ones get edit/delete. */
   function renderModes() {
     if (!modes.length) {
       list.replaceChildren(emptyState("没有模式", null));
@@ -1574,6 +1741,7 @@ function ModesPage() {
     renderModes();
   }
 
+  /** Create (mode null) or edit a mode in a dialog; warns when the prompt lacks {text}. */
   async function editMode(mode) {
     const form = { name: mode?.name || "", processing_label: mode?.processing_label || "", prompt: mode?.prompt || "" };
     const name = h("input", { value: form.name, placeholder: "例如：翻译成英文", oninput: (e) => { form.name = e.target.value; } });
@@ -1611,6 +1779,7 @@ function ModesPage() {
     } catch { /* toast shown */ }
   }
 
+  /** Confirm and DELETE a custom mode (built-ins get 409 from the server). */
   async function deleteMode(mode, button) {
     if (!(await confirmDialog(`删除模式“${mode.name}”？`, { okText: "删除", danger: true }))) return;
     await busy(button, async () => {
@@ -1622,6 +1791,7 @@ function ModesPage() {
     await refreshModes();
   }
 
+  /** Organize-prompt textarea and the [processing] LLM fields. */
   function buildSettings() {
     const p = draft.processing;
     return [
@@ -1666,6 +1836,7 @@ function ModesPage() {
     renderModes();
   }
 
+  /** The prompt goes through POST /api/prompt, [processing] through PUT /api/config. */
   async function save() {
     try {
       let restart = false;
@@ -1682,6 +1853,7 @@ function ModesPage() {
     } catch { /* toast shown */ }
   }
 
+  /** Load config + prompt into saved/draft; processing.prompt is dropped (edited separately). */
   async function reload() {
     const [config, prompt] = await Promise.all([api("/api/config"), api("/api/prompt")]);
     const processing = clone(config.processing || {});
@@ -1715,7 +1887,14 @@ function ModesPage() {
 /* ====================================================================== */
 /* page: 快捷键与上屏                                                       */
 /* ====================================================================== */
+// Hotkey page: [hotkey] key capture, [inject] method and commands, test injection, [audio].
 
+/**
+ * Hotkey & injection page: [hotkey], [inject], [audio] as one draft. The
+ * key-capture widget listens for one keydown and maps KeyboardEvent.code
+ * to an evdev name via /api/hotkey/keys; the test button shows a 3 s
+ * countdown while the server's POST /api/inject/test waits before typing.
+ */
 function HotkeyPage() {
   const SECTIONS = ["hotkey", "inject", "audio"];
   let view = null;
@@ -1730,6 +1909,7 @@ function HotkeyPage() {
   const dirty = () => saved && !same(saved, draft);
   const changed = () => bar?.set(dirty());
 
+  /** evdev name -> the browser code shown on the <kbd>, or the name without KEY_. */
   function keyLabel(evdev) {
     if (!evdev) return "未设置";
     const entry = keymap.find((item) => item.evdev === evdev);
@@ -1741,6 +1921,7 @@ function HotkeyPage() {
     capturing = null;
   }
 
+  /** Key card: capture one keydown on window (capture phase); Esc cancels; Ctrl keys skipped. */
   function keyCard() {
     const k = draft.hotkey;
     const display = h("kbd", { text: keyLabel(k.key) });
@@ -1814,6 +1995,7 @@ function HotkeyPage() {
     );
   }
 
+  /** Daemon's hotkey listener: not running, disabled, keyboards unreadable, or listening. */
   function listenerStatus() {
     if (!status) {
       return h("div", { class: "banner warn" }, h("span", { class: "banner-icon", text: "◌" }), h("div", {}, h("b", { text: "后台进程未运行" }), h("p", { text: "设置可以先保存，启动 voiceless daemon 后生效。" })));
@@ -1831,6 +2013,7 @@ function HotkeyPage() {
     return h("p", { class: "hint" }, h("span", { class: "chip ok", text: "监听中" }), ` ${keyLabel(hotkey.key)} · ${hotkey.keyboards} 个键盘`);
   }
 
+  /** [inject] method as a segmented control; the preedit toggle only applies to fcitx5. */
   function injectCard() {
     const i = draft.inject;
     const methods = [["fcitx5", "fcitx5 输入法（推荐）"], ["clipboard", "剪贴板粘贴"], ["wtype", "模拟键盘（wtype）"]];
@@ -1877,6 +2060,7 @@ function HotkeyPage() {
     );
   }
 
+  /** Test injection: send the request first, count down 3 s, then show the InjectionResult. */
   function testCard() {
     const text = h("input", { value: storage.get("injectTest", "Voiceless 上屏测试 ✓"), "aria-label": "测试文字" });
     const result = h("div", { class: "transcript-note" });
@@ -1907,6 +2091,7 @@ function HotkeyPage() {
     return card("测试上屏", null, h("p", { class: "hint", text: "点击后有 3 秒切到任意输入框，然后用当前上屏方式输入这段文字。" }), h("div", { class: "inline" }, text, run), result);
   }
 
+  /** [audio]: media pause and start/stop cues. */
   function audioCard() {
     const a = draft.audio;
     return card(
@@ -1923,6 +2108,7 @@ function HotkeyPage() {
     view.replaceChildren(pageHead("快捷键与上屏", "怎样开始说话，结果怎样进入输入框"), keyCard(), injectCard(), testCard(), audioCard());
   }
 
+  /** Save changed sections, reload, offer an engine reload when the hotkey changed. */
   async function save() {
     try {
       const result = await saveSections(saved, draft, SECTIONS);
@@ -1932,6 +2118,7 @@ function HotkeyPage() {
     } catch { /* toast shown */ }
   }
 
+  /** Fetch the sections into saved/draft (key normalised to null) and the listener status. */
   async function reload() {
     const config = await api("/api/config");
     saved = Object.fromEntries(SECTIONS.map((name) => [name, clone(config[name] || {})]));
@@ -1971,7 +2158,15 @@ function HotkeyPage() {
 /* ====================================================================== */
 /* page: 历史                                                              */
 /* ====================================================================== */
+// History page: paged records by day, waveform playback, re-transcribe, correct, delete.
 
+/**
+ * History page: records newest-first in day groups, loaded 100 at a time
+ * with the server's cursor. One <audio> plays at a time; waveforms are
+ * drawn from the WAV's PCM (fetched once per record and cached). Rows
+ * expand to the player, raw/final text and the re-transcribe / correct /
+ * delete actions.
+ */
 function HistoryPage() {
   let view = null;
   let feed = null;
@@ -1989,6 +2184,7 @@ function HistoryPage() {
   const audioUrl = (record) => withToken(`/api/audio/${encodeURIComponent(record.id)}.wav`);
   const hasAudio = (record) => record.has_audio ?? Boolean(record.audio_path);
 
+  /** Header totals: records, characters, speech duration. */
   async function loadTotals() {
     try {
       const totals = await api("/api/totals", { quiet: true });
@@ -2000,6 +2196,7 @@ function HistoryPage() {
     } catch { /* decorative */ }
   }
 
+  /** Find or create the day section a record belongs to (grouped by local date). */
   function dayGroup(record) {
     const label = dateFmt.format(new Date(record.created_at));
     let group = $$(".day", feed).find((el) => el.dataset.day === label);
@@ -2009,6 +2206,7 @@ function HistoryPage() {
     return group;
   }
 
+  /** Build one record: collapsed row (play, text, mini waveform, meta) + expandable detail. */
   function recordRow(record) {
     const audio = hasAudio(record);
     const time = timeFmt.format(new Date(record.created_at));
@@ -2072,6 +2270,7 @@ function HistoryPage() {
     dayGroup(record).append(article);
   }
 
+  /** POST .../retranscribe and show the new (cleaned) text as a diff against final_text. */
   async function retranscribeRecord(record, slot) {
     try {
       const result = await api(`/api/records/${encodeURIComponent(record.id)}/retranscribe`, { method: "POST" });
@@ -2093,6 +2292,11 @@ function HistoryPage() {
     }
   }
 
+  /**
+   * Correction dialog: the user edits the text, "生成建议" asks
+   * POST /api/corrections for replacement pairs, and the chosen ones are
+   * merged into [text].replacements / hotwords with a PUT /api/config.
+   */
   async function correctRecord(record) {
     let corrected = record.final_text;
     let suggestions = [];
@@ -2175,6 +2379,7 @@ function HistoryPage() {
     } catch { /* toast shown */ }
   }
 
+  /** Confirm, DELETE the record (the server removes its WAV too), drop the row and empty day. */
   async function deleteRecord(record, article, button) {
     if (!(await confirmDialog("删除这条记录和它的录音？此操作不能撤销。", { okText: "删除", danger: true }))) return;
     await busy(button, async () => {
@@ -2192,6 +2397,7 @@ function HistoryPage() {
 
   /* ---- playback & waveform (ported from the history console) ---- */
 
+  /** Play/pause this record; starting one stops whichever record was playing. */
   function togglePlay(article, record) {
     if (activeAudio && activeAudio.article === article) {
       if (activeAudio.audio.paused) {
@@ -2224,6 +2430,7 @@ function HistoryPage() {
     button.setAttribute("aria-label", playing ? "暂停" : "播放");
   }
 
+  /** Stop and release the active <audio> (src removed so the browser drops the stream). */
   function stopActive() {
     if (!activeAudio) return;
     const { article, audio } = activeAudio;
@@ -2233,6 +2440,7 @@ function HistoryPage() {
     activeAudio = null;
   }
 
+  /** timeupdate: slider position, time labels and waveform progress. */
   function updateProgress() {
     if (!activeAudio) return;
     const { article, audio, record } = activeAudio;
@@ -2245,6 +2453,10 @@ function HistoryPage() {
     drawWaveforms(article, record, audio.currentTime, audio.duration || 0);
   }
 
+  /**
+   * Min/max peaks for the waveform: fetch the WAV once (token header), parse
+   * the PCM, reduce to 900 buckets of [min, max] in -1..1; cached per record.
+   */
   async function fetchPeaks(record) {
     if (waveformCache.has(record.id)) return waveformCache.get(record.id);
     const response = await fetch(audioUrl(record), { headers: { "X-Voiceless-Token": TOKEN } });
@@ -2270,6 +2482,10 @@ function HistoryPage() {
     return peaks;
   }
 
+  /**
+   * Draw peaks as vertical strokes on a canvas sized to its CSS box x DPR;
+   * buckets up to `progress` use the accent colour when the record is active.
+   */
   function paintWave(canvas, peaks, progress, active) {
     const dpr = window.devicePixelRatio || 1;
     const width = canvas.clientWidth;
@@ -2298,6 +2514,7 @@ function HistoryPage() {
     }
   }
 
+  /** Paint every canvas in the row and wire the seek slider once; a no-op without peaks. */
   async function drawWaveforms(article, record, currentTime = 0, duration = 0) {
     let peaks;
     try {
@@ -2321,6 +2538,7 @@ function HistoryPage() {
     }
   }
 
+  /** Fetch the next page with the cursor; appends rows and updates the footer status/button. */
   async function loadPage() {
     if (loading || exhausted) return;
     loading = true;
@@ -2350,6 +2568,7 @@ function HistoryPage() {
     }
   }
 
+  /** [history] enabled / save_audio toggles, saved immediately on change. */
   async function settingsCard() {
     let config;
     try {
@@ -2394,7 +2613,11 @@ function HistoryPage() {
   };
 }
 
-/// PCM16 mono payload of a WAV container.
+/**
+ * PCM16 mono payload of a WAV container as Float32 in -1..1: walks the RIFF
+ * chunks (padding odd sizes) to the "data" chunk; null if not a WAV or no
+ * data chunk. Recordings are 16 kHz mono PCM16, so no format chunk is read.
+ */
 function extractPcm16(buffer) {
   if (buffer.byteLength < 12) return null;
   const view = new DataView(buffer);
@@ -2419,7 +2642,13 @@ function extractPcm16(buffer) {
 /* ====================================================================== */
 /* page: 诊断                                                              */
 /* ====================================================================== */
+// Diagnostics page: doctor checks, engine/GPU, daemon log, replay benchmark.
 
+/**
+ * Diagnostics page: doctor checks (/api/doctor), engine + GPU (from
+ * /api/status), the daemon log (/api/logs, copyable) and the replay
+ * benchmark (/api/benchmark) rendered as RTF / CER with reference diffs.
+ */
 function DiagnosticsPage() {
   let view = null;
   const doctorSlot = h("div", {}, h("div", { class: "hint", text: "检查中…" }));
@@ -2427,6 +2656,7 @@ function DiagnosticsPage() {
   const logPre = h("pre", { class: "log", tabindex: "0", "aria-label": "后台日志" });
   const benchSlot = h("div");
 
+  /** Doctor table: pass / required-fail / optional-missing per check. */
   async function loadDoctor(button) {
     await busy(button, async () => {
       try {
@@ -2450,6 +2680,7 @@ function DiagnosticsPage() {
     });
   }
 
+  /** Engine description, load state, version and GPU bars from /api/status. */
   async function loadGpu() {
     try {
       const status = await fetchStatus();
@@ -2468,6 +2699,7 @@ function DiagnosticsPage() {
     }
   }
 
+  /** Last 500 daemon log lines, scrolled to the end. */
   async function loadLogs(button) {
     await busy(button, async () => {
       try {
@@ -2480,6 +2712,7 @@ function DiagnosticsPage() {
     });
   }
 
+  /** Clipboard copy with a select-all fallback when the clipboard API is unavailable. */
   async function copyLogs() {
     try {
       await navigator.clipboard.writeText(logPre.textContent);
@@ -2494,6 +2727,7 @@ function DiagnosticsPage() {
     }
   }
 
+  /** POST /api/benchmark over the last N recordings (1..50, remembered); blocks for the run. */
   async function runBenchmark(button, limitInput) {
     const limit = Math.max(1, Math.min(50, Number(limitInput.value) || 10));
     storage.set("benchLimit", limit);
@@ -2508,6 +2742,7 @@ function DiagnosticsPage() {
     });
   }
 
+  /** Summary stats plus a per-record table; CER chips go ok / warn / err at 5% and 15%. */
   function renderBenchmark(result) {
     const rows = result.results || [];
     if (!rows.length) {
@@ -2573,7 +2808,9 @@ function DiagnosticsPage() {
 /* ====================================================================== */
 /* router                                                                 */
 /* ====================================================================== */
+// Hash router: #<page id>, remembers the last page, blocks leaving unsaved edits.
 
+/** Page registry in sidebar order: id is the hash, create() returns the page object. */
 const PAGES = [
   { id: "live", title: "实时", icon: "◉", create: LivePage },
   { id: "engine", title: "识别引擎", icon: "◈", create: EnginePage },
@@ -2584,9 +2821,11 @@ const PAGES = [
   { id: "diagnostics", title: "诊断", icon: "✚", create: DiagnosticsPage },
 ];
 
+/** Mounted page and a re-entrancy guard for navigate(). */
 let current = null; // { id, page }
 let navigating = false;
 
+/** Sidebar links, one per PAGES entry. */
 function renderNav() {
   $("#nav").replaceChildren(
     ...PAGES.map((page) =>
@@ -2595,6 +2834,11 @@ function renderNav() {
   );
 }
 
+/**
+ * Route to location.hash (or the remembered page). Asks before leaving a
+ * dirty page and restores the hash on cancel; unmounts the old page,
+ * mounts the new one, then re-runs if the hash moved while mounting.
+ */
 async function navigate() {
   if (navigating) return;
   const requested = location.hash.slice(1) || storage.get("page", "live");
@@ -2636,6 +2880,7 @@ async function navigate() {
 }
 
 window.addEventListener("hashchange", navigate);
+// Native "leave page?" prompt when a settings page has unsaved edits.
 window.addEventListener("beforeunload", (event) => {
   if (current?.page.isDirty?.()) {
     event.preventDefault();
@@ -2643,6 +2888,7 @@ window.addEventListener("beforeunload", (event) => {
   }
 });
 
+// Boot: nav, badge, SSE, a 15 s status poll, first route.
 document.addEventListener("DOMContentLoaded", () => {
   renderNav();
   renderNavStatus();

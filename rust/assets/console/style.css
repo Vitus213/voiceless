@@ -1,7 +1,16 @@
 /* Voiceless console. Visual language of the history console ("夜声档案"):
  * ink background, slate cards, gold accent, serif headings. Dark by
- * default, a paper-toned light theme under prefers-color-scheme: light. */
+ * default, a paper-toned light theme under prefers-color-scheme: light.
+ *
+ * Served as /style.css by rust/src/console/mod.rs (embedded in the binary).
+ * Everything is keyed off the custom properties in :root; app.js reads
+ * --accent and --faint at paint time for the waveform canvases, so keep
+ * those names. Sections follow app.js: layout and sidebar, page header,
+ * cards, forms, buttons, chips/badges, banner, live page, tables and
+ * progress, tags, preview/diff, modes, history, empty states, doctor,
+ * save bar, toasts, dialog, countdown overlay, responsive. */
 
+/* ---------- theme tokens (dark default, light override below) ---------- */
 :root {
   --bg: #0C1120;
   --card: #16203A;
@@ -52,6 +61,7 @@
   }
 }
 
+/* ---------- base ---------- */
 * { box-sizing: border-box; }
 html { color-scheme: dark light; }
 body {
@@ -126,6 +136,7 @@ code {
   font-size: 13px;
   color: var(--muted);
 }
+/* state classes mirror app.state: idle | recording | stopping | down */
 .nav-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .nav-status.idle .dot { background: var(--ok); }
 .nav-status.recording .dot { background: var(--rec); animation: pulse 1.2s ease-in-out infinite; }
@@ -343,6 +354,7 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: none;
 .chip.err { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--edge)); }
 .chip.dashed { border-style: dashed; }
 
+/* live-page session badge; state classes as for .nav-status */
 .state-badge {
   display: inline-flex;
   align-items: center;
@@ -364,6 +376,7 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: none;
 .state-badge.down { color: var(--err); border-color: var(--err); }
 .state-badge.down .dot { background: var(--err); }
 
+/* hotkey capture display (.listening while waiting for a key) */
 kbd {
   display: inline-block;
   font-size: 14px;
@@ -474,6 +487,7 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
 .table-empty { color: var(--faint); font-size: 13px; padding: 6px 0 10px; }
 .table-editor .btn { margin-top: 8px; }
 
+/* model install progress bar (width set from the server's 0..1) */
 .progress { height: 6px; border-radius: 999px; background: var(--edge-soft); overflow: hidden; min-width: 90px; }
 .progress > span { display: block; height: 100%; background: var(--accent); transition: width 0.6s ease; }
 .progress.indeterminate > span { width: 35%; animation: slide 1.2s ease-in-out infinite; }
@@ -664,6 +678,7 @@ dialog::backdrop { background: rgba(5, 8, 16, 0.55); backdrop-filter: blur(2px);
 .suggestion .pair { font-size: 14.5px; }
 .suggestion .pair .arrow { color: var(--faint); margin: 0 6px; }
 
+/* ---------- inject-test countdown overlay ---------- */
 .countdown {
   position: fixed;
   inset: 0;

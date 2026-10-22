@@ -3,7 +3,15 @@
  * translucent surfaces, 1px borders, soft radii.
  * State is shown by border color only (pump-driven via :style):
  * live = blue, final = green, idle = neutral.
- * SCSS intercepts GTK's two-arg alpha(), so use rgba() everywhere. */
+ * SCSS intercepts GTK's two-arg alpha(), so use rgba() everywhere.
+ *
+ * Loaded by the dedicated eww daemon next to eww.yuck. `.ov` is the pill
+ * box, `.text` its label; the border and background colours set here are
+ * only the resting defaults, each frame from voiceless-overlay.py
+ * overrides them through the widget's :style. Width is not styled here:
+ * the pump animates it per frame. Font sizes here and CHAR_PX in
+ * voiceless-overlay.conf describe the same glyph width, so change them
+ * together. */
 
 window {
   background-color: transparent;

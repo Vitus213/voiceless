@@ -1,3 +1,9 @@
+# CI: formatting, the Rust test suite and the flake's own check, all on the
+# CPU stack. The CUDA stack (the default package) is never built here: the
+# toolchain is several GB and the hosted runner has no NVIDIA GPU or driver,
+# so its tests could not run anyway (flake.nix sets doCheck = false for it).
+# The CER and latency gates (`voiceless benchmark asr|latency`) need real
+# credentials and a Wayland session and are deliberately not part of CI.
 name: CI
 
 on:
@@ -5,6 +11,7 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same ref cancels the run still in flight.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,21 +24,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Flakes-enabled Nix; everything below runs through it so the runner
+      # uses exactly the toolchain and libraries pinned by flake.lock.
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v17
 
+      # The hosted image ships large SDKs this job never uses (.NET,
+      # Android, GHC, CodeQL, cached Docker images). The Nix store for the
+      # CPU shell (rustc, onnxruntime, sherpa-onnx, pipewire) plus the cargo
+      # target dir and the sandboxed flake build need that space, so they
+      # are deleted first.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force || true
 
+      # `.#cpu` is devShells.cpu: no CUDA inputs, so the shell is small and
+      # buildable without a GPU. The crate lives in rust/, hence the
+      # working-directory.
       - name: Cargo fmt
         working-directory: rust
         run: nix develop .#cpu -c cargo fmt --check
 
+      # Unit, contract and integration tests with pipewire, wtype and
+      # wl-clipboard from the shell on PATH; hardware-dependent and
+      # credential-dependent tests skip themselves.
       - name: Cargo tests
         working-directory: rust
         run: nix develop .#cpu -c cargo test --all-targets
 
+      # Evaluates every flake output and builds checks.default, which is the
+      # CPU package with doCheck on: a from-scratch sandboxed build of the
+      # crate plus its test suite, so the packaged binary (not just the dev
+      # shell build) is proven. -L streams the build log.
       - name: Flake check
         run: nix flake check -L

@@ -16,6 +16,33 @@ Text: a sliding window — once the transcript exceeds MAX_CHARS only the
 newest MAX_CHARS characters are shown, flowing left as new words arrive.
 State is border color only: live = blue (gold for the organize mode),
 final = green, processing = gold.
+
+Event flow. `voiceless ctl watch` subscribes to the daemon's `Event`
+D-Bus signal (dev.voiceless.Daemon) and prints one JSON object per line:
+the `stream --json` session events (`type` = ready, level, transcript,
+finalized, warning, error, cancelled, completed; `transcript` carries
+`authoritative_text` and `is_final`, `error` carries `message`) plus the
+daemon's own `{"type": "state", "state": idle|recording|stopping,
+"mode": ...}` on every gateway transition and `{"type": "log", ...}`
+lines. `watch_loop` parses them and `handle` maps them to the overlay:
+`state: recording` opens the window and resets the pill, `transcript`
+updates the live text (throttled) or marks it final, `finalized`,
+`error` and `cancelled` paint the closing frame, `state: idle` schedules
+the close. Unknown types are ignored.
+
+Threads: `watch_loop` (reader) and `open_fifo` (blocks until eww connects)
+are daemon threads; `ease_loop` runs on the main thread. `handle` and the
+close check hold `session["lock"]`; frames cross threads through the
+`pending` queue, and `current_mode` is written only by the reader.
+
+eww variables: every frame is one JSON line with `text`, `width`,
+`pillbg` and `pillborder`; eww.yuck's `deflisten stream` turns it into
+`${stream.*}` for the pill widget. Window open/close still goes through
+`eww open|close voiceless-overlay`, the only per-session process spawns.
+
+Environment: VOICELESS_BIN, EWW_BIN, EWW_CONFIG (set by the Home Manager
+unit) and XDG_RUNTIME_DIR for the FIFO and the mode file; sizing comes
+from voiceless-overlay.conf next to this script.
 """
 
 import json
@@ -64,6 +91,12 @@ pending = queue.Queue()
 
 
 def load_conf():
+    """Override the four sizing integers from voiceless-overlay.conf.
+
+    Format is `KEY=VALUE` with `#` comments; only MAX_WIDTH_PX,
+    MIN_WIDTH_PX, CHAR_PX and MAX_CHARS are honoured. A missing file keeps
+    the defaults above; a non-integer value raises and stops the service.
+    """
     try:
         with open(CONF, encoding="utf-8") as f:
             for line in f:
@@ -79,6 +112,11 @@ def load_conf():
 
 
 def eww(*args):
+    """Run one eww CLI command against the overlay's own config dir.
+
+    Used only for `open` / `close` of the window; failures (eww daemon not
+    up yet) are ignored, the next event simply tries again.
+    """
     subprocess.run([EWW, "--config", EWW_CONFIG, *args], check=False,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -92,6 +130,14 @@ def open_fifo():
 
 
 def frame(state, text, width):
+    """Write one JSON frame (text, width, pillbg, pillborder) to the FIFO.
+
+    `state` selects the colours: live is blue, or gold while the current
+    mode is an organize mode; final green; processing gold; anything else
+    the neutral idle pair. Frames are dropped silently until eww has
+    opened the FIFO or if the write fails (reader gone); the ease loop
+    keeps producing them, so the pill catches up on reconnect.
+    """
     if fifo is None:
         return
     if state == "live" and current_mode in ORGANIZE_MODES:
@@ -107,21 +153,34 @@ def frame(state, text, width):
 
 
 def visible(text):
+    """Sliding window: the newest MAX_CHARS characters of the transcript."""
     return text[-MAX_CHARS:] if len(text) > MAX_CHARS else text
 
 
 def pill_width(text):
+    """Target pill width in px for `text`, clamped to [MIN, MAX]_WIDTH_PX."""
     return max(MIN_WIDTH_PX, min(MAX_WIDTH_PX, MIN_WIDTH_PX + len(text) * CHAR_PX))
 
 
 def handle(event, session):
-    """Translate one daemon event into pill frames and window commands."""
+    """Translate one daemon event into pill frames and window commands.
+
+    Runs on the reader thread under `session["lock"]`. `session` keeps
+    `last_text` (last transcript shown; also the text painted on
+    `finalized`), `last_frame` (monotonic time of the last live frame, for
+    throttling) and `close_at` (when the ease loop should close the window,
+    or None).
+    """
     global current_mode
     kind = event.get("type")
     now = time.monotonic()
     if kind == "state":
         state = event.get("state")
         if state == "recording":
+            # New session: remember the mode (and persist it for the
+            # listener's fresh frame), reset the per-session state, show
+            # the listening pill and open the window. Any pending close
+            # from the previous session is cancelled.
             current_mode = event.get("mode") or "quick"
             try:
                 with open(MODEFILE, "w") as f:
@@ -132,11 +191,16 @@ def handle(event, session):
             pending.put(("live", LISTENING, MIN_WIDTH_PX))
             eww("open", WINDOW)
         elif state == "idle":
+            # Session over (completed, cancelled or failed): keep the
+            # closing frame visible for HIDE_AFTER_S, then close.
             session["close_at"] = now + HIDE_AFTER_S
+        # "stopping" needs no frame: the last live text stays until final.
     elif kind == "transcript":
         snap = event.get("transcript") or {}
         text = snap.get("authoritative_text") or ""
         if snap.get("is_final"):
+            # Final transcript: green pill with the text, or the gold
+            # "processing" animation while an LLM mode still rewrites it.
             session["last_text"] = text
             if current_mode in ORGANIZE_MODES:
                 pending.put(("processing", "整理中", pill_width("整理中···")))
@@ -144,10 +208,14 @@ def handle(event, session):
                 shown = visible(text or "No speech recognized")
                 pending.put(("final", shown, pill_width(shown)))
         elif now - session["last_frame"] >= THROTTLE_S and text != session["last_text"]:
+            # Live partial: at most one frame per THROTTLE_S and only when
+            # the text changed, so a chatty backend cannot flood the FIFO.
             shown = visible(text or LISTENING)
             pending.put(("live", shown, pill_width(shown)))
             session.update(last_text=text, last_frame=now)
     elif kind == "finalized":
+        # Injection done: repaint the final text (replaces the processing
+        # animation for organize modes).
         shown = visible(session["last_text"] or "Done")
         pending.put(("final", shown, pill_width(shown)))
     elif kind == "error":
@@ -158,7 +226,13 @@ def handle(event, session):
 
 
 def watch_loop(session):
-    """Follow `voiceless ctl watch`, restarting it if the bus drops."""
+    """Follow `voiceless ctl watch`, restarting it if the bus drops.
+
+    Reader thread. Each stdout line is parsed as JSON and passed to
+    `handle`; blank or malformed lines are skipped. When the child exits
+    (daemon or bus gone) it is respawned after 1 s; if the binary cannot
+    be started at all, after 2 s.
+    """
     while True:
         try:
             child = subprocess.Popen([VOICELESS, "ctl", "watch"], stdout=subprocess.PIPE,
@@ -181,6 +255,15 @@ def watch_loop(session):
 
 
 def ease_loop(session):
+    """30 Hz render loop on the main thread.
+
+    Drains `pending` to the newest (state, text, target width), eases the
+    current width toward the target by EASE per frame (snapping once
+    within 0.6 px), animates the "processing" dots every 0.4 s, writes a
+    frame only when something changed, and closes the window once
+    `session["close_at"]` has passed. A fresh listening frame jumps to its
+    width instead of gliding from the previous session's.
+    """
     state, text, target = "live", LISTENING, float(MIN_WIDTH_PX)
     width = float(MIN_WIDTH_PX)
     last = None
@@ -219,6 +302,7 @@ def ease_loop(session):
 
 
 def main():
+    """Load sizing, create the runtime dir, start the threads, render."""
     load_conf()
     os.makedirs(RUNTIME, exist_ok=True)
     session = {"lock": threading.Lock(), "last_text": "", "last_frame": 0.0,

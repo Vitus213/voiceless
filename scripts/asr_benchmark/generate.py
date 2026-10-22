@@ -7,6 +7,22 @@
     nix develop --command python scripts/asr_benchmark/generate.py --api-key-env BAILIAN_API_KEY --hard
 
 --hard: 强制重新生成已存在的音频（默认跳过缓存）。
+
+Corpus splits (corpus/<split>.jsonl, one `{"id", "reference", "voice"}`
+object per line): `dev` is the tuning set (24 entries, Cherry/Ethan
+voices), `test` the frozen regression set (12 entries, Serena voice, so
+no voice leaks between the two); `--split all` globs every *.jsonl in
+corpus/, which also picks up real.jsonl. `reference` is both the TTS
+input and the ground truth the Rust gate (`voiceless benchmark asr`,
+rust/src/benchmark.rs) scores against; ids must stay disjoint across
+dev and test (rust/tests/benchmark_contract.rs checks this).
+
+Audio: each entry is synthesized once with DashScope's qwen3-tts-flash
+(16 kHz WAV, the rate the realtime backends expect) into audio/<id>.wav.
+Existing files are skipped unless --hard, so re-running only fills gaps;
+a failed entry is reported and the run continues, exit status 1 if any
+failed. audio/ is gitignored (*.wav): every checkout regenerates it from
+the same references, which is what makes the corpus reproducible.
 """
 
 from __future__ import annotations
@@ -27,6 +43,7 @@ SAMPLE_RATE = 16000
 
 
 def _api_key(env_name: str) -> str:
+    """Read the DashScope key from `env_name`; exit with a message if unset."""
     value = os.environ.get(env_name, "")
     if not value:
         raise SystemExit(f"缺少 API 密钥：请设置环境变量 {env_name}")
@@ -34,6 +51,13 @@ def _api_key(env_name: str) -> str:
 
 
 def synthesize(text: str, voice: str, api_key: str, timeout: float = 120.0) -> bytes:
+    """Return the WAV bytes for `text` spoken by `voice`.
+
+    Two HTTP round trips: the generation call answers with a temporary
+    audio URL (`output.audio.url`), which is then downloaded. Any HTTP
+    error, timeout or missing key in the response propagates to the
+    caller.
+    """
     payload = {
         "model": TTS_MODEL,
         "input": {
@@ -59,6 +83,7 @@ def synthesize(text: str, voice: str, api_key: str, timeout: float = 120.0) -> b
 
 
 def load_entries(split: str) -> list[dict]:
+    """Parse corpus/<split>.jsonl (or every *.jsonl for `all`), blank lines skipped."""
     paths = (
         [CORPUS_DIR / f"{split}.jsonl"] if split != "all" else sorted(CORPUS_DIR.glob("*.jsonl"))
     )
@@ -72,6 +97,12 @@ def load_entries(split: str) -> list[dict]:
 
 
 def main() -> int:
+    """Synthesize missing (or, with --hard, all) WAVs; 0 if nothing failed.
+
+    Each file is written to <id>.tmp and renamed into place, so an
+    interrupted download never leaves a truncated WAV that the next run
+    would treat as cached. Requests are spaced 0.2 s apart.
+    """
     parser = argparse.ArgumentParser(description="生成 ASR 基准测试语料音频")
     parser.add_argument("--split", choices=("dev", "test", "all"), default="all")
     parser.add_argument("--api-key-env", default="BAILIAN_API_KEY")

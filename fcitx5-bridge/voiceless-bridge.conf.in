@@ -1,3 +1,13 @@
+# Fcitx5 addon descriptor for the Voiceless bridge. CMake substitutes
+# @PROJECT_VERSION@ (configure_file) and installs the result as
+# share/fcitx5/addon/voiceless-bridge.conf next to the module in
+# lib/fcitx5/. Fcitx5 reads it at startup to decide what to load.
+#
+# Library must equal the module's file name without the extension: CMake
+# builds the target `voiceless-bridge` with PREFIX "lib", so the file is
+# libvoiceless-bridge.so. OnDemand=False loads the module at startup, so
+# the D-Bus object exists before Voiceless (or `voiceless doctor`) calls
+# it. Configurable=False: the module has no options.
 [Addon]
 Name=Voiceless Bridge
 Type=SharedLibrary
@@ -7,6 +17,9 @@ Version=@PROJECT_VERSION@
 OnDemand=False
 Configurable=False
 
+# core:5.1.0 is the minimum Fcitx5 core the C++ API in voiceless-bridge.cpp
+# needs (matches find_package(Fcitx5Core 5.1)); dbus is the addon whose bus
+# connection the object is registered on, so it must be loaded first.
 [Addon/Dependencies]
 0=core:5.1.0
 1=dbus

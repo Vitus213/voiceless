@@ -1,8 +1,18 @@
 <!DOCTYPE html>
+<!--
+  Voiceless console shell. Served by rust/src/console/mod.rs (`index`) with
+  the VOICELESS_TOKEN placeholder (double braces, below) replaced by the
+  per-start API token; app.js reads it from the meta tag and sends it on
+  every /api call. Everything else is static: app.js builds every view into
+  <main>, and the only other requests are /style.css and /app.js, all three
+  embedded in the binary (no CDN, works offline). Chinese UI; dark/light
+  follow the OS colour scheme.
+-->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Filled by the server on every request; the page is sent Cache-Control: no-store. -->
 <meta name="voiceless-token" content="{{VOICELESS_TOKEN}}">
 <meta name="color-scheme" content="dark light">
 <title>Voiceless 控制台</title>
@@ -12,6 +22,7 @@
 <body>
 <a class="skip-link" href="#view">跳到主要内容</a>
 <div class="layout">
+  <!-- Sidebar: brand, daemon state badge (#navStatus), page nav filled by app.js, version. -->
   <aside class="sidebar" aria-label="导航">
     <div class="brand">
       <span class="moon-mark" aria-hidden="true">☾</span>
@@ -28,8 +39,10 @@
     </nav>
     <div class="sidebar-foot" id="version"></div>
   </aside>
+  <!-- Page root: app.js replaces its children on every navigation. -->
   <main id="view" class="view" tabindex="-1"></main>
 </div>
+<!-- Global overlays: the toast stack and the one <dialog> reused by openDialog(). -->
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <dialog id="dialog" aria-modal="true"></dialog>
 <noscript><p class="noscript">控制台需要启用 JavaScript。</p></noscript>

@@ -1,3 +1,37 @@
+# Voiceless flake: builds the Rust binary (rust/), the Fcitx5 bridge module
+# (fcitx5-bridge/) and the development shells, and exports the overlay and
+# the Home Manager module.
+#
+# Two stacks come out of `mkStack`:
+#   - CUDA (the default; only on x86_64-linux): onnxruntime and sherpa-onnx
+#     with cudaSupport, plus the transcribe.cpp GPU engine (`cuda` cargo
+#     feature) for GGUF Qwen3-ASR. This is what a NixOS desktop with an
+#     NVIDIA GPU runs. It pulls the multi-GB CUDA toolchain and cannot run
+#     its tests in the sandbox (no driver), so its `doCheck` is off.
+#   - CPU: plain onnxruntime/sherpa-onnx, no `cuda` feature, full test
+#     suite. CI builds and tests this one (`checks.default`,
+#     `devShells.cpu`); on aarch64-linux both stacks are CPU.
+#
+# Per-system outputs: packages.{default,voiceless} (CUDA stack),
+# packages.voiceless-cpu, packages.voiceless-fcitx5-bridge, apps.default,
+# checks.default (the CPU package, whose build runs `cargo test`),
+# devShells.{default,cpu} and formatter (nixfmt over the Nix files).
+# System-independent: overlays.default (voiceless, voiceless-fcitx5-bridge)
+# and homeManagerModules.default (nix/home-manager.nix).
+#
+# The NVRTC patchelf step in `sherpaRuntimeLib`: nixpkgs' CUDA execution
+# provider for onnxruntime calls NVRTC symbols without linking libnvrtc, so
+# dlopen of libonnxruntime_providers_cuda.so fails with an undefined symbol
+# (nvrtcGetProgramLogSize). symlinkJoin alone would only link the broken
+# file, so the provider is copied and patched to NEED
+# libnvrtc.so.12 with an rpath into cuda_nvrtc. The joined directory is
+# what SHERPA_ONNX_LIB_DIR and the runtime LD_LIBRARY_PATH point at.
+#
+# `cudaArchitectures` limits the transcribe.cpp kernels to the listed CUDA
+# compute capabilities (default "86" = RTX 30xx) because compiling every
+# architecture multiplies the GPU engine build time; owners of other GPUs
+# add theirs. It reaches transcribe-cpp-sys through TRANSCRIBE_CMAKE_ARGS,
+# and VOICELESS_CUDA_LIB_DIRS feeds rust/build.rs the CUDA link paths.
 {
   description = "Voiceless：面向 NixOS/Wayland 的原生 Rust 实时语音输入";
 
@@ -15,10 +49,13 @@
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
       system:
       let
+        # allowUnfree: the CUDA toolchain and cudnn carry NVIDIA's licence.
         pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
         };
+        # Shared by sherpa-onnx's python3Packages override and the dev shell
+        # (scripts/asr_benchmark/*.py); the Rust crate itself needs no Python.
         python = pkgs.python312;
 
         # The CUDA stack pulls the full CUDA/cudnn toolchain (several GB).
@@ -130,12 +167,20 @@
               # GPU test binaries need the NVIDIA driver, absent in the sandbox;
               # the CPU package (checks.default) runs the suite.
               doCheck = !stack.gpu;
+              # The tests spawn pw-record, wtype and wl-copy as subprocesses
+              # (doctor and injection paths); they must resolve on PATH.
               nativeCheckInputs = [
                 pkgs.pipewire
                 pkgs.wtype
                 pkgs.wl-clipboard
               ];
+              # Read by the sherpa-onnx-sys build script to find the shared
+              # libraries instead of building its own copy.
               SHERPA_ONNX_LIB_DIR = stack.sherpaRuntimeLib + "/lib";
+              # The binary execs the same three tools at runtime and dlopens
+              # the sherpa/onnxruntime libraries; the GPU provider also needs
+              # the host driver from /run/opengl-driver/lib (suffix, so a
+              # user-set LD_LIBRARY_PATH wins over it).
               postInstall = ''
                 wrapProgram "$out/bin/voiceless" \
                   --prefix PATH : ${
@@ -211,9 +256,14 @@
         # CI-safe check: builds and tests the CPU stack only.
         checks.default = voicelessCpu;
 
+        # `nix develop` gets the GPU toolchain (cmake, nvcc, CUDA libs) so
+        # `cargo build --features cuda` works; `.#cpu` is what CI uses and
+        # what a machine without a GPU or disk for CUDA should pick.
         devShells.default = mkShell stack;
         devShells.cpu = mkShell stackCpu;
 
+        # `nix fmt`: formats only the two Nix files (fcitx5-bridge.nix is
+        # not listed; Rust is formatted by `just lint`).
         formatter = pkgs.writeShellApplication {
           name = "voiceless-format";
           runtimeInputs = [ pkgs.nixfmt ];
