@@ -1,3 +1,10 @@
+//! Contract tests for the batch path (`batch.rs`) without a network or a
+//! model: the WAV parser (`load_wav_pcm16`) on hand-written minimal RIFF
+//! files, and `CloudBatchClient` driven through `ScriptedBatchPoster`, a
+//! `BatchPoster` fake that records every call (URL, bearer) and pops
+//! scripted `(status, body)` responses. The local SenseVoice backend has
+//! no test here (it needs a model).
+
 mod common;
 
 use std::io::Write;
@@ -8,6 +15,8 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use voiceless::batch::{load_wav_pcm16, BatchError, BatchPoster, CloudBatchClient};
 
+/// Write a minimal 44-byte-header WAV: RIFF/WAVE, a 16-byte PCM `fmt `
+/// chunk (mono, 16 kHz, 16 bit) and a `data` chunk with `samples`.
 fn write_wav(path: &std::path::Path, samples: &[i16]) {
     let mut file = std::fs::File::create(path).expect("create wav");
     let data_bytes: Vec<u8> = samples
@@ -44,6 +53,8 @@ fn wav_loader_accepts_mono_pcm16_16khz() {
     assert_eq!(&pcm[2..4], &(-2i16).to_le_bytes());
 }
 
+/// Stereo and 8 kHz files are rejected with messages naming the rule; a
+/// `data` size of 0xFFFFFFFF is clamped to the bytes actually present.
 #[test]
 fn wav_loader_rejects_wrong_format_and_clamps_oversized_data_length() {
     let root = tempdir().expect("temporary root");
@@ -80,6 +91,8 @@ fn wav_loader_rejects_wrong_format_and_clamps_oversized_data_length() {
     assert_eq!(pcm.len(), 4);
 }
 
+/// Overwrite header fields in place of a `write_wav` file: channels at
+/// bytes 22..24, sample rate at 24..28, `data` size at 40..44.
 fn patch_wav_fields(
     bytes: &[u8],
     channels: Option<u16>,
@@ -100,6 +113,9 @@ fn patch_wav_fields(
     out
 }
 
+/// `BatchPoster` fake: `responses` is a stack (popped from the end, so
+/// script them in reverse order; exhausted = HTTP 500), `calls` records
+/// `(url, bearer)` per request. Never returns a transport error.
 #[derive(Clone)]
 struct ScriptedBatchPoster {
     responses: Arc<Mutex<Vec<(u16, String)>>>,
@@ -134,6 +150,9 @@ fn client_with(poster: ScriptedBatchPoster) -> CloudBatchClient<ScriptedBatchPos
     )
 }
 
+/// A 200 with one content item: the trimmed text is returned, the request
+/// went to `<base_url>/api/v1/services/aigc/multimodal-generation/generation`
+/// (trailing slash of the base URL removed) with the configured key.
 #[test]
 fn cloud_client_sends_base64_wav_and_returns_first_text() {
     let poster = ScriptedBatchPoster {
@@ -175,6 +194,7 @@ fn cloud_client_treats_401_403_as_auth_failures_without_retry() {
     assert_eq!(calls.lock().len(), 1, "auth failures must not retry");
 }
 
+/// A 503 followed by a 200: two calls, the second one's text is returned.
 #[test]
 fn cloud_client_retries_transient_errors_then_succeeds() {
     let poster = ScriptedBatchPoster {
@@ -213,6 +233,7 @@ fn cloud_client_requires_api_key() {
     assert!(calls.lock().is_empty(), "no network call without a key");
 }
 
+/// `content: []` (silence) is `Ok("")`, not an error.
 #[test]
 fn empty_content_array_maps_to_empty_text() {
     let poster = ScriptedBatchPoster {

@@ -1,3 +1,10 @@
+//! Failure and cancel paths of `coordinator::run_session`: no capture
+//! before `Ready`, no injection on any failure, cancel (explicit or via a
+//! second stop) during the flush skips `finish`, and a hanging finish is
+//! bounded by the flush deadline. Fakes from `common` as in
+//! `audio_backpressure.rs`; `commands` are queued on the control channel
+//! before the session starts.
+
 mod common;
 
 use common::{entries, new_log, FakeCapture, RecordingInjector, RecordingSink, ScriptedTransport};
@@ -6,6 +13,7 @@ use tokio::sync::mpsc;
 use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
 use voiceless::realtime::RealtimeEvent;
 
+/// Flatten events to their kind names; a final snapshot counts as `final`.
 fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -23,6 +31,8 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Run one session with the fakes (5 s guard); `commands` are sent before
+/// the session starts, scripted triggers fire during it.
 async fn run_fixture(
     plan: SessionPlan,
     capture: FakeCapture,
@@ -56,6 +66,8 @@ async fn run_fixture(
     (code, sink.events, entries(&log))
 }
 
+/// The transport yields a 401 before Ready: error + completed only, and
+/// the capture was never started.
 #[tokio::test]
 async fn auth_failure_before_ready_never_starts_capture_or_injects() {
     let log = new_log();
@@ -93,6 +105,8 @@ async fn auth_failure_before_ready_never_starts_capture_or_injects() {
     );
 }
 
+/// Ready arrives but pw-record cannot start: the error carries the
+/// capture message.
 #[tokio::test]
 async fn capture_start_failure_reports_error_without_injection() {
     let log = new_log();
@@ -158,6 +172,7 @@ async fn second_stop_during_flush_cancels_without_finish_or_injection() {
     );
 }
 
+/// Cancel right after the first append: 130, no finish, no injection.
 #[tokio::test]
 async fn explicit_cancel_during_flush_cancels_without_injection() {
     let log = new_log();
@@ -185,6 +200,8 @@ async fn explicit_cancel_during_flush_cancels_without_injection() {
     );
 }
 
+/// A partial was shown, then the socket dropped: the partial is reported
+/// but never injected.
 #[tokio::test]
 async fn disconnect_after_partial_fails_without_injecting_partial_text() {
     let log = new_log();
@@ -218,6 +235,7 @@ async fn disconnect_after_partial_fails_without_injecting_partial_text() {
     );
 }
 
+/// `finish` never returns: the flush deadline fails the session.
 #[tokio::test]
 async fn finish_timeout_fails_the_session_without_injection() {
     let log = new_log();

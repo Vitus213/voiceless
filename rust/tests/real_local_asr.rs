@@ -1,6 +1,10 @@
 //! Real local ASR smoke: requires an installed
 //! `streaming-paraformer-bilingual-zh-en` model and `VOICELESS_REAL_LOCAL_ASR=1`.
 //! Ignored by default so CI without the model never fabricates a pass.
+//! Uses the real `ModelManager` in the user's XDG data dir (no fixtures):
+//! the model is resolved and integrity-checked exactly as `stream.rs`
+//! does before a session, then `LocalStreamingRecognizer` is fed one
+//! second of synthetic PCM.
 
 use std::time::Duration;
 
@@ -10,6 +14,10 @@ use voiceless::models::{
 };
 use voiceless::realtime::RealtimeEvent;
 
+/// Without the env var the test returns early (and is ignored anyway).
+/// With it: the installed model passes the integrity check, the recognizer
+/// builds, a 440 Hz sine yields only Partial/Completed events (if any),
+/// and `finish` always produces a Finished event.
 #[test]
 #[ignore = "requires VOICELESS_REAL_LOCAL_ASR=1 and the installed streaming model"]
 fn real_local_asr_recognizer_processes_and_finishes() {

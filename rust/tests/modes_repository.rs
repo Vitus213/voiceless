@@ -1,8 +1,19 @@
+//! Contract of `voiceless::modes`: `ModesRepository` serves the builtin
+//! modes from memory until the first mutation creates `modes.json`,
+//! resolves modes by id or case-insensitive name with `quick` as the
+//! default, persists user modes with unique names and increasing
+//! `sort_order`, refuses mutations of builtins, reloads from disk, and
+//! `render_template` / `prompt_table` expand prompts the way the pipeline
+//! expects. No fakes: every test uses a real `modes.json` in a fresh
+//! `tempdir`.
+
 use std::fs;
 
 use tempfile::tempdir;
 use voiceless::modes::{builtin_modes, prompt_table, render_template, ModesError, ModesRepository};
 
+/// Opening without a file lists exactly the builtins with `quick` first
+/// and writes nothing; the first `add` creates a JSON array on disk.
 #[test]
 fn open_seeds_builtins_and_keeps_quick_first() {
     let root = tempdir().expect("temporary root");
@@ -25,6 +36,8 @@ fn open_seeds_builtins_and_keeps_quick_first() {
     assert!(parsed.is_array());
 }
 
+/// `None` and blank resolve to `quick`; an id or a display name resolves
+/// the same mode; an unknown identifier is `NotFound`.
 #[test]
 fn resolve_by_id_and_case_insensitive_name_defaults_to_quick() {
     let root = tempdir().expect("temporary root");
@@ -47,6 +60,8 @@ fn resolve_by_id_and_case_insensitive_name_defaults_to_quick() {
     ));
 }
 
+/// A new mode is non-builtin with `sort_order` 4 (after the four
+/// builtins) and survives reopening the repository from the file.
 #[test]
 fn add_persists_user_mode_with_unique_name_and_next_sort_order() {
     let root = tempdir().expect("temporary root");
@@ -70,6 +85,9 @@ fn add_persists_user_mode_with_unique_name_and_next_sort_order() {
     ));
 }
 
+/// Duplicate names (even with surrounding whitespace) are `DuplicateName`,
+/// updating or removing `quick` is `BuiltinImmutable`, and a blank name is
+/// `EmptyName`.
 #[test]
 fn duplicate_names_and_builtin_mutations_are_rejected() {
     let root = tempdir().expect("temporary root");
@@ -102,6 +120,8 @@ fn duplicate_names_and_builtin_mutations_are_rejected() {
     ));
 }
 
+/// Removing a user mode returns it, leaves only the builtins and makes
+/// `get` fail for its id.
 #[test]
 fn remove_user_mode_and_keep_builtins_intact() {
     let root = tempdir().expect("temporary root");
@@ -115,6 +135,8 @@ fn remove_user_mode_and_keep_builtins_intact() {
     assert!(repository.get(&mode.id).is_err());
 }
 
+/// `reload` fails on an invalid file but keeps the in-memory list, so a
+/// following `add` rewrites a valid file that then reloads.
 #[test]
 fn reload_repairs_missing_file_from_disk() {
     let root = tempdir().expect("temporary root");
@@ -134,6 +156,9 @@ fn reload_repairs_missing_file_from_disk() {
     assert!(modes.iter().any(|mode| mode.name == "恢复后"));
 }
 
+/// Inserted text containing `{clipboard}` is not re-expanded, unknown
+/// placeholders stay literal, and a template without placeholders is
+/// returned unchanged.
 #[test]
 fn template_expansion_is_single_pass_and_preserves_unknown_placeholders() {
     assert_eq!(
@@ -150,6 +175,8 @@ fn template_expansion_is_single_pass_and_preserves_unknown_placeholders() {
     );
 }
 
+/// An empty organize prompt keeps the builtin prompt-optimize template; a
+/// non-empty one replaces it and leaves `voice-polish` untouched.
 #[test]
 fn prompt_table_overrides_only_prompt_optimize() {
     let modes = builtin_modes();

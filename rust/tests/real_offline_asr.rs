@@ -4,6 +4,10 @@
 //! ships with the latter) and, for `VOICELESS_OFFLINE_MODEL`, that model
 //! (GGUF ones need `--features cuda` and `VOICELESS_OFFLINE_PROVIDER=cuda`).
 //! Ignored by default so CI without the models never fabricates a pass.
+//! No fakes: the real catalog models from the user's XDG data dir, the
+//! real `OfflineTransport` worker, and Sherpa's own WAV reader and
+//! resampler to turn the 44.1 kHz sample into the 16 kHz PCM16 capture
+//! format.
 
 use std::time::Duration;
 
@@ -14,6 +18,10 @@ use voiceless::offline_asr::{
 };
 use voiceless::realtime::RealtimeEvent;
 
+/// Streams `test_wavs/raokouling.wav` in 1024-byte chunks through the
+/// transport with a 15 s segment cap and 500 ms partials; expects Ready,
+/// then a Finished transcript within 60 s that contains three known
+/// phrases of the tongue twister. Any `Error` event fails the test.
 #[tokio::test]
 #[ignore = "requires VOICELESS_REAL_OFFLINE_ASR=1 and installed models"]
 async fn qwen3_transcribes_the_sample_through_vad_segments() {

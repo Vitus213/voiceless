@@ -1,9 +1,22 @@
+//! Contract test for the `cloud-realtime` transport (`RealtimeSession`)
+//! against a fake DashScope realtime server: a loopback `TcpListener`
+//! upgraded with tokio-tungstenite that scripts the server side of one
+//! session. Checks the wire protocol (`session.update` first with text
+//! modality / pcm / 16 kHz, base64 `input_audio_buffer.append`,
+//! `session.finish` last) and the event mapping (`session.updated` ->
+//! `Ready`, `...transcription.text` -> `Partial` with `stash`,
+//! `...transcription.completed` -> `Completed`, `session.finished` ->
+//! `Finished`). No credentials or network needed.
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use voiceless::realtime::{RealtimeEvent, RealtimeSession};
 
+/// One full session: the client sends the update, one audio chunk and the
+/// finish in that order; events arrive as Ready, Partial, Completed,
+/// Finished; the audio chunk reaches the server base64-encoded verbatim.
 #[tokio::test]
 async fn streams_pcm_and_exposes_partial_and_final_events() {
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -106,6 +119,8 @@ async fn streams_pcm_and_exposes_partial_and_final_events() {
     assert_eq!(encoded, "AAEC/f7/");
 }
 
+/// Server-side helper: the next text frame parsed as JSON. Pings are
+/// answered with pongs; any other frame type fails the test.
 async fn next_json<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>) -> Value
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,

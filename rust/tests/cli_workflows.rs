@@ -1,3 +1,16 @@
+//! End-to-end CLI contracts through the built binary: `doctor` output,
+//! `model list --json` supply-chain fields, `model check` on an unknown id,
+//! the `mode` list/add/update/remove round trip and builtin protection,
+//! `history list`/`totals` JSON shape on an empty store, `transcribe` on a
+//! missing file, and `stream` rejecting an unknown mode before any capture.
+//!
+//! No fakes inside the binary: isolation comes from the environment. Every
+//! run gets a scratch `HOME` with all `XDG_*_HOME` roots under it (shared
+//! between tests, so read-only commands may see each other's state), and
+//! tests that write (`mode add`, `history`) override the relevant root with
+//! a private temp dir. Network and audio are never touched: the `stream`
+//! test fails at mode lookup, which precedes the backend and `pw-record`.
+
 use std::process::Command;
 
 /// The binary under test with every XDG root inside a scratch home: the
@@ -15,6 +28,7 @@ fn voiceless() -> Command {
     command
 }
 
+/// Parse JSON-lines output, panicking on any non-JSON line.
 fn json_lines(stdout: &str) -> Vec<serde_json::Value> {
     stdout
         .lines()
@@ -22,6 +36,8 @@ fn json_lines(stdout: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Only the check names are asserted: the exit status depends on which
+/// tools the host has installed.
 #[test]
 fn doctor_reports_dependency_checks_and_exits_zero_when_tools_exist() {
     let output = voiceless().arg("doctor").output().expect("run doctor");
@@ -30,6 +46,7 @@ fn doctor_reports_dependency_checks_and_exits_zero_when_tools_exist() {
     assert!(stdout.contains("wtype"), "{stdout}");
 }
 
+/// Each JSON line carries the pinned SRI hash, byte size and license status.
 #[test]
 fn model_list_outputs_catalog_entries_with_supply_chain_fields() {
     let output = voiceless()
@@ -55,6 +72,7 @@ fn model_check_unknown_id_fails_with_nonzero_exit() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+/// Builtins are present with `quick` first and `translate-en` among them.
 #[test]
 fn mode_list_returns_json_array_with_quick_first() {
     let output = voiceless()
@@ -68,6 +86,8 @@ fn mode_list_returns_json_array_with_quick_first() {
     assert!(modes.iter().any(|mode| mode["id"] == "translate-en"));
 }
 
+/// add returns the generated id; update and remove accept it; the removed
+/// mode is gone from list. Uses a private config root.
 #[test]
 fn mode_add_update_remove_roundtrip_via_cli() {
     let dir = tempfile::tempdir().expect("temporary root");
@@ -119,6 +139,8 @@ fn mode_remove_builtin_is_rejected() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+/// On a fresh private data root: list has `records` and `next_cursor`,
+/// totals reports zero records.
 #[test]
 fn history_list_and_totals_have_stable_json_shape() {
     let dir = tempfile::tempdir().expect("temporary root");
@@ -143,6 +165,7 @@ fn history_list_and_totals_have_stable_json_shape() {
     assert_eq!(totals["records"], 0);
 }
 
+/// Exit 1 with a "Voiceless"-prefixed message on stderr.
 #[test]
 fn transcribe_missing_file_fails_with_diagnostic() {
     let output = voiceless()
@@ -154,6 +177,8 @@ fn transcribe_missing_file_fails_with_diagnostic() {
     assert!(stderr.contains("Voiceless"), "{stderr}");
 }
 
+/// `--backend local-streaming --mode 不存在` exits 1 naming the mode; the
+/// mode lookup fails before the model or `pw-record` is needed.
 #[test]
 fn stream_rejects_unknown_mode_before_capture() {
     let dir = tempfile::tempdir().expect("temporary root");

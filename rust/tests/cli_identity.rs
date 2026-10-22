@@ -1,9 +1,18 @@
+//! Smoke tests of the built `voiceless` binary's surface: `--help` lists the
+//! core subcommands, `doctor` runs with nothing installed (no Python, no
+//! models) under a throwaway XDG root, and `daemon --help` exposes `--mode`.
+//! The binary is spawned as a child process; `--help` runs inherit the real
+//! environment because they touch no user data.
+
 use std::process::Command;
 
+/// The binary under test, as built by Cargo for this test run.
 fn voiceless() -> Command {
     Command::new(env!("CARGO_BIN_EXE_voiceless"))
 }
 
+/// Every top-level command of the README table (except ctl/benchmark)
+/// appears in `--help`.
 #[test]
 fn help_lists_the_core_cli_commands() {
     let output = voiceless()
@@ -30,6 +39,8 @@ fn help_lists_the_core_cli_commands() {
     }
 }
 
+/// `doctor` exits 0 and prints its banner with every XDG root pointed at an
+/// empty temp dir (it creates the data directory itself).
 #[test]
 fn doctor_runs_without_python_or_model_files() {
     let root = tempfile::tempdir().expect("temporary XDG root");

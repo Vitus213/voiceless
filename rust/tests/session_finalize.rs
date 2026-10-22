@@ -1,6 +1,14 @@
+//! `session::RecognitionSession` in isolation: partials and confirmed
+//! segments accumulate, the first stop finishes and the second cancels,
+//! `Finished` while stopping exposes the injection text exactly once, and
+//! error or cancel paths never expose it. No fakes: the state machine is
+//! pure data.
+
 use voiceless::realtime::RealtimeEvent;
 use voiceless::session::{RecognitionSession, SessionAction, SessionState, SessionUpdate};
 
+/// Partial (text + stash) then a confirmed segment; stop -> Finish, a
+/// second stop -> Cancel.
 #[test]
 fn normal_stop_flushes_one_authoritative_transcript_and_one_injection() {
     let mut session = RecognitionSession::new("cloud-realtime");
@@ -27,6 +35,8 @@ fn normal_stop_flushes_one_authoritative_transcript_and_one_injection() {
     assert_eq!(session.state(), SessionState::Cancelled);
 }
 
+/// `Finished` while stopping completes the session; the text can be
+/// taken once, then it is gone.
 #[test]
 fn finished_event_allows_exactly_one_injection() {
     let mut session = RecognitionSession::new("cloud-realtime");
@@ -43,6 +53,8 @@ fn finished_event_allows_exactly_one_injection() {
     assert_eq!(session.take_injection_text(), None);
 }
 
+/// A backend error clears the text; a cancelled session ignores a late
+/// `Finished`.
 #[test]
 fn errors_and_cancellation_never_expose_injection_text() {
     let mut failed = RecognitionSession::new("cloud-realtime");

@@ -2,6 +2,12 @@
 //! unreachable: the failure is reported as the fcitx5 method, and the
 //! clipboard fallback takes over when enabled. The session bus points at a
 //! dead socket so these tests never reach a real Fcitx5.
+//!
+//! Fakes: `DBUS_SESSION_BUS_ADDRESS` is pointed at a non-existent socket in
+//! a temp dir (process-wide; both async tests set the same kind of value),
+//! and the clipboard path is served by two shell scripts in the same dir, a
+//! `wl-copy` that writes stdin to `clipboard.txt` and a `paste` tool that
+//! exits 0, so the fallback is observable without a Wayland session.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -9,6 +15,7 @@ use std::path::Path;
 use voiceless::config::{AppConfig, InjectConfig};
 use voiceless::stream::inject_text;
 
+/// Write `script` to `path` with mode 0755.
 fn write_executable(path: &Path, script: &str) {
     std::fs::write(path, script).expect("write fake command");
     let mut permissions = std::fs::metadata(path).unwrap().permissions();
@@ -16,6 +23,7 @@ fn write_executable(path: &Path, script: &str) {
     std::fs::set_permissions(path, permissions).expect("chmod fake command");
 }
 
+/// Make every session-bus connection in this process fail fast.
 fn unreachable_session_bus(dir: &Path) {
     std::env::set_var(
         "DBUS_SESSION_BUS_ADDRESS",
@@ -23,6 +31,7 @@ fn unreachable_session_bus(dir: &Path) {
     );
 }
 
+/// `prefer = "fcitx5"` with the fake clipboard tools and a 5 s timeout.
 fn fcitx5_config(dir: &Path, clipboard_fallback: bool) -> InjectConfig {
     let wl_copy = dir.join("wl-copy");
     let paste = dir.join("paste");
@@ -55,6 +64,8 @@ async fn unreachable_bridge_falls_back_to_clipboard() {
     assert_eq!(copied, "你好");
 }
 
+/// With the fallback off the result is a failed `fcitx5` injection with a
+/// message, and the fake clipboard is never written.
 #[tokio::test]
 async fn unreachable_bridge_without_fallback_reports_fcitx5_failure() {
     let dir = tempfile::tempdir().unwrap();
@@ -69,6 +80,7 @@ async fn unreachable_bridge_without_fallback_reports_fcitx5_failure() {
     assert!(!dir.path().join("clipboard.txt").exists());
 }
 
+/// The strict config validator knows the `fcitx5` injector name.
 #[test]
 fn prefer_accepts_fcitx5() {
     assert!(AppConfig::from_toml("[inject]\nprefer = \"fcitx5\"\n").is_ok());

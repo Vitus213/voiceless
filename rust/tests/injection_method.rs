@@ -1,6 +1,10 @@
 //! Contract tests for the `[inject]` method selection: clipboard injection
 //! copies the text to `wl-copy` and synthesizes the paste keypress; wtype
-//! failure falls back to the clipboard when enabled.
+//! failure falls back to the clipboard when enabled. The external tools
+//! (`wl-copy`, `wl-paste`, `wtype`, an X11 writer, a focus and a paste
+//! tool) are replaced by shell scripts in a temp dir that record their
+//! stdin or arguments, so `stream::inject_text` runs end to end without a
+//! Wayland session.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -8,6 +12,7 @@ use std::path::Path;
 use voiceless::config::{AppConfig, InjectConfig};
 use voiceless::stream::inject_text;
 
+/// Write a `0755` shell script standing in for an external tool.
 fn write_executable(path: &Path, script: &str) {
     std::fs::write(path, script).expect("write fake command");
     let mut permissions = std::fs::metadata(path).unwrap().permissions();
@@ -44,6 +49,7 @@ fn fake_commands(dir: &Path, fail_typing: bool) -> (String, String) {
     (wl_copy.display().to_string(), wtype.display().to_string())
 }
 
+/// `[inject]` pointing at the fake tools, with the clipboard fallback on.
 fn config_with(prefer: &str, wl_copy: &str, wtype: &str) -> InjectConfig {
     InjectConfig {
         prefer: prefer.to_owned(),
@@ -59,6 +65,8 @@ fn config_with(prefer: &str, wl_copy: &str, wtype: &str) -> InjectConfig {
     }
 }
 
+/// `prefer = "clipboard"`: the text (newline included) reaches `wl-copy`
+/// and the paste tool receives the configured keystroke arguments.
 #[tokio::test]
 async fn clipboard_injection_copies_text_and_pastes() {
     let dir = tempfile::tempdir().unwrap();
@@ -92,6 +100,8 @@ async fn clipboard_injection_mirrors_to_x11_when_configured() {
     assert_eq!(mirrored, "镜像");
 }
 
+/// `wtype` fails on typing: the result names `clipboard` and the text was
+/// copied.
 #[tokio::test]
 async fn wtype_failure_falls_back_to_clipboard() {
     let dir = tempfile::tempdir().unwrap();
@@ -121,6 +131,7 @@ async fn wtype_success_does_not_touch_clipboard() {
     assert!(args.contains("-- typed"));
 }
 
+/// A missing `wl-copy` yields `ok = false` with method `clipboard`.
 #[tokio::test]
 async fn clipboard_failure_is_reported() {
     let dir = tempfile::tempdir().unwrap();
@@ -165,6 +176,8 @@ async fn clipboard_focus_and_custom_paste_tool_run_in_order() {
     assert_eq!(lines[1], "paste:key --clearmodifiers ctrl+v");
 }
 
+/// The prior selection read through `wl-paste` is written back after the
+/// transcript was pasted.
 #[tokio::test]
 async fn clipboard_injection_restores_previous_selection() {
     let dir = tempfile::tempdir().unwrap();
@@ -194,6 +207,8 @@ async fn clipboard_injection_restores_previous_selection() {
     assert_eq!(lines[1], "PRIOR", "then restore the previous clipboard");
 }
 
+/// Config validation of `[inject].prefer` (`wtype`, `clipboard`, `fcitx5`
+/// are accepted; anything else is rejected).
 #[test]
 fn prefer_accepts_wtype_and_clipboard_only() {
     let bad = AppConfig::from_toml("[inject]\nprefer = \"bogus\"\n");

@@ -1,5 +1,16 @@
+//! Contract of the `latency` module behind `benchmark latency`: percentile
+//! interpolation, the three stage intervals, the quick-mode-only rule, the
+//! "any failed trial blocks" rule, the 100-trial minimum (unverified,
+//! never passed) and the serialized report field names. No real sessions:
+//! every outcome is built by the `trial` fixture.
+
 use voiceless::latency::{evaluate_gate, percentile, LatencyThresholds, TrialOutcome, TrialStage};
 
+/// Successful `quick` trial with a full stage list derived from three
+/// target intervals: utterance start (0.05) -> first partial at `partial`,
+/// stop at `partial + 1.0`, final `stop_to_final` after stop, injection
+/// `stop_to_inject` after stop. `TailSent` is included although the real
+/// command never records it.
 fn trial(partial: f64, stop_to_final: f64, stop_to_inject: f64) -> TrialOutcome {
     TrialOutcome {
         id: 0,
@@ -36,6 +47,8 @@ fn percentile_interpolates_sorted_samples() {
     assert!(percentile(&[], 50.0).is_nan(), "empty input is undefined");
 }
 
+/// 100 successful quick trials with every interval inside its budget:
+/// all three percentiles are present, nothing failed, the gate passes.
 #[test]
 fn gate_reports_p50_p95_p99_per_stage_group() {
     let outcomes: Vec<TrialOutcome> = (0..100)
@@ -109,6 +122,8 @@ fn empty_environment_is_unverified_not_passed() {
     assert!(gate.first_partial_p95.is_none());
 }
 
+/// The JSON report keeps the top-level verdict fields (counts, flags,
+/// thresholds); a single trial is enough since only the shape is checked.
 #[test]
 fn gate_serializes_with_stage_timestamps_and_percentiles() {
     let outcomes = vec![trial(0.3, 0.4, 0.7)];

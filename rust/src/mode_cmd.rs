@@ -1,8 +1,27 @@
 //! `voiceless mode` subcommands backed by the modes repository.
+//!
+//! Entry point for `mode list|reload|add|update|remove`, called from
+//! `main.rs` after clap parsing. The repository file is
+//! `<XDG config dir>/voiceless/modes.json` (`models::default_config_dir`,
+//! the same path `stream::modes_path` resolves for sessions). A missing
+//! file yields the builtin modes (`quick`, `voice-polish`,
+//! `prompt-optimize`, `translate-en`) without creating it; the first
+//! `add`/`update`/`remove` writes it. Builtin modes cannot be updated or
+//! removed (`ModesError::BuiltinImmutable`) and names must be unique
+//! (`modes::ModesRepository` enforces both). Sessions open the repository
+//! themselves, so a change made here is picked up by the next session.
+//!
+//! Output contract: one JSON document on stdout and exit code 0 on success
+//! (`list` and `reload` print the whole `[Mode]` array, the other actions
+//! the affected `Mode`); on failure one `Voiceless: …` line on stderr and
+//! exit code 1.
 
 use crate::models::default_config_dir;
 use crate::modes::ModesRepository;
 
+/// Run one action and return the process exit code. `add` needs `--name`
+/// (prompt and label default to empty); `update` and `remove` need `--id`
+/// and `update` changes only the flags given. Blocking file I/O.
 pub fn run(action: &str, args: ModeArgs) -> i32 {
     let mut repository = match ModesRepository::open(default_config_dir().join("modes.json")) {
         Ok(repository) => repository,
@@ -77,9 +96,17 @@ pub fn run(action: &str, args: ModeArgs) -> i32 {
     0
 }
 
+/// Flags shared by every mode action (clap declares them global).
 pub struct ModeArgs {
+    /// `--id`: the mode `update`/`remove` target (builtin id or user UUID).
     pub id: Option<String>,
+    /// `--name`: display name, required by `add`, optional new name for
+    /// `update`; must be unique in the repository.
     pub name: Option<String>,
+    /// `--prompt`: template sent to the `[processing]` provider; `{text}`
+    /// is replaced by the cleaned transcript (`modes::render_template`).
     pub prompt: Option<String>,
+    /// `--processing-label`: short status label stored with the mode and
+    /// echoed by the CLI and console; the pipeline does not display it.
     pub processing_label: Option<String>,
 }

@@ -2,6 +2,14 @@
 //! fake OpenSpeech server: handshake headers, the gzip full client request,
 //! 100 ms audio packets, the last-packet flag, and the mapping of
 //! utterances onto session events.
+//!
+//! Fixtures: a loopback `TcpListener` upgraded with `accept_hdr_async` so
+//! the request headers can be captured; `parse_client_frame` and
+//! `server_response` hand-roll the binary framing (so the codec under test
+//! is checked against an independent encoding, not against itself); a
+//! `DoubaoConfig` with the legacy app key / access key pair and one
+//! hotword. The pure-function tests cover `encode_audio`,
+//! `decode_server_packet`, `ResultTracker` and the config validation.
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -71,6 +79,14 @@ fn config(endpoint: String) -> DoubaoConfig {
     }
 }
 
+/// One full session over the fake server: Ready arrives before any server
+/// frame; 2.5 packets of audio fed in capture-sized chunks reach the
+/// server as two full 3200-byte packets plus a flagged last packet holding
+/// the remainder; a non-definite utterance is a Partial, a definite one a
+/// Completed (followed by the next Partial); the last-flagged response is
+/// the Finished transcript. Also checks the full request JSON (audio
+/// format, model name, show_utterances, punctuation, hotword corpus) and
+/// the legacy-pair handshake headers (no `X-Api-Key`, 32-char connect id).
 // tungstenite fixes the handshake callback signature, including its error type.
 #[allow(clippy::result_large_err)]
 #[tokio::test]
@@ -203,6 +219,9 @@ async fn streams_packets_and_maps_utterances_to_events() {
     assert_eq!(header("x-api-connect-id").map(|id| id.len()), Some(32));
 }
 
+/// An uncompressed server error frame (type 0b1111, code 45000151) after the
+/// full request is delivered as `RealtimeEvent::Error` with code and text,
+/// after the local Ready.
 #[tokio::test]
 async fn server_error_frame_becomes_error_event() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -243,6 +262,8 @@ fn credentials_accept_api_key_or_legacy_pair() {
     assert!(legacy.has_credentials());
 }
 
+/// `encode_audio(.., true)` sets type 0b0010 with the last flag 0b0010 in
+/// byte 1, puts the big-endian size at bytes 4..8 and gzips the PCM.
 #[test]
 fn audio_frame_round_trips_and_marks_last_packet() {
     let frame = encode_audio(&[1, 2, 3, 4], true);
@@ -251,6 +272,9 @@ fn audio_frame_round_trips_and_marks_last_packet() {
     assert_eq!(gunzip(&frame[8..8 + size]), vec![1, 2, 3, 4]);
 }
 
+/// A full server response with the last flag but no sequence number and no
+/// compression (byte 2 = 0x10) decodes with the size read directly after
+/// the header and `last = true`.
 #[test]
 fn decodes_uncompressed_response_without_sequence() {
     let body = br#"{"result":{"text":"hi"}}"#;
@@ -266,6 +290,9 @@ fn decodes_uncompressed_response_without_sequence() {
     );
 }
 
+/// Cumulative responses: the first definite utterance is confirmed once
+/// and the open one is the partial; an identical response yields nothing;
+/// when the second utterance turns definite only it is confirmed.
 #[test]
 fn tracker_confirms_each_definite_utterance_once() {
     let mut tracker = ResultTracker::default();
@@ -295,6 +322,8 @@ fn tracker_confirms_each_definite_utterance_once() {
     );
 }
 
+/// `doubao-realtime` is an accepted `streaming_backend`, a `ws://` endpoint
+/// is rejected, and `[doubao] hotwords` round-trip through the config.
 #[test]
 fn doubao_backend_and_endpoint_are_validated() {
     assert!(AppConfig::from_toml("[asr]\nstreaming_backend = \"doubao-realtime\"\n").is_ok());

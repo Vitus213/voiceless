@@ -1,3 +1,10 @@
+//! Contract of `config::AppConfig`: the documented defaults, the strict
+//! schema (unknown keys and the legacy `cloud-vad`/`sensevoice-vad`
+//! backends are rejected with the replacement named), the 0600 secret
+//! gate of `AppConfig::load`, and the `[processing]` defaults and
+//! overrides. Fixtures: TOML snippets parsed with `from_toml`; a real
+//! temporary file (`tempfile`) for the permission check. No fakes.
+
 use std::fs;
 
 use tempfile::tempdir;
@@ -11,6 +18,8 @@ fn defaults_to_cloud_realtime_without_a_legacy_final_backend() {
     assert!(config.asr.final_backend.is_none());
 }
 
+/// An unknown key is `UnknownField`; each legacy backend fails with a
+/// message that names `cloud-realtime`, so users learn the replacement.
 #[test]
 fn rejects_unknown_keys_and_legacy_streaming_backends() {
     let unknown = "[asr]\nunknown = true\n";
@@ -24,6 +33,8 @@ fn rejects_unknown_keys_and_legacy_streaming_backends() {
     }
 }
 
+/// A 0640 file that sets `cloud.api_key` must be refused with the 0600
+/// message before its content is used.
 #[cfg(unix)]
 #[test]
 fn rejects_cloud_keys_in_group_readable_config_files() {
@@ -55,6 +66,7 @@ fn processing_defaults_point_at_bailian_deepseek_flash() {
     assert!(config.api_key_env.is_empty());
 }
 
+/// Setting only `provider` and `api_key` keeps the default model.
 #[test]
 fn processing_accepts_a_direct_api_key() {
     let input = "[processing]\nprovider = \"openai-compatible\"\napi_key = \"sk-direct\"\n";
@@ -64,6 +76,8 @@ fn processing_accepts_a_direct_api_key() {
     assert_eq!(config.processing.model, "deepseek-v4-flash-0731");
 }
 
+/// The `{text}` placeholder is stored verbatim; expansion happens in
+/// `modes::render_template`, not at load time.
 #[test]
 fn processing_prompt_defaults_empty_and_accepts_override() {
     let default = ProcessingConfig::default();

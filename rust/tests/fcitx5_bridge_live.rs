@@ -1,16 +1,29 @@
 //! End-to-end check against a running Fcitx5 with the Voiceless bridge
 //! module. Opt-in with `VOICELESS_FCITX5_BRIDGE_TEST=1`; `just bridge-test`
 //! runs it inside a private D-Bus session so the desktop's Fcitx5 and the
-//! focused window are never touched.
+//! focused window are never touched. Without the variable both tests print
+//! "skipped" and pass.
+//!
+//! No fakes: the test itself plays the client application through Fcitx5's
+//! D-Bus frontend (`org.fcitx.Fcitx.InputMethod1` at the portal input-method
+//! path), creating and focusing an input context, then observes what Fcitx5
+//! sends back to that context (`CommitString`, `UpdateFormattedPreedit`
+//! signals on `org.fcitx.Fcitx.InputContext1`). Under test: `inject_text`
+//! with `prefer = "fcitx5"` and the `Fcitx5Client` preedit/commit ordering.
 
 use futures_util::StreamExt;
 use voiceless::config::InjectConfig;
 use voiceless::stream::inject_text;
 
+/// Fcitx5's D-Bus frontend object (the one Wayland/portal clients use).
 const FRONTEND_PATH: &str = "/org/freedesktop/portal/inputmethod";
+/// Frontend interface with `CreateInputContext`.
 const FRONTEND_INTERFACE: &str = "org.fcitx.Fcitx.InputMethod1";
+/// Per-context interface: `FocusIn`, `SetCapability` and the signals.
 const CONTEXT_INTERFACE: &str = "org.fcitx.Fcitx.InputContext1";
 
+/// A multi-line commit through `inject_text` arrives verbatim as one
+/// `CommitString` on the focused context and reports method `fcitx5`.
 #[tokio::test]
 async fn commit_reaches_the_focused_input_context() {
     if std::env::var_os("VOICELESS_FCITX5_BRIDGE_TEST").is_none() {
@@ -78,6 +91,9 @@ async fn commit_reaches_the_focused_input_context() {
 /// preedit inline (the case for GTK/Qt apps).
 const PREEDIT_CAPABILITY: u64 = (1 << 1) | (1 << 4);
 
+/// With a preedit-capable context, the newest of two queued previews
+/// ("你好世界") is shown inline, and the commit is preceded by an empty
+/// preedit update: shown < cleared < commit in signal order.
 #[tokio::test]
 async fn preedit_shows_inline_then_clears_before_the_commit() {
     if std::env::var_os("VOICELESS_FCITX5_BRIDGE_TEST").is_none() {

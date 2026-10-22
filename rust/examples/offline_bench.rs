@@ -4,6 +4,19 @@
 //!
 //! cargo run --release [--features cuda] --example offline_bench -- \
 //!     <model-id> <model-dir> <cpu|cuda> <threads> <silero_vad.onnx> <wav>...
+//!
+//! `model-id` is a catalog id; `OfflineFamily::for_model` picks the engine
+//! from it (`*-gguf` through transcribe.cpp, other `qwen3-asr*` and
+//! `sense-voice*` through Sherpa-ONNX). `model-dir` is the payload
+//! directory, `cpu|cuda` the execution provider, `threads` the CPU thread
+//! count. WAVs must be 16 kHz mono: the decoders assume that rate and do
+//! not resample. Per file it prints audio seconds, decode seconds and RTF
+//! (decode / audio), then a total. Afterwards the first file is re-run
+//! through `SegmentedRecognizer` the way a live session consumes audio
+//! (512-sample VAD windows, 500 ms partial interval, 20 s segment cap) and
+//! the time spent in `finish` is reported as stop-to-final. Exit 2 on a
+//! usage error; any other failure panics with its message. Dev tool only,
+//! not part of the quality or latency gates.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -57,6 +70,8 @@ fn main() {
     }
 
     // Segmented path on the first file: what a live session produces.
+    // 512 samples is one Silero VAD window; 20 s caps a single segment so
+    // a pause-free recording still yields intermediate `Completed` events.
     if let Some(wav) = wavs.first() {
         let wave = sherpa_onnx::Wave::read(wav).expect("wav");
         let vad = create_vad(Path::new(vad_model), 20.0).expect("vad");

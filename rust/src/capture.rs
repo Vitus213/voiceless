@@ -1,3 +1,25 @@
+//! Microphone capture for the realtime pipeline. `RawCapture` runs
+//! PipeWire's `pw-record` as a child process and re-frames its stdout into
+//! fixed 32 ms PCM16 chunks; `WavRecorder` decorates any
+//! `coordinator::AudioCapture` and mirrors the audio into a WAV file for
+//! history retention.
+//!
+//! `stream::PwCapture` is the production `AudioCapture` over `RawCapture`,
+//! and `coordinator::run_session` always wraps whatever capture it is
+//! given in a `WavRecorder` aimed at `SessionPlan::save_audio_dir`
+//! (`[history].save_audio`, files under `~/.local/share/voiceless/audio/`).
+//! `wav_header` is also used by tests that fabricate WAV fixtures.
+//!
+//! Format contract: 16 kHz, mono, signed 16-bit little-endian
+//! (`SAMPLE_RATE`), delivered in `CHUNK_BYTES` (1024 B = 32 ms) chunks;
+//! only the last chunk before end of stream, and the tail returned by
+//! `stop`, may have another length. An odd byte count (a torn sample) is
+//! reported as `InvalidData`, never passed on.
+//!
+//! Failure behaviour: a missing `pw-record` fails `RawCapture::start`, and
+//! with it the session before `Ready`; the WAV mirror is best effort and
+//! never affects recognition, injection or history.
+
 use std::io::{self, Seek, Write};
 use std::process::Stdio;
 
@@ -6,16 +28,26 @@ use tokio::process::{Child, ChildStdout, Command};
 
 use crate::coordinator::AudioCapture;
 
+/// Capture sample rate in Hz; every backend consumes 16 kHz mono PCM16.
 pub const SAMPLE_RATE: u32 = 16_000;
+/// Bytes per chunk: 32 ms of 16 kHz mono PCM16 (0.032 * 16000 * 2).
 pub const CHUNK_BYTES: usize = 1_024;
 
+/// A running `pw-record` child whose stdout is re-framed into
+/// `CHUNK_BYTES` chunks. Dropping it kills the child (`kill_on_drop`).
 pub struct RawCapture {
     child: Child,
     stdout: ChildStdout,
+    /// Bytes read from the child but not yet returned as a full chunk.
     pending: Vec<u8>,
 }
 
 impl RawCapture {
+    /// Spawn `pw-record --rate 16000 --channels 1 --format s16 --raw
+    /// --latency 32ms -` with stdout piped and stderr inherited, so PipeWire
+    /// diagnostics reach the terminal. Fails when the binary is missing or
+    /// cannot be spawned; a PipeWire-level failure shows up later as end of
+    /// stream from `next_chunk`.
     pub fn start() -> io::Result<Self> {
         let mut child = Command::new("pw-record")
             .args([
@@ -45,6 +77,11 @@ impl RawCapture {
         })
     }
 
+    /// Next `CHUNK_BYTES` chunk, waiting until that many bytes arrived. At
+    /// end of stream the remainder is returned as one shorter chunk, then
+    /// `Ok(None)`; an odd remainder is an `InvalidData` error. Cancellation
+    /// safe: a dropped call loses no bytes (the read is atomic with the
+    /// append to `pending`).
     pub async fn next_chunk(&mut self) -> io::Result<Option<Vec<u8>>> {
         let mut buffer = [0_u8; CHUNK_BYTES];
         loop {
@@ -68,8 +105,15 @@ impl RawCapture {
         }
     }
 
+    /// Graceful stop: SIGINT `pw-record` so it flushes and exits, read
+    /// everything it still writes, then reap it. Returns the leftover bytes
+    /// (any even length) as the tail frame, `Ok(None)` when nothing is left
+    /// or the child failed without output, and `InvalidData` for an odd
+    /// remainder.
     pub async fn stop(&mut self) -> io::Result<Option<Vec<u8>>> {
         if let Some(pid) = self.child.id() {
+            // SIGINT lets pw-record drain its buffer; kill() would truncate
+            // the tail of the utterance.
             #[cfg(unix)]
             unsafe {
                 libc::kill(pid as i32, libc::SIGINT);
@@ -81,6 +125,8 @@ impl RawCapture {
         self.stdout.read_to_end(&mut tail).await?;
         self.pending.extend_from_slice(&tail);
         let status = self.child.wait().await?;
+        // A failed child that produced nothing is simply "no tail"; one
+        // that produced audio still gets its bytes delivered.
         if !status.success() && self.pending.is_empty() {
             return Ok(None);
         }
@@ -98,6 +144,8 @@ impl RawCapture {
     }
 }
 
+/// Read a whole PCM16 stream and split it into `CHUNK_BYTES` chunks (the
+/// last one may be shorter); an odd total length is `InvalidData`.
 pub async fn read_fixed_chunks<R>(mut reader: R) -> io::Result<Vec<Vec<u8>>>
 where
     R: AsyncRead + Unpin,
@@ -124,16 +172,25 @@ where
 /// recognition, injection or history. Cancelled or failed sessions leave
 /// no file behind; a successful session finalizes the header and renames
 /// the partial file to the destination.
+///
+/// The file is finalized only through `finish_recording`, which the
+/// coordinator calls on the success path with recognized text; every
+/// other outcome (cancel, failure, no speech, mirror error) ends in
+/// `disable`, directly or from `Drop`, which deletes the partial file.
 pub struct WavRecorder<C> {
     inner: C,
     sample_rate: u32,
+    /// `None` when saving is disabled, has failed, or is finished.
     state: Option<RecorderState>,
 }
 
+/// The open partial file plus what is needed to finalize or discard it.
 struct RecorderState {
     file: std::fs::File,
+    /// `<final_path>.partial`; removed on every outcome but success.
     temp_path: std::path::PathBuf,
     final_path: std::path::PathBuf,
+    /// PCM bytes written after the 44-byte header.
     data_bytes: u64,
 }
 
@@ -160,6 +217,8 @@ impl<C> WavRecorder<C> {
         }
     }
 
+    /// Write the placeholder header (data size 0) once the inner capture
+    /// has started; `finish` patches the real size in.
     fn write_header(&mut self) {
         let Some(state) = self.state.as_mut() else {
             return;
@@ -186,6 +245,8 @@ impl<C> WavRecorder<C> {
         }
     }
 
+    /// Stop mirroring for the rest of the session and delete the partial
+    /// file. Idempotent.
     fn disable(&mut self) {
         if let Some(state) = self.state.take() {
             drop(state.file);
@@ -255,13 +316,16 @@ impl<C: AudioCapture> AudioCapture for WavRecorder<C> {
 }
 
 impl<C> Drop for WavRecorder<C> {
+    /// A recorder that was not finalized (cancel, failure, no speech)
+    /// deletes its partial file.
     fn drop(&mut self) {
         self.disable();
     }
 }
 
 /// Minimal canonical PCM16 mono WAV header (44 bytes). `data_bytes` may be
-/// 0 at creation time and is patched once the session finishes.
+/// 0 at creation time and is patched once the session finishes. Sizes are
+/// truncated to `u32` as the RIFF format requires.
 pub fn wav_header(data_bytes: u64, sample_rate: u32) -> [u8; 44] {
     let riff_size = (36 + data_bytes) as u32;
     let byte_rate = sample_rate * 2;

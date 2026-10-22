@@ -1,3 +1,11 @@
+//! Final-text pipeline after a successful finish: `quick` mode skips the
+//! processor, other modes process the text and inject the result, a
+//! processing failure keeps the recognized text with a warning, history is
+//! written only for successful non-empty sessions, and `inject = false`
+//! still processes and records. Fakes: `CountingProcessor` (counts calls,
+//! fixed result), `RecordingHistory`, plus the capture/transport fakes from
+//! `common`.
+
 mod common;
 
 use common::{
@@ -9,6 +17,7 @@ use tokio::sync::mpsc;
 use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
 use voiceless::realtime::RealtimeEvent;
 
+/// Flatten events to their kind names; a final snapshot counts as `final`.
 fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -159,6 +168,8 @@ async fn processing_failure_keeps_recognized_text_with_warning() {
     assert_eq!(records[0].status, "completed");
 }
 
+/// Two sessions: one cancelled after the first append, one finished with
+/// an empty transcript; neither reaches the history recorder.
 #[tokio::test]
 async fn cancelled_and_empty_sessions_write_no_history() {
     // Cancelled session.

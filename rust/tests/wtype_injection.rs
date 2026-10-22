@@ -1,5 +1,7 @@
 //! Contract tests for the wtype injection argument builder: newlines become
 //! Shift+Enter so a chat input breaks lines without submitting the message.
+//! Pure function under test (`stream::wtype_invocations`); no process is
+//! spawned.
 
 use voiceless::stream::wtype_invocations;
 

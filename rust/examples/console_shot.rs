@@ -3,6 +3,16 @@
 //! docs/images/ screenshots never contain real recordings.
 //!
 //! cargo run --example console_shot   # then screenshot the page
+//!
+//! Open `http://127.0.0.1:18792/` in a browser: the index page embeds the
+//! fixed token `console-shot` in its `voiceless-token` meta tag, so no
+//! `?token=` is needed. The server runs with no daemon handle, so the
+//! daemon-backed endpoints (status, live events, session control, engine
+//! reload, logs) answer 503 "daemon not running"; the history and library
+//! views are what to capture. Four demo records (three with a synthesized
+//! tone WAV, one legacy record without audio) are re-dated over two days
+//! so the date grouping is visible. Everything lives in a `tempdir` that
+//! is removed on exit; the process serves until killed.
 
 use tempfile::tempdir;
 use tokio::net::TcpListener;
@@ -11,6 +21,9 @@ use voiceless::console::serve_listener;
 use voiceless::coordinator::HistoryEntry;
 use voiceless::history::HistoryStore;
 
+/// Build a 16 kHz mono PCM16 WAV of `seconds`: a sine at `freq` Hz with
+/// slight vibrato under a half-sine envelope, so the console's waveform
+/// view shows something speech-shaped rather than a flat bar.
 fn synth_wav(seconds: f64, freq: f64) -> Vec<u8> {
     let n = (seconds * 16_000.0) as usize;
     let mut pcm = Vec::with_capacity(n * 2);
@@ -34,6 +47,8 @@ async fn main() {
     std::fs::create_dir_all(&audio_dir).expect("audio dir");
     let store = HistoryStore::open(root.path().join("history.sqlite3")).expect("store");
 
+    // (final text, seconds, tone Hz, backend, processing mode, has audio).
+    // The last row imitates a record from before WAV retention existed.
     let demos = [
         (
             "演示：云端实时转写，录音已保留",

@@ -1,10 +1,15 @@
 //! Identity cutover: the repository ships Voiceless as the sole product
 //! identity; no `type4me-linux` command, package attribute, Home Manager
 //! option or desktop entry survives as a compatibility path.
+//!
+//! Three tests grep repository files (`flake.nix`, `nix/home-manager.nix`,
+//! legacy paths) and skip themselves when those files are absent, as in the
+//! Nix build sandbox; the last one runs the built binary's `--help`.
 
 use std::fs;
 use std::path::Path;
 
+/// Parent of the `rust/` crate directory.
 fn repo_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -12,6 +17,7 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// Read a file or panic with its path.
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
@@ -64,6 +70,7 @@ fn home_manager_module_exposes_only_voiceless_options() {
     );
 }
 
+/// Absence checks need no file read, so this runs in the sandbox too.
 #[test]
 fn no_desktop_entry_or_python_distribution_survives() {
     let root = repo_root();

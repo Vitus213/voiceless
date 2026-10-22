@@ -1,3 +1,10 @@
+//! Bounded, lossless audio flow of `coordinator::run_session`: the queue
+//! bound trips instead of dropping or reordering, a torn tail frame fails
+//! the session before `finish`, and every chunk reaches the backend exactly
+//! once in capture order. Fakes from `common`: `FakeCapture` (scripted
+//! chunks and tail), `ScriptedTransport` (scripted events, append delay,
+//! control triggers), `RecordingInjector`, `RecordingSink`.
+
 mod common;
 
 use common::{
@@ -9,6 +16,7 @@ use tokio::sync::mpsc;
 use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
 use voiceless::realtime::RealtimeEvent;
 
+/// Flatten events to their kind names; a final snapshot counts as `final`.
 fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -26,6 +34,8 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Run one session with the fakes (5 s guard). The transport gets the
+/// control sender so its scripted triggers can issue Stop/Cancel.
 async fn run_fixture(
     plan: SessionPlan,
     capture: FakeCapture,
@@ -63,6 +73,7 @@ async fn default_capture_contract_is_16khz_mono_pcm16_32ms_chunks() {
     assert_eq!(CHUNK_BYTES, 1_024);
 }
 
+/// A 3-byte tail after stop: error + completed, no finish, no injection.
 #[tokio::test]
 async fn odd_byte_tail_frame_fails_without_final_or_injection() {
     let log = new_log();
@@ -143,6 +154,8 @@ async fn slow_transport_overrunning_the_bounded_queue_fails_the_session() {
     );
 }
 
+/// Capture EOF acts as the stop: three chunks and the tail are appended
+/// once each, in order, then one final transcript.
 #[tokio::test]
 async fn chunks_are_delivered_in_capture_order_exactly_once() {
     let log = new_log();

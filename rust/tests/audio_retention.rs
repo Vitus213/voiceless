@@ -1,6 +1,8 @@
 //! Audio retention lifecycle: each successful session mirrors its capture
 //! to a WAV file linked from the history entry; cancel, failure and empty
-//! sessions never leave a file behind.
+//! sessions never leave a file behind. Runs the real `WavRecorder` inside
+//! `run_session` against a temp directory, with the capture/transport
+//! fakes from `common` and `RecordingHistory` to read the entry back.
 
 mod common;
 
@@ -17,6 +19,7 @@ use voiceless::capture::wav_header;
 use voiceless::coordinator::{run_session, ControlCommand, SessionPlan};
 use voiceless::realtime::RealtimeEvent;
 
+/// Quick-mode plan without injection, saving audio into `audio_dir`.
 fn plan(audio_dir: Option<PathBuf>) -> SessionPlan {
     let mut plan = SessionPlan::new("cloud-realtime", false);
     plan.mode_id = "quick".to_owned();
@@ -57,6 +60,9 @@ async fn run_success(
     (code, history_probe, entries(&log))
 }
 
+/// Two chunks plus a tail end up byte-exact behind a 44-byte header with
+/// the real data size; the batch loader reads the file back and the
+/// history duration matches the byte count.
 #[tokio::test]
 async fn successful_session_saves_a_readable_wav_linked_to_history() {
     let root = tempdir().expect("temporary root");
@@ -101,6 +107,8 @@ async fn successful_session_saves_a_readable_wav_linked_to_history() {
     assert_eq!(records[0].duration_seconds, Some(expected_seconds));
 }
 
+/// Cancel after the first append: no history row, no `.wav` and no
+/// `.partial` file in the audio directory.
 #[tokio::test]
 async fn cancelled_session_leaves_no_partial_recording() {
     let root = tempdir().expect("temporary root");
@@ -139,6 +147,8 @@ async fn cancelled_session_leaves_no_partial_recording() {
     );
 }
 
+/// `save_audio_dir = None`: the row is written with a duration but no
+/// path, and no audio directory is created.
 #[tokio::test]
 async fn disabled_saving_records_history_without_audio() {
     let root = tempdir().expect("temporary root");
@@ -155,6 +165,7 @@ async fn disabled_saving_records_history_without_audio() {
     );
 }
 
+/// No chunks at all and an empty final: exit 0, no row, no file.
 #[tokio::test]
 async fn empty_session_saves_no_file_even_when_saving_is_enabled() {
     let root = tempdir().expect("temporary root");

@@ -1,5 +1,31 @@
 //! Recognition history persisted in SQLite with the Python-compatible
 //! `recognition_history` schema, WAL journaling and 0600 permissions.
+//!
+//! File: `<XDG data dir>/voiceless/history.sqlite3`
+//! (`models::default_data_dir`). Opened by `stream::build_pipeline` when
+//! `[history].enabled` (one `insert` per successful session through
+//! `coordinator::HistoryRecorder`), by `history_cmd` for
+//! `voiceless history list|delete|export|totals|usage`, and by the console
+//! (`GET /api/records`, `GET /api/totals`, `DELETE /api/records/{id}`;
+//! audio playback and re-transcription locate the WAV through `get`).
+//!
+//! Schema: `PRAGMA user_version` 1 is the original table; version 2 adds
+//! the nullable `audio_path` column (the retained WAV of the session, see
+//! `[history].save_audio`). `open` migrates forward inside one
+//! `BEGIN IMMEDIATE` transaction and refuses a database whose version is
+//! newer than `SCHEMA_VERSION`. Rows are inserted once and only ever
+//! deleted (together with their recording); nothing updates them.
+//! `created_at` is RFC 3339 UTC with a `Z` suffix and `id` a random
+//! UUID-v4-style string, so `(created_at DESC, id DESC)` is the total order
+//! used for listing, CSV export and the keyset cursors.
+//!
+//! Concurrency: the store keeps only the path. Every call opens its own
+//! connection (`connect`) with WAL journaling and a 5 s busy timeout, so
+//! the daemon, the CLI and the console can read and write the same file at
+//! the same time and the handle can be shared in an `Arc`. All methods are
+//! synchronous and block on SQLite. Audio files are removed after the
+//! owning rows, best effort: a row never outlives its file by design, but
+//! an unlink failure can leave a file behind.
 
 use std::path::{Path, PathBuf};
 
@@ -10,43 +36,81 @@ use time::{Duration, OffsetDateTime};
 
 use crate::coordinator::HistoryEntry;
 
+/// Newest `user_version` this build understands; older files are
+/// migrated, newer ones rejected.
 const SCHEMA_VERSION: i64 = 2;
+/// How long a connection waits for a writer lock before failing; covers
+/// the daemon inserting while the console or CLI reads.
 const BUSY_TIMEOUT_MS: i64 = 5_000;
 
+/// Failures of the store. `stream` logs them and keeps the session
+/// result; the CLI prints them and exits 1; the console answers 500.
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
+    /// A SQLite error, a schema newer than this build, or an argument
+    /// rejected up front (page size, usage window).
     #[error("history database error: {0}")]
     Database(String),
+    /// The current time could not be formatted as RFC 3339.
     #[error("history timestamp invalid: {0}")]
     Timestamp(String),
+    /// A page cursor that `query` did not produce (bad base64 or JSON).
     #[error("history cursor invalid")]
     Cursor,
+    /// Directory creation, chmod or CSV write failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
+/// One row of `recognition_history`, serialized as is to JSON by the CLI
+/// (`history list`) and the console (`/api/records`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HistoryRecord {
+    /// Random UUID-v4-style identifier (`new_record_id`); the console's
+    /// audio URLs carry only this id and look the path up here.
     pub id: String,
+    /// Insertion time, RFC 3339 UTC (`…Z`); ordering compares it as text.
     pub created_at: String,
+    /// Length of the captured audio (PCM bytes / 32 000 at 16 kHz mono
+    /// 16-bit); `None` when the session captured no audio or the row
+    /// predates audio retention.
     pub duration_seconds: Option<f64>,
+    /// Recognizer output before the `[text]` cleanup.
     pub raw_text: String,
+    /// Mode id of the session (`quick`, `prompt-optimize`, a user mode's
+    /// UUID). Nullable in the schema; the pipeline always sets it.
     pub processing_mode: Option<String>,
+    /// LLM output for a processing mode, or the cleaned text in `quick`
+    /// mode when cleanup changed something; `None` when processing failed
+    /// or cleanup changed nothing.
     pub processed_text: Option<String>,
+    /// The text that was injected (authoritative).
     pub final_text: String,
+    /// `completed` for every row this crate writes; failed, cancelled and
+    /// empty sessions are never recorded.
     pub status: String,
+    /// `final_text.chars().count()`: Unicode scalar values, not bytes.
     pub character_count: i64,
+    /// Streaming backend of the session (`cloud-realtime`, …).
     pub asr_provider: Option<String>,
+    /// Always `None` for rows written by this crate; kept for schema
+    /// compatibility and the `usage` breakdown.
     pub asr_model: Option<String>,
+    /// Absolute path of the retained WAV (schema v2); `None` when retention
+    /// was off or the row predates it. Deleted together with the row.
     pub audio_path: Option<String>,
 }
 
+/// One page of `query`: newest first, with the opaque cursor of the next
+/// page (`None` on the last page).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HistoryPage {
     pub records: Vec<HistoryRecord>,
     pub next_cursor: Option<String>,
 }
 
+/// Aggregates over every row: `COUNT(*)`, summed `character_count` and
+/// summed `duration_seconds` (NULLs count as 0).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HistoryTotals {
     pub records: i64,
@@ -54,11 +118,18 @@ pub struct HistoryTotals {
     pub duration_seconds: f64,
 }
 
+/// Handle to the history database. Holds only the path: every method
+/// opens a fresh connection, so the handle is cheap to share and never
+/// keeps a lock between calls.
 pub struct HistoryStore {
     path: PathBuf,
 }
 
 impl HistoryStore {
+    /// Create the parent directory, create or migrate the database and
+    /// chmod it 0600. Errors: directory or chmod I/O, SQLite failures, or
+    /// a `user_version` above `SCHEMA_VERSION` (written by a newer
+    /// Voiceless). Safe to call concurrently from several processes.
     pub fn open(path: PathBuf) -> Result<Self, HistoryError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -68,6 +139,10 @@ impl HistoryStore {
         Ok(store)
     }
 
+    /// Open one connection with the busy timeout and WAL journaling. WAL
+    /// lets readers (console, CLI) proceed while the daemon inserts; the
+    /// setting is persistent in the file, so every opener ends up in WAL
+    /// mode whichever process created the database.
     fn connect(&self) -> Result<Connection, HistoryError> {
         let connection = Connection::open(&self.path)
             .map_err(|error| HistoryError::Database(error.to_string()))?;
@@ -80,14 +155,22 @@ impl HistoryStore {
         Ok(connection)
     }
 
+    /// Bring the schema to `SCHEMA_VERSION` (v1 table, then the v2
+    /// `audio_path` column) and tighten the file mode. Idempotent.
     fn migrate(&self) -> Result<(), HistoryError> {
         let connection = self.connect()?;
+        // Take the write lock before reading the version so two processes
+        // opening the same new file cannot both run the DDL; an early
+        // `return` drops the connection and SQLite rolls the transaction
+        // back.
         connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|error| HistoryError::Database(error.to_string()))?;
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| HistoryError::Database(error.to_string()))?;
+        // Never touch a file written by a newer schema: an older binary
+        // must not reinterpret or "migrate" columns it does not know.
         if version > SCHEMA_VERSION {
             return Err(HistoryError::Database(format!(
                 "history database version too new: {version}"
@@ -113,6 +196,8 @@ impl HistoryStore {
                 )
                 .map_err(|error| HistoryError::Database(error.to_string()))?;
         }
+        // v1 -> v2: existing rows get NULL (no recording), which the
+        // console shows as the "no recording" chip.
         if version < 2 {
             connection
                 .execute_batch(
@@ -124,6 +209,8 @@ impl HistoryStore {
         connection
             .execute_batch("COMMIT")
             .map_err(|error| HistoryError::Database(error.to_string()))?;
+        // SQLite creates the file with the process umask; transcripts are
+        // private data, so tighten it once the schema exists.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -133,6 +220,11 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Append one row for a successful session and return it as stored.
+    /// The id and `created_at` are generated here, `character_count` is
+    /// derived from `final_text`, `backend` becomes `asr_provider` and
+    /// `asr_model` is left NULL. Does not touch the audio file: the
+    /// recorder already finalized it at `entry.audio_path`.
     pub fn insert(
         &self,
         entry: &HistoryEntry,
@@ -180,6 +272,13 @@ impl HistoryStore {
         })
     }
 
+    /// List rows newest first with keyset pagination. `limit` must be
+    /// within 1..=1000 (`Database` error otherwise); `cursor` is the
+    /// `next_cursor` of a previous page (`Cursor` error when malformed).
+    /// A cursor points after a specific `(created_at, id)` rather than at
+    /// an offset, so pages stay consistent while rows are inserted or
+    /// deleted in between: nothing is repeated or skipped. The last page
+    /// carries `next_cursor: None`.
     pub fn query(&self, limit: i64, cursor: Option<&str>) -> Result<HistoryPage, HistoryError> {
         if !(1..=1_000).contains(&limit) {
             return Err(HistoryError::Database(format!(
@@ -188,6 +287,8 @@ impl HistoryStore {
         }
         let connection = self.connect()?;
         let mut statement;
+        // Both branches fetch `limit + 1` rows: the extra row says whether
+        // another page exists without a second COUNT query.
         let rows = if let Some(cursor) = cursor {
             let (created_at, record_id) = decode_cursor(cursor)?;
             statement = connection
@@ -236,11 +337,17 @@ impl HistoryStore {
         })
     }
 
+    /// Delete the rows with these ids, then remove their recordings (best
+    /// effort). Returns the number of rows deleted; unknown ids are
+    /// ignored and an empty list is a no-op. Not transactional across the
+    /// two steps: an unlink failure leaves a file without a row, never a
+    /// row without a file.
     pub fn delete(&self, ids: &[String]) -> Result<i64, HistoryError> {
         if ids.is_empty() {
             return Ok(0);
         }
         let connection = self.connect()?;
+        // Collect the paths first; after the DELETE the rows are gone.
         let audio_paths = audio_paths_for(&connection, ids)?;
         let placeholders = vec!["?"; ids.len()].join(", ");
         let deleted = connection
@@ -253,6 +360,9 @@ impl HistoryStore {
         Ok(deleted as i64)
     }
 
+    /// Delete every row, then remove every retained recording the rows
+    /// referenced (best effort). Returns the number of rows deleted. Files
+    /// in the audio directory that no row references are not touched.
     pub fn delete_all(&self) -> Result<i64, HistoryError> {
         let connection = self.connect()?;
         let mut statement = connection
@@ -270,6 +380,8 @@ impl HistoryStore {
         Ok(deleted as i64)
     }
 
+    /// Row count, summed characters and summed duration over the whole
+    /// table (one aggregate query).
     pub fn totals(&self) -> Result<HistoryTotals, HistoryError> {
         let connection = self.connect()?;
         connection
@@ -289,6 +401,14 @@ impl HistoryStore {
             .map_err(|error| HistoryError::Database(error.to_string()))
     }
 
+    /// Row counts per `asr_provider` and per `asr_model` over the trailing
+    /// `days` (only 1, 7 or 30 are accepted; `Database` error otherwise),
+    /// as `{"days", "since", "providers": {name: n}, "models": {name: n}}`.
+    /// `since` is the RFC 3339 cutoff; it is compared with `created_at` as
+    /// text, which orders correctly because both are UTC `Z` timestamps
+    /// from the same formatter. Rows with a NULL provider or model are left
+    /// out; `models` is empty for rows written by this crate (see
+    /// `HistoryRecord::asr_model`).
     pub fn usage(&self, days: i64) -> Result<serde_json::Value, HistoryError> {
         if !matches!(days, 1 | 7 | 30) {
             return Err(HistoryError::Database(format!(
@@ -344,6 +464,11 @@ impl HistoryStore {
         }))
     }
 
+    /// Write every row, newest first, to `destination` as CSV with a
+    /// fixed header (`id,created_at,…,audio_path`), creating parent
+    /// directories and overwriting an existing file. Fields containing
+    /// `,`, `"` or a newline are quoted with doubled quotes (RFC 4180);
+    /// NULL fields are empty. Returns the number of rows written.
     pub fn export_csv(&self, destination: &Path) -> Result<i64, HistoryError> {
         let connection = self.connect()?;
         let mut statement = connection
@@ -400,6 +525,7 @@ impl HistoryStore {
         Ok(records.len() as i64)
     }
 
+    /// Fetch one row by id; `Ok(None)` when there is no such row.
     pub fn get(&self, record_id: &str) -> Result<Option<HistoryRecord>, HistoryError> {
         let connection = self.connect()?;
         let record = connection
@@ -417,6 +543,7 @@ impl HistoryStore {
     }
 }
 
+/// Column order shared by every `SELECT` in this module.
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     Ok(HistoryRecord {
         id: row.get(0)?,
@@ -434,12 +561,17 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     })
 }
 
+/// Current UTC time as RFC 3339 with a `Z` suffix: the `created_at`
+/// format, chosen so lexical order is chronological order.
 fn timestamp_now() -> Result<String, HistoryError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| HistoryError::Timestamp(error.to_string()))
 }
 
+/// Random UUID v4 in hyphenated form, from the OS CSPRNG (the layout the
+/// console validates before looking a record up). Panics only when the
+/// OS random source is unavailable.
 fn new_record_id() -> String {
     let mut bytes = [0_u8; 16];
     getrandom::getrandom(&mut bytes).expect("OS random source available");
@@ -456,6 +588,9 @@ fn new_record_id() -> String {
     )
 }
 
+/// Opaque page token: unpadded base64url of the JSON array
+/// `[created_at, id]` of the last row on the page. URL-safe so the
+/// console can pass it as a query parameter unchanged.
 fn encode_cursor(created_at: &str, record_id: &str) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
@@ -463,6 +598,8 @@ fn encode_cursor(created_at: &str, record_id: &str) -> String {
     URL_SAFE_NO_PAD.encode(payload.as_bytes())
 }
 
+/// Inverse of `encode_cursor`; every decoding failure is
+/// `HistoryError::Cursor` so callers can answer "bad cursor" uniformly.
 fn decode_cursor(cursor: &str) -> Result<(String, String), HistoryError> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
@@ -492,6 +629,8 @@ fn remove_audio_files(paths: &[String]) {
     }
 }
 
+/// Recording paths of the given ids (rows without one are skipped), read
+/// before a `DELETE` so the files can still be located afterwards.
 fn audio_paths_for(
     connection: &rusqlite::Connection,
     ids: &[String],

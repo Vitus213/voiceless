@@ -1,3 +1,16 @@
+//! Daemon gateway contract: one session at a time, toggle semantics
+//! (idle -> start, recording -> normal stop, stopping -> reject), hold-to-talk
+//! start/stop ordering, cancel exit code `130` with no history row, and the
+//! `HotkeyMachine` gestures (hold vs tap, Ctrl mode, foreign sessions).
+//!
+//! The gateway is driven directly (no D-Bus, no evdev) with `FixtureRunner`,
+//! a `SessionRunner` that executes the real `coordinator::run_session` over
+//! the shared fakes in `tests/common`: `FakeCapture` (one chunk),
+//! `ScriptedTransport` (Ready + Completed before finish, then whatever the
+//! test queued after finish), `RecordingInjector`, `RecordingHistory` and a
+//! noop processor. A test that queues no `Finished` event makes the stop
+//! flush wait, which is how the "stopping" window is held open.
+
 mod common;
 
 use common::{
@@ -60,6 +73,7 @@ impl SessionRunner for FixtureRunner {
     }
 }
 
+/// A runner with a fresh history and no post-finish events queued.
 fn runner(log: common::Log) -> FixtureRunner {
     FixtureRunner {
         history: RecordingHistory::new(),
@@ -69,6 +83,8 @@ fn runner(log: common::Log) -> FixtureRunner {
     }
 }
 
+/// Poll (as the daemon loop does) until the session task is reaped; panics
+/// after 2 s.
 async fn wait_idle(gateway: &mut Gateway<FixtureRunner>) {
     for _ in 0..400 {
         let _ = gateway.poll().await;
@@ -80,6 +96,8 @@ async fn wait_idle(gateway: &mut Gateway<FixtureRunner>) {
     panic!("gateway never returned to idle");
 }
 
+/// Like `wait_idle` but returns the reaped exit code, panicking if the task
+/// disappears without one.
 async fn wait_idle_code(gateway: &mut Gateway<FixtureRunner>) -> i32 {
     for _ in 0..400 {
         if let Some(code) = gateway.poll().await {
@@ -93,6 +111,8 @@ async fn wait_idle_code(gateway: &mut Gateway<FixtureRunner>) -> i32 {
     panic!("gateway never returned to idle");
 }
 
+/// Toggle, toggle: the second activation is a normal stop, so the final
+/// text is injected exactly once and one history row is written.
 #[tokio::test]
 async fn activate_twice_runs_one_session_then_normal_stop_with_single_injection() {
     let log = new_log();
@@ -121,6 +141,9 @@ async fn activate_twice_runs_one_session_then_normal_stop_with_single_injection(
     assert_eq!(history.records().len(), 1);
 }
 
+/// While the stop flush hangs, a third activation is an error mentioning
+/// "stopping"; cancel then unblocks it with `130`, and only one capture ever
+/// started.
 #[tokio::test]
 async fn activate_during_stop_flush_is_rejected_without_a_second_session() {
     let log = new_log();
@@ -168,6 +191,9 @@ async fn cancel_during_recording_yields_cancelled_exit_and_no_history() {
     assert!(history.records().is_empty(), "{:?}", history.records());
 }
 
+/// Explicit start/stop: stop before start and a second start while
+/// recording are errors, stop while stopping is an error, and the session
+/// still ends with one injection and one history row.
 #[tokio::test]
 async fn hold_to_talk_start_and_stop_run_one_session_and_reject_out_of_order_calls() {
     let log = new_log();
@@ -202,6 +228,8 @@ async fn hold_to_talk_start_and_stop_run_one_session_and_reject_out_of_order_cal
     );
 }
 
+/// Pure gesture tests: a 350 ms hold threshold, `quick` for a plain press
+/// and `prompt-optimize` for a Ctrl press, driven with explicit instants.
 mod hotkey_machine {
     use std::time::{Duration, Instant};
     use voiceless::daemon::{HotkeyMachine, KeyAction, State};
@@ -273,6 +301,8 @@ mod hotkey_machine {
     }
 }
 
+/// `[hotkey]` defaults (350 ms hold), `[audio]` defaults (pause on, cues
+/// off) and rejection of an unknown evdev key name at config load.
 #[test]
 fn hotkey_and_audio_config_are_validated() {
     use voiceless::config::AppConfig;

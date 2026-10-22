@@ -1,6 +1,21 @@
 //! Library endpoints: model catalog and installs, history records and
 //! recordings, re-transcription with the warm engine, correction
 //! suggestions and the replay benchmark.
+//!
+//! Mounted under `/api` by `super::router`; the "Models", "History" and
+//! "Diagnostics" tables of `docs/console-api.md`. Touches the model store
+//! (`ModelManager` over `<data dir>/models` with `versions/` beneath it and
+//! `<cache dir>/model-downloads` for partial downloads; the dirs default to
+//! `~/.local/share/voiceless` and `~/.cache/voiceless`), the history
+//! database and the WAV recordings its rows point at, and `config.toml`
+//! (`[text]`, for the cleanup applied to re-transcriptions).
+//!
+//! Endpoints that decode audio (`retranscribe`, `benchmark`) need the
+//! daemon's warm local engine (`streaming_backend = "local-offline"`) and
+//! answer 503 otherwise; everything else also works under `voiceless
+//! history serve`. Record ids are validated as UUIDs before they reach SQL,
+//! and audio is only ever read from the path stored in the record, never
+//! from anything in the request.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,13 +33,24 @@ use crate::history::HistoryRecord;
 use crate::models::{catalog, default_cache_dir, default_data_dir, HttpDownloader, ModelManager};
 
 /// Background model installs: id → last error (`None` while running).
+///
+/// Shared through `ConsoleState`. An entry is inserted when an install is
+/// accepted, removed on success and replaced by the error message on
+/// failure, so `list_models` can report `installing` / `error` and a
+/// second `POST .../install` for a running id is refused with 409. A
+/// poisoned mutex is recovered, not propagated.
 #[derive(Default)]
 pub struct Installs(Mutex<HashMap<String, Option<String>>>);
 
+/// A `ModelManager` over the default data and cache dirs; it holds only
+/// paths, so one per call is fine.
 fn manager() -> ModelManager {
     ModelManager::new(&default_data_dir(), &default_cache_dir())
 }
 
+/// Catalog id → the `kind` reported to the page: `gguf` (transcribe.cpp
+/// GPU models, ids ending in `-gguf`), `vad` (`silero-vad`), `streaming`
+/// (`streaming-*` Paraformer) or `sherpa` for everything else.
 fn kind(id: &str) -> &'static str {
     if id.ends_with("-gguf") {
         "gguf"
@@ -37,6 +63,8 @@ fn kind(id: &str) -> &'static str {
     }
 }
 
+/// Catalog ids the daemon's warm engine has loaded (model plus VAD); empty
+/// without a daemon or without a local engine. These cannot be removed.
 fn models_in_use(state: &ConsoleState) -> Vec<String> {
     state
         .daemon
@@ -46,9 +74,18 @@ fn models_in_use(state: &ConsoleState) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `GET /api/models` (console API "Models"): every catalog entry with
+/// `installed` (an intact `current` pointer in the store; a broken one
+/// reads as not installed), `installing`, `progress` (bytes of the
+/// `.partial` download over `size_bytes`, 0..1, only while installing; it
+/// sits at 1.0 while the archive is verified and extracted, and is never
+/// `null` during an install), `error` from the last failed install,
+/// `kind` and `in_use`. Always 200; works without a daemon (`in_use` is
+/// then always false).
 pub async fn list_models(State(state): State<Arc<ConsoleState>>) -> ApiResult {
     let manager = manager();
     let in_use = models_in_use(&state);
+    // Snapshot the map so the lock is not held across the filesystem probes.
     let installs = state
         .installs
         .0
@@ -83,6 +120,14 @@ pub async fn list_models(State(state): State<Arc<ConsoleState>>) -> ApiResult {
     Ok(Json(json!(models)))
 }
 
+/// `POST /api/models/{id}/install` (console API "Models"): starts a
+/// background install of a catalog model and answers `{"ok": true}` at
+/// once; the page polls `GET /api/models` for progress. 404 for an id not
+/// in the catalog, 409 if that id is already installing. The install
+/// (download to the cache dir, SHA-256 and size check, extraction,
+/// activation) runs on the blocking pool; its outcome is recorded in
+/// `Installs` and, with a daemon, logged as `model <id> installed`. A
+/// failed install leaves its error for `list_models` and can be retried.
 pub async fn install_model(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
@@ -103,9 +148,12 @@ pub async fn install_model(
                 format!("{id} is already installing"),
             ));
         }
+        // Reserve the id under the lock so two clicks cannot start two downloads.
         installs.insert(id.clone(), None);
     }
     let console = state.clone();
+    // Detached: the response does not wait, and a client that navigates away
+    // does not cancel the download.
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || manager().install(&spec, &HttpDownloader))
             .await
@@ -131,6 +179,11 @@ pub async fn install_model(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `DELETE /api/models/{id}` (console API "Models"): deletes the model's
+/// pointer and every stored version. 409 while the daemon's warm engine
+/// has it loaded (switch models and reload first), 404 if nothing is
+/// installed under that id, 500 on filesystem errors; `{"ok": true}`
+/// otherwise. No catalog check: any installed id can be removed.
 pub async fn remove_model(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
@@ -151,6 +204,9 @@ pub async fn remove_model(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// A `HistoryRecord` as the API's `HistoryRecord` JSON plus `has_audio`,
+/// which checks that the referenced WAV still exists (the row keeps its
+/// `audio_path` even after the file was removed by hand).
 fn record_json(record: &HistoryRecord) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or_default();
     value["has_audio"] = json!(record
@@ -160,12 +216,20 @@ fn record_json(record: &HistoryRecord) -> Value {
     value
 }
 
+/// Query parameters of `GET /api/records`.
 #[derive(serde::Deserialize)]
 pub struct Page {
+    /// Page size; default 200, clamped to 1..=1000.
     limit: Option<i64>,
+    /// Opaque `next_cursor` from the previous page.
     cursor: Option<String>,
 }
 
+/// `GET /api/records?limit=&cursor=` (console API "History"): newest
+/// first, `{"records": [HistoryRecord + has_audio], "next_cursor"}` where
+/// `next_cursor` is `null` on the last page. `limit` defaults to 200 and
+/// is clamped to 1..=1000. 500 for database errors, including a cursor
+/// that does not decode.
 pub async fn records(
     State(state): State<Arc<ConsoleState>>,
     Query(page): Query<Page>,
@@ -183,6 +247,9 @@ pub async fn records(
     })))
 }
 
+/// `GET /api/totals` (console API "History"):
+/// `{"records", "characters", "duration_seconds"}` over the whole
+/// database. 500 on database errors.
 pub async fn totals(State(state): State<Arc<ConsoleState>>) -> ApiResult {
     Ok(Json(
         serde_json::to_value(state.store.totals().map_err(ApiError::internal)?)
@@ -190,6 +257,9 @@ pub async fn totals(State(state): State<Arc<ConsoleState>>) -> ApiResult {
     ))
 }
 
+/// Strict UUID shape: 36 chars, hex with dashes at 8/13/18/23. Rejecting
+/// anything else up front keeps path-like or wildcard strings out of the
+/// SQL lookup and makes the `.wav` suffix stripping in `audio` unambiguous.
 fn is_record_id(id: &str) -> bool {
     id.len() == 36
         && id.as_bytes().iter().enumerate().all(|(index, byte)| {
@@ -197,6 +267,8 @@ fn is_record_id(id: &str) -> bool {
         })
 }
 
+/// Look a record up by id; a malformed id and an unknown one are the same
+/// 404 `no such record`, a database error 500.
 fn find_record(state: &ConsoleState, id: &str) -> Result<HistoryRecord, ApiError> {
     let not_found = || ApiError(StatusCode::NOT_FOUND, "no such record".to_owned());
     if !is_record_id(id) {
@@ -210,6 +282,18 @@ fn find_record(state: &ConsoleState, id: &str) -> Result<HistoryRecord, ApiError
 }
 
 /// The recording of a record, with `Range` support so the player can seek.
+///
+/// `GET /api/audio/{id}?token=` (console API "History"): the record's WAV
+/// as `audio/wav`. The id may carry a `.wav` suffix (the page adds one so
+/// the browser infers the type). Responses: 200 whole file with
+/// `Accept-Ranges: bytes`; 206 with `Content-Range` for a single
+/// `bytes=a-b` range (an open end `a-` or an end past EOF is clipped);
+/// 416 with `Content-Range: bytes */len` when the start is past EOF;
+/// multi-range and suffix (`bytes=-n`) requests fall back to the whole
+/// file; 404 for an unknown id or a record saved without audio; 410 when
+/// the row has a path but the file is gone. The whole file is read into
+/// memory (recordings are ~115 KB per minute) and only the path stored in
+/// the record is opened.
 pub async fn audio(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
@@ -265,6 +349,10 @@ pub async fn audio(
     })
 }
 
+/// `DELETE /api/records/{id}` (console API "History"): removes the row and
+/// then its WAV (best effort: a missing file is not an error). 404 for a
+/// malformed or unknown id, 500 for database errors; `{"ok": true}`
+/// otherwise.
 pub async fn delete_record(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
@@ -282,6 +370,14 @@ pub async fn delete_record(
 
 /// Decode a WAV with the daemon's warm engine through the live VAD
 /// segmentation; returns (text, decode seconds, audio seconds).
+///
+/// Mirrors a real session so timings are comparable: the file is read with
+/// sherpa's WAV reader, resampled to 16 kHz if needed, fed in 512-sample
+/// chunks to a `SegmentedRecognizer` built from the engine's decoder, VAD
+/// model and segment limit, and the `Finished` transcript is taken. The
+/// partial interval is set to an hour so no partial decodes inflate the
+/// time. Blocking and GPU-heavy: callers run it on the blocking pool.
+/// Errors are strings: unreadable file, resampler or VAD creation failure.
 fn decode_file(
     engine: &crate::engine::WarmEngine,
     path: &str,
@@ -319,6 +415,9 @@ fn decode_file(
     ))
 }
 
+/// The daemon's warm local engine, or 503: `daemon not running` without a
+/// daemon, `no local engine is loaded` when the backend is not
+/// `local-offline` or the load failed.
 fn warm_engine(state: &ConsoleState) -> Result<Arc<crate::engine::WarmEngine>, ApiError> {
     state.daemon()?.warm().ok_or_else(|| {
         ApiError(
@@ -328,6 +427,15 @@ fn warm_engine(state: &ConsoleState) -> Result<Arc<crate::engine::WarmEngine>, A
     })
 }
 
+/// `POST /api/records/{id}/retranscribe` (console API "History"): decodes
+/// the record's recording again with the warm engine and answers
+/// `{"ok": true, "text", "cleaned", "seconds", "engine"}` — `text` raw,
+/// `cleaned` after the current `[text]` cleanup, `seconds` decode time,
+/// `engine` the `describe()` string. Nothing is written to history. 503
+/// without a daemon or local engine (checked before the id, so an unknown
+/// id also gets 503 then), 404 for a malformed/unknown id or a missing
+/// WAV, 400 if the saved `[text]` rules do not compile, 500 for decode
+/// errors. Occupies the GPU for the decode.
 pub async fn retranscribe(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
@@ -360,6 +468,10 @@ pub async fn retranscribe(
     })))
 }
 
+/// `POST /api/corrections` (console API "History"): body `{"original",
+/// "corrected"}` → `{"ok": true, "suggestions": [{"from","to"}]}` from
+/// `suggest_replacements`. Pure computation, no daemon or database;
+/// missing fields count as empty strings. Always 200.
 pub async fn corrections(Json(body): Json<Value>) -> ApiResult {
     let original = body["original"].as_str().unwrap_or_default();
     let corrected = body["corrected"].as_str().unwrap_or_default();
@@ -374,6 +486,13 @@ pub async fn corrections(Json(body): Json<Value>) -> ApiResult {
 /// of a character diff, widened with unchanged neighbours to at least three
 /// characters so the rule does not fire on every occurrence of one
 /// character (`峰` → `丰` would; `张三峰` → `张三丰` does not).
+///
+/// Both inputs are capped at 2 000 chars (the LCS table is O(n·m) `u16`
+/// cells). Widening only consumes alphanumeric context, so punctuation and
+/// spaces bound a suggestion. Spans whose `from` is blank are dropped (an
+/// insertion with no context has nothing to match), as are no-op pairs.
+/// Each suggestion is a candidate `[text] replacements` entry; the page
+/// may turn same-length Chinese ones into hotwords instead.
 pub fn suggest_replacements(original: &str, corrected: &str) -> Vec<(String, String)> {
     let a: Vec<char> = original.chars().take(2_000).collect();
     let b: Vec<char> = corrected.chars().take(2_000).collect();
@@ -401,6 +520,7 @@ pub fn suggest_replacements(original: &str, corrected: &str) -> Vec<(String, Str
             j += 1;
         }
     }
+    // Sentinel so the trailing changed span (after the last match) is emitted.
     matches.push((a.len(), b.len()));
     let is_word = |ch: char| ch.is_alphanumeric();
     let mut suggestions = Vec::new();
@@ -442,6 +562,11 @@ pub fn suggest_replacements(original: &str, corrected: &str) -> Vec<(String, Str
 
 /// Character error rate between two transcripts, ignoring punctuation,
 /// whitespace and letter case.
+///
+/// Levenshtein distance over the normalised characters (single-row DP)
+/// divided by the reference length. Empty reference: 0.0 if the hypothesis
+/// is empty too, else 1.0. Can exceed 1.0 when the hypothesis is much
+/// longer than the reference.
 pub fn cer(reference: &str, hypothesis: &str) -> f64 {
     let normalize = |text: &str| -> Vec<char> {
         text.chars()
@@ -466,6 +591,18 @@ pub fn cer(reference: &str, hypothesis: &str) -> f64 {
     row[hypothesis.len()] as f64 / reference.len() as f64
 }
 
+/// `POST /api/benchmark` (console API "Diagnostics"): body `{"limit": 10}`
+/// (clamped to 1..=50; no body = 10). Takes the newest `limit` records
+/// among the latest 500 whose WAV still exists, decodes each with the warm
+/// engine through `decode_file`, and answers `{"ok": true, "engine",
+/// "results": [...], "mean_rtf", "mean_cer"}`. Per record: `audio_seconds`,
+/// `decode_seconds`, `rtf` (decode ÷ audio), `reference` (the record's
+/// `raw_text`, whatever backend produced it), `text` and `cer`; a record
+/// that fails to decode yields `{"id", "error"}` instead and is left out
+/// of the means (which are `null` if nothing decoded). 503 without a
+/// daemon or local engine, 404 when no record has audio, 500 for database
+/// errors. Decodes run one after another on the blocking pool and hold
+/// the GPU for the whole run; the request blocks until all are done.
 pub async fn benchmark(
     State(state): State<Arc<ConsoleState>>,
     body: Option<Json<Value>>,

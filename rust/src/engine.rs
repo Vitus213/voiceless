@@ -1,6 +1,15 @@
 //! Warm recognition engines. A resident daemon loads the configured local
 //! model once and hands it to every session, so a hotkey press never waits
 //! for a model load. One-shot `voiceless stream` runs load on demand.
+//!
+//! `daemon.rs` builds a `WarmEngine` at start-up (and again on an engine
+//! reload) and lends it to each session through `stream::SessionEnv::warm`;
+//! `stream::open_local_offline` takes the decoder from it when the
+//! `[local]` settings still match (`offline_for`) and otherwise loads
+//! cold. Only the `local-offline` backend (`asr.streaming_backend`) has
+//! anything to keep warm. Models come from the managed catalog
+//! (`models::installed_model_dir`), verified once here so sessions skip the
+//! hash check of the multi-gigabyte payload.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,8 +19,13 @@ use crate::offline_asr::{create_decoder, Decoder, OfflineFamily, OfflineOptions}
 
 /// An engine kept loaded across sessions.
 pub enum WarmEngine {
+    /// `local-offline`: the GPU/CPU decoder plus the Silero VAD model.
     Offline {
+        /// The `[local]` settings (with `[text].hotwords` merged) the
+        /// decoder was built with; sessions compare against them before
+        /// reusing it.
         local: LocalConfig,
+        /// Shared decoder, cloned (`Arc`) into each session.
         recognizer: Arc<dyn Decoder>,
         /// Verified once at load; sessions skip the per-session hash check.
         vad_model: PathBuf,
@@ -21,6 +35,10 @@ pub enum WarmEngine {
 impl WarmEngine {
     /// Load the engine the configured streaming backend needs, if it has a
     /// loadable model. Cloud backends have nothing to keep warm.
+    ///
+    /// Blocking: the model load runs synchronously on the caller's thread.
+    /// Errors are human-readable (unknown, missing or corrupt model or VAD,
+    /// unsupported model family, decoder construction failure).
     pub fn load(config: &AppConfig) -> Result<Option<Self>, String> {
         match config.asr.streaming_backend.as_str() {
             "local-offline" => {
@@ -69,7 +87,8 @@ impl WarmEngine {
     }
 
     /// The warm decoder and VAD model, for offline jobs (re-transcription,
-    /// benchmarks) and the text cleanup config of the session.
+    /// benchmarks) and the text cleanup config of the session. The third
+    /// element is the VAD segment cap in seconds (`LocalConfig::segment_limit`).
     pub fn decoder(&self) -> (Arc<dyn Decoder>, PathBuf, f32) {
         match self {
             Self::Offline {
@@ -80,6 +99,7 @@ impl WarmEngine {
         }
     }
 
+    /// Human-readable `<model> on <device>` for status output and logs.
     pub fn describe(&self) -> String {
         match self {
             Self::Offline { local, .. } => format!("{} on {}", local.model, local.device()),
@@ -87,6 +107,9 @@ impl WarmEngine {
     }
 }
 
+/// Decoder options derived from `[local]`: compute provider (device),
+/// thread count and hotwords. Shared by the warm load and cold sessions so
+/// both build identical decoders.
 pub fn offline_options(local: &LocalConfig) -> OfflineOptions {
     OfflineOptions {
         provider: local.device(),

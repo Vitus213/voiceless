@@ -1,9 +1,15 @@
 //! `asr.fallback_backend`: when the primary backend cannot open before a
 //! session starts, the fallback is tried and a warning event says so.
 //! Data and config dirs point at a temp dir, never the user's home.
+//! Runs the real `stream::run_with_env` with a broadcast sink standing in
+//! for the daemon; no model is installed and no credentials exist, so both
+//! backends fail to open and no capture ever starts.
 
 use voiceless::stream::{run_with_env, SessionEnv, StreamError, StreamOptions};
 
+/// `local-offline` has no installed model: a warning names the fallback
+/// and the primary's reason; the fallback's own credential error is what
+/// the command returns.
 #[tokio::test]
 async fn missing_local_model_falls_back_and_reports_the_switch() {
     let root = tempfile::tempdir().unwrap();

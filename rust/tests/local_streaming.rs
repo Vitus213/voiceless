@@ -1,3 +1,11 @@
+//! End-to-end CLI contract of the `local-streaming` backend when its model
+//! is unavailable: `voiceless stream --json --no-inject` must fail at the
+//! open step with exit code 1, report the problem as an `error` event
+//! followed by `completed`, and never touch the cloud. Fixtures: the built
+//! binary (`CARGO_BIN_EXE_voiceless`), an explicit `--config` file and a
+//! throwaway XDG root so no installed model or user config leaks in; no
+//! model is needed.
+
 use std::fs;
 use std::process::Command;
 
@@ -7,6 +15,8 @@ fn voiceless() -> Command {
     Command::new(env!("CARGO_BIN_EXE_voiceless"))
 }
 
+/// No model installed: the JSON stream is exactly `error`, `completed`,
+/// and the output mentions neither DashScope nor an authorization header.
 #[test]
 fn explicit_local_backend_reports_model_error_without_cloud() {
     let root = tempdir().expect("temporary directory");
@@ -46,6 +56,8 @@ fn explicit_local_backend_reports_model_error_without_cloud() {
     assert!(!rendered.contains("authorization"));
 }
 
+/// `local_model_dir` points at an empty directory: the error names the
+/// first missing required file (`encoder.int8.onnx`).
 #[test]
 fn local_backend_reports_the_missing_required_model_file() {
     let root = tempdir().expect("temporary directory");

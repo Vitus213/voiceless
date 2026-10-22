@@ -3,6 +3,17 @@
 //! checks, history and audio endpoints, comment-preserving config edits
 //! with write-only secrets, text preview, modes, correction suggestions,
 //! and the live endpoints answering 503.
+//!
+//! Fixture (`start`): a temp dir with a `config.toml` (one comment, one
+//! secret with a trailing comment, one hotword), a 1 068-byte synthetic WAV
+//! and a history database holding one record that points at it;
+//! `console::serve_listener` is spawned on an ephemeral loopback port with
+//! `daemon = None` and the fixed token `TOKEN`. Requests are blocking
+//! `ureq` calls, hence the multi-thread runtime on every test. Modes are
+//! written under a process-wide `XDG_CONFIG_HOME` temp dir so no test
+//! touches the real `modes.json`. The daemon-backed endpoints (session
+//! control, events, reload, re-transcription, benchmark) are not covered
+//! here; only their 503 fallback is.
 
 use std::path::PathBuf;
 
@@ -13,8 +24,11 @@ use voiceless::capture::wav_header;
 use voiceless::coordinator::HistoryEntry;
 use voiceless::history::HistoryStore;
 
+/// Token handed to `serve_listener` instead of a random one.
 const TOKEN: &str = "test-token";
 
+/// One running console: its base URL, the config file it edits, the id of
+/// the seeded record, and the temp dir kept alive for the test's duration.
 struct Fixture {
     base: String,
     config_path: PathBuf,
@@ -22,6 +36,8 @@ struct Fixture {
     _root: tempfile::TempDir,
 }
 
+/// A 16 kHz mono PCM16 WAV of 512 ramp samples (44-byte header + 1 024
+/// bytes of PCM = 1 068 bytes, the length the Range test asserts).
 fn wav_bytes() -> Vec<u8> {
     let pcm: Vec<u8> = (0..512_u32)
         .flat_map(|i| (i as i16).to_le_bytes())
@@ -31,6 +47,8 @@ fn wav_bytes() -> Vec<u8> {
     bytes
 }
 
+/// Build the fixture and spawn the server without a daemon; the task is
+/// dropped with the runtime at the end of the test.
 async fn start() -> Fixture {
     // Modes live under XDG_CONFIG_HOME: one scratch dir for the whole
     // binary, set once, so parallel tests never race on the variable.
@@ -87,6 +105,8 @@ async fn start() -> Fixture {
     }
 }
 
+/// HTTP status of a `ureq` result, treating 4xx/5xx as a status rather
+/// than an error; panics on transport failures.
 fn status(result: Result<ureq::Response, ureq::Error>) -> u16 {
     match result {
         Ok(response) => response.status(),
@@ -95,6 +115,7 @@ fn status(result: Result<ureq::Response, ureq::Error>) -> u16 {
     }
 }
 
+/// Authenticated GET expecting 2xx JSON.
 fn get(fixture: &Fixture, path: &str) -> Value {
     ureq::get(&format!("{}{path}", fixture.base))
         .set("X-Voiceless-Token", TOKEN)
@@ -105,6 +126,9 @@ fn get(fixture: &Fixture, path: &str) -> Value {
         .unwrap()
 }
 
+/// Authenticated JSON request (no `Origin`, so the same-origin check does
+/// not apply); `Err((status, body))` for non-2xx so tests can assert the
+/// `{"error"}` payload.
 fn send(fixture: &Fixture, method: &str, path: &str, body: Value) -> Result<Value, (u16, Value)> {
     let json = |response: ureq::Response| -> Value {
         serde_json::from_str(&response.into_string().unwrap()).unwrap()
@@ -120,6 +144,9 @@ fn send(fixture: &Fixture, method: &str, path: &str, body: Value) -> Result<Valu
     }
 }
 
+/// The served page carries the token in its meta tag with the placeholder
+/// gone; `/app.js` needs no token; `/api/*` is 403 without a token or with
+/// a wrong `?token=`, and 200 with the right one in the query string.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn page_embeds_the_token_and_api_requires_it() {
     let fixture = start().await;
@@ -148,6 +175,8 @@ async fn page_embeds_the_token_and_api_requires_it() {
     );
 }
 
+/// A non-loopback `Host` is 421 even with a valid token; a POST with a
+/// valid token but a foreign `Origin` is 403.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreign_host_and_cross_origin_writes_are_rejected() {
     let fixture = start().await;
@@ -165,6 +194,9 @@ async fn foreign_host_and_cross_origin_writes_are_rejected() {
     assert_eq!(status(cross), 403);
 }
 
+/// The seeded record is listed with `has_audio`, totals count it, a byte
+/// range on its WAV answers 206 with the right `Content-Range`, and
+/// deleting the record brings totals to zero.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_records_audio_and_delete() {
     let fixture = start().await;
@@ -194,6 +226,11 @@ async fn history_records_audio_and_delete() {
     assert_eq!(get(&fixture, "/api/totals")["records"], 0);
 }
 
+/// Reading masks the secret and reports `has_api_key`; writing `""` keeps
+/// it while other keys update, both comments survive and replacements are
+/// written as `[[text.replacements]]`; a hotword change sets
+/// `restart_engine`; an invalid value is 400 and leaves the file
+/// byte-identical; `null` clears the secret.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_edits_keep_comments_and_secrets_are_write_only() {
     let fixture = start().await;
@@ -241,6 +278,9 @@ async fn config_edits_keep_comments_and_secrets_are_write_only() {
     assert_eq!(get(&fixture, "/api/config")["cloud"]["has_api_key"], false);
 }
 
+/// A `config` in the body (hotword 张三丰 plus the default filler removal)
+/// is applied instead of the saved rules; a regex rule that does not
+/// compile is 400.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_preview_uses_the_unsaved_rules() {
     let fixture = start().await;
@@ -262,6 +302,10 @@ async fn text_preview_uses_the_unsaved_rules() {
     assert_eq!(code, 400);
 }
 
+/// Custom mode create/update/delete round-trips and deleting a built-in is
+/// 409; the organize prompt saves through the comment-preserving writer;
+/// the correction diff suggests exactly `张三峰 → 张三丰`; `/api/status`
+/// and `/api/logs` are 503 without a daemon.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn modes_prompt_corrections_and_live_endpoints() {
     let fixture = start().await;

@@ -1,3 +1,19 @@
+//! Contract of `voiceless::models::ModelManager`: a download is accepted
+//! only when its SHA-256 matches the pinned SRI, tarball members outside
+//! the allow-list abort the install, the payload lands under
+//! `versions/<id>/<version>-<digest12>` with a `manifest.json` and a
+//! `current` symlink, `check` detects corrupted, missing and stray files,
+//! `remove` deletes pointer and payloads, and a reinstall repairs a
+//! corrupted payload in place. Also pins the supply-chain fields of the
+//! streaming Paraformer catalog entry.
+//!
+//! Fakes and fixtures: `FixtureDownloader` writes caller-supplied bytes
+//! instead of fetching over HTTPS; `CorruptingDownloader` writes garbage
+//! to provoke a digest mismatch; `fixture_archive` builds a tar.bz2 whose
+//! members sit under a `fixture-model/` top-level directory, and
+//! `fixture_spec` pins its SRI and byte count so the archive verifies.
+//! Every test gets a fresh `tempdir` as data and cache root.
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -8,6 +24,7 @@ use voiceless::models::{
     ArchiveType, CheckReport, Downloader, ModelError, ModelManager, ModelSpec,
 };
 
+/// Downloader fake: writes `bytes` to the destination, no network.
 struct FixtureDownloader {
     bytes: Vec<u8>,
 }
@@ -20,6 +37,7 @@ impl Downloader for FixtureDownloader {
     }
 }
 
+/// Downloader fake that always delivers bytes other than the pinned ones.
 struct CorruptingDownloader;
 
 impl Downloader for CorruptingDownloader {
@@ -30,6 +48,7 @@ impl Downloader for CorruptingDownloader {
     }
 }
 
+/// SRI string (`sha256-<base64>`) of `bytes`, the format of the catalog.
 fn sri_for(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     use base64::Engine;
@@ -39,6 +58,9 @@ fn sri_for(bytes: &[u8]) -> String {
     )
 }
 
+/// Build a tar.bz2 with regular-file members `fixture-model/<name>` (no
+/// explicit directory entries), as the real Sherpa release archives are
+/// shaped.
 fn fixture_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (name, content) in members {
@@ -57,6 +79,8 @@ fn fixture_archive(members: &[(&str, &[u8])]) -> Vec<u8> {
     encoder.finish().expect("finish bz2")
 }
 
+/// A tarball carrying an explicit directory entry (`fixture-model/sub`)
+/// installs: directory entries are not subject to the file allow-list.
 #[test]
 fn install_accepts_explicit_directory_entries_in_archives() {
     let root = tempdir().expect("temporary root");
@@ -97,6 +121,9 @@ fn install_accepts_explicit_directory_entries_in_archives() {
     assert!(payload.join("tokens.txt").is_file());
 }
 
+/// Catalog-shaped spec for `archive`: SRI and size derived from the bytes,
+/// `fixture-model` as the stripped top level, three allowed members that
+/// are all required.
 fn fixture_spec(archive: &[u8]) -> ModelSpec {
     ModelSpec {
         id: "fixture-online".to_owned(),
@@ -118,6 +145,8 @@ fn fixture_spec(archive: &[u8]) -> ModelSpec {
     }
 }
 
+/// Install the standard three-member fixture under `root` and return the
+/// manager, spec, payload directory and archive bytes for further steps.
 fn install_fixture(root: &Path) -> (ModelManager, ModelSpec, std::path::PathBuf, Vec<u8>) {
     let archive = fixture_archive(&[
         ("encoder.int8.onnx", b"encoder-bytes"),
@@ -137,6 +166,9 @@ fn install_fixture(root: &Path) -> (ModelManager, ModelSpec, std::path::PathBuf,
     (manager, spec, payload, archive)
 }
 
+/// Happy path: members land in `versions/<id>/test-1-<digest12>/` next to
+/// `manifest.json`, `models/<id>/current` is a symlink, and `resolve`
+/// returns the same payload directory `install` returned.
 #[test]
 fn install_extracts_members_writes_manifest_and_activates_pointer() {
     let root = tempdir().expect("temporary root");
@@ -172,6 +204,8 @@ fn install_extracts_members_writes_manifest_and_activates_pointer() {
     assert_eq!(resolved, payload);
 }
 
+/// A fresh install checks clean; overwriting a file is reported as
+/// `corrupt`, deleting a required file as `missing`, and neither is `ok`.
 #[test]
 fn check_reports_clean_payload_and_detects_corruption() {
     let root = tempdir().expect("temporary root");
@@ -196,6 +230,7 @@ fn check_reports_clean_payload_and_detects_corruption() {
     );
 }
 
+/// A file added to the payload after installation shows up as `extra`.
 #[test]
 fn check_flags_unexpected_members() {
     let root = tempdir().expect("temporary root");
@@ -209,6 +244,8 @@ fn check_flags_unexpected_members() {
     );
 }
 
+/// Bytes that do not hash to the pinned SRI fail with
+/// `ModelError::Integrity` mentioning SHA-256, and nothing gets activated.
 #[test]
 fn install_refuses_wrong_digest_and_reports_integrity_error() {
     let root = tempdir().expect("temporary root");
@@ -230,6 +267,8 @@ fn install_refuses_wrong_digest_and_reports_integrity_error() {
     assert!(manager.resolve(&spec.id).expect("resolve").is_none());
 }
 
+/// A correctly hashed archive that carries a member outside the allow-list
+/// (`malware.bin`) is rejected with `ModelError::Archive` naming it.
 #[test]
 fn install_refuses_disallowed_archive_members() {
     let root = tempdir().expect("temporary root");
@@ -251,6 +290,8 @@ fn install_refuses_disallowed_archive_members() {
     );
 }
 
+/// `remove` returns true and deletes payload and pointer; a second call
+/// returns false and `check` then fails with `NotInstalled`.
 #[test]
 fn remove_deletes_pointer_and_versions_and_reports_absence() {
     let root = tempdir().expect("temporary root");
@@ -265,6 +306,8 @@ fn remove_deletes_pointer_and_versions_and_reports_absence() {
     assert!(matches!(&error, ModelError::NotInstalled(id) if *id == spec.id));
 }
 
+/// Installing again over a corrupted payload wipes and re-downloads it
+/// into the same directory, after which `check` is clean again.
 #[test]
 fn reinstall_after_corruption_repairs_payload() {
     let root = tempdir().expect("temporary root");
@@ -282,6 +325,8 @@ fn reinstall_after_corruption_repairs_payload() {
     assert!(report.ok(), "{report:?}");
 }
 
+/// The real Paraformer entry pins HTTPS, an sha256 SRI, a size, the int8
+/// members and a license note; an empty `CheckReport` is `ok`.
 #[test]
 fn streaming_paraformer_catalog_entry_pins_supply_chain_fields() {
     let spec = voiceless::models::streaming_paraformer_spec();

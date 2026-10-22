@@ -1,10 +1,17 @@
 //! Contract tests for the `local-offline` backend that need no model:
 //! config validation, catalog consistency, and load-failure reporting.
+//! Fixtures: `AppConfig::from_toml` snippets, the in-binary model catalog,
+//! and an `OfflineTransport` started with a loader closure that fails
+//! (standing in for a missing model directory).
 
 use voiceless::config::AppConfig;
 use voiceless::offline_asr::{OfflineAsrError, OfflineFamily, OfflineTransport};
 use voiceless::realtime::RealtimeEvent;
 
+/// `[local]` defaults and limits: GGUF models default to cuda / 30 s,
+/// Sherpa models to cpu / 15 s; unknown providers and models, a segment
+/// cap above 60 s, a Sherpa cap above 25 s and cuda for a Sherpa model are
+/// rejected; hotwords on SenseVoice are accepted (ignored at runtime).
 #[test]
 fn local_offline_config_is_validated() {
     let config = AppConfig::from_toml("[asr]\nstreaming_backend = \"local-offline\"\n").unwrap();
@@ -35,6 +42,9 @@ fn local_offline_config_is_validated() {
     );
 }
 
+/// Every offline model and the VAD have an https URL, an SRI hash, and
+/// required paths that are also allowed members; the id -> family mapping
+/// matches the catalog ids.
 #[test]
 fn offline_catalog_entries_are_consistent() {
     let catalog = voiceless::models::catalog();
@@ -72,6 +82,9 @@ fn offline_catalog_entries_are_consistent() {
     );
 }
 
+/// The transport reports Ready before the loader runs; audio sent in the
+/// meantime is accepted (or rejected harmlessly once the worker is gone);
+/// the loader's error then arrives as an `Error` event naming the path.
 #[tokio::test]
 async fn load_failure_is_reported_after_ready() {
     let transport = OfflineTransport::start(|| {

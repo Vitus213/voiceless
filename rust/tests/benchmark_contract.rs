@@ -1,3 +1,12 @@
+//! Contract of the `benchmark` module behind `benchmark asr`: content
+//! normalization and CER, JSONL corpus loading (including the dev/test
+//! disjointness of the repository corpus when it is present), replay
+//! through a `BackendFactory`, per-sample failure accounting and the
+//! report field names. Fakes: `ScriptedFactory` returns a scripted
+//! transcript per sample index and fails from a chosen index;
+//! `ChunkRecorder` records the buffer sizes it was handed. No network and
+//! no audio files; corpus fixtures are temp JSONL files.
+
 use std::time::Duration;
 
 use voiceless::benchmark::{
@@ -27,6 +36,8 @@ fn cer_is_edit_distance_over_reference_length() {
     assert!(cer("abc", "") > 0.0);
 }
 
+/// Two well-formed lines load in order; then, only when the repository
+/// corpus is present, no `test` id may reappear in `dev`.
 #[test]
 fn corpus_loader_parses_jsonl_and_keeps_dev_test_separate() {
     let root = tempfile::tempdir().expect("temporary root");
@@ -100,6 +111,10 @@ fn entry(id: &str, reference: &str) -> CorpusEntry {
     }
 }
 
+/// Three samples: punctuation-only difference scores 0, one wrong
+/// character scores above 0, and a transport failure on the third is
+/// recorded on that sample (error set) and counted in `failures` while
+/// the run still completes with a positive aggregate CER.
 #[tokio::test]
 async fn benchmark_aggregates_content_cer_with_per_sample_errors() {
     let entries = vec![
@@ -183,6 +198,9 @@ fn report_serializes_with_versioned_shape() {
     }
 }
 
+/// Despite the name, this only pins that the replay loop hands the whole
+/// sample buffer to the factory exactly once; splitting into 32 ms frames
+/// is the backend's job (`benchmark_cmd::replay_cloud` / `replay_local`).
 #[test]
 fn replay_feeds_32ms_chunks() {
     use std::sync::{Arc, Mutex};

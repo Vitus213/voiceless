@@ -1,6 +1,40 @@
-//! Production wiring: config -> coordinator with pw-record capture,
-//! cloud/local transports, stdout/stderr event sink and configurable
-//! text injection (wtype or clipboard).
+//! The `voiceless stream` command and the production wiring of a realtime
+//! session: config -> `coordinator::run_session` with `pw-record` capture
+//! (`PwCapture`), one backend transport, the final-text pipeline (`[text]`
+//! cleanup, modes, LLM processing), SQLite history with WAV retention,
+//! stdout/JSON or daemon-broadcast event sinks, and text injection
+//! (`[inject]`: wtype, clipboard or the Fcitx5 bridge).
+//!
+//! Entry points: `run` (CLI: SIGINT/SIGTERM become `Stop`/`Cancel`),
+//! `run_with_control` (caller-provided control channel) and `run_with_env`
+//! (adds the daemon's warm engine and event broadcast; `daemon.rs` calls
+//! it once per activation). `main.rs` reaches `run` only for a standalone
+//! session: when the configured backend is local (`local-offline` or
+//! `local-streaming`) and a daemon owns `dev.voiceless.Daemon`, it delegates
+//! to `ctl::stream_via_daemon` instead (D-Bus `StartSession(mode, inject)`,
+//! events and Ctrl-C relayed), unless `--config` or `--backend` was given.
+//!
+//! Config read here: `[asr].streaming_backend`, `fallback_backend`,
+//! `local_model_dir`; `[cloud]`, `[doubao]`, `[local]` through `AppConfig`;
+//! `[processing]`; `[text]`; `[history].enabled`, `save_audio`; `[inject]`.
+//! Files: `$XDG_CONFIG_HOME/voiceless/modes.json` (`modes_path`),
+//! `$XDG_DATA_HOME/voiceless/history.sqlite3` and `audio/`
+//! (`models::default_data_dir`, `default_audio_dir`), the managed model
+//! directories. Processes spawned: `pw-record`, `wtype`, `wl-copy`,
+//! `wl-paste` and the configured paste, focus and X11 clipboard commands.
+//!
+//! Order of operations: the mode, processing provider and text cleaner are
+//! resolved before any backend opens, and the backend opens (with at most
+//! one fallback) before any capture starts, so configuration errors never
+//! produce audio. Backend-open failures that are configuration errors
+//! (`StreamError`) abort the command: `main.rs` prints `Voiceless: <error>`
+//! and exits 1. A missing or corrupt local model is instead reported as
+//! `error` + `completed` events (exit code 1) so `--json` consumers and
+//! overlays see it.
+//!
+//! `stream --json` prints one `JsonEvent` line per `OutputEvent`
+//! (`json_event`); the daemon broadcasts the same lines as D-Bus `Event`
+//! signals, which `voiceless ctl watch` and the console relay.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -21,31 +55,57 @@ use crate::coordinator::{
 use crate::realtime::{RealtimeEvent, RealtimeSession};
 use crate::session::TranscriptSnapshot;
 
+/// Options of one `stream` invocation. `main.rs` fills them from the CLI;
+/// the daemon keeps one copy and overrides `mode` and `inject` per session.
 #[derive(Debug, Clone)]
 pub struct StreamOptions {
+    /// `--config` path; `None` loads the default XDG config (optional file).
     pub config_path: Option<PathBuf>,
+    /// `--backend`: overrides `asr.streaming_backend`, validated like a
+    /// config file would be.
     pub backend: Option<String>,
+    /// `--json`: one JSON line per event on stdout instead of plain text.
     pub json: bool,
+    /// Inject the final text into the focused window (`--no-inject` clears
+    /// it); processing and history happen either way.
     pub inject: bool,
+    /// Mode id or (case-insensitive) name resolved against `modes.json`;
+    /// the CLI default is `quick`.
     pub mode: String,
 }
 
+/// Startup failures of a standalone session, all raised before any audio
+/// is captured. `main.rs` prints them as `Voiceless: <error>` and exits 1.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
+    /// Config file problems: permissions, unknown keys, invalid values, or
+    /// an invalid `--backend` override.
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// `asr.streaming_backend` (or `--backend`) names an unknown backend.
     #[error("stream backend {0:?} is not implemented yet")]
     UnsupportedBackend(String),
+    /// `cloud-realtime` selected without `[cloud].api_key`.
     #[error("cloud realtime API key is missing")]
     MissingApiKey,
+    /// `doubao-realtime` selected without `[doubao]` credentials.
     #[error("doubao credentials are missing: set doubao.api_key, or doubao.app_key and doubao.access_key")]
     MissingDoubaoCredentials,
+    /// Connecting a cloud WebSocket failed (DNS, TLS, 401/403, ...).
     #[error("realtime session: {0}")]
     Realtime(#[from] io::Error),
+    /// Pipeline setup failed: unreadable `modes.json`, unknown mode or an
+    /// invalid processing provider config. The message keeps the historical
+    /// `capture:` prefix.
     #[error("capture: {0}")]
     Capture(String),
 }
 
+/// One `stream --json` line. `type` is the event kind (`ready`, `level`,
+/// `transcript`, `finalized`, `warning`, `error`, `cancelled`,
+/// `completed`); `sequence` counts from 1 per session; `transcript`,
+/// `message` and `injection` are `null` unless the kind carries them; `rms`
+/// is present only on `level`.
 #[derive(Debug, Serialize)]
 struct JsonEvent<'a> {
     #[serde(rename = "type")]
@@ -58,6 +118,9 @@ struct JsonEvent<'a> {
     rms: Option<f32>,
 }
 
+/// Run `voiceless stream` standalone: the first SIGINT stops, a second
+/// SIGINT or SIGTERM cancels. Returns the session exit code (`0`, `1`,
+/// `130`) or a startup error.
 pub async fn run(options: StreamOptions) -> Result<i32, StreamError> {
     let control = control_receiver();
     run_with_control(options, control).await
@@ -76,11 +139,17 @@ pub async fn run_with_control(
 /// broadcast that replaces stdout.
 #[derive(Default, Clone)]
 pub struct SessionEnv {
+    /// Engine the daemon loaded at start; `None` makes `local-offline`
+    /// load its model cold inside the session.
     pub warm: Option<std::sync::Arc<crate::engine::WarmEngine>>,
+    /// Daemon event broadcast (JSON lines). When set, events go there
+    /// through `BroadcastSink` instead of stdout, and level events are on.
     pub events: Option<tokio::sync::broadcast::Sender<String>>,
 }
 
 impl SessionEnv {
+    /// The event sink for this environment: the broadcast when lent by the
+    /// daemon, otherwise stdout (`json` selects the line format).
     fn sink(&self, json: bool) -> Box<dyn EventSink + Send> {
         match &self.events {
             Some(events) => Box::new(BroadcastSink {
@@ -92,12 +161,17 @@ impl SessionEnv {
     }
 }
 
+/// Full session setup and run; see the module doc for the order. Returns
+/// `Ok(code)` once a session ran, or a model error was reported as events,
+/// and `Err` for configuration and connection errors found before capture.
 pub async fn run_with_env(
     options: StreamOptions,
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
     env: SessionEnv,
 ) -> Result<i32, StreamError> {
     let mut config = AppConfig::load_optional(options.config_path.as_deref())?;
+    // Round-trip the overridden config through TOML so `--backend` gets
+    // the same validation (allowed names, cross-field rules) as a file.
     if let Some(backend) = options.backend.as_deref() {
         config.asr.streaming_backend = backend.to_owned();
         config = AppConfig::from_toml(&toml::to_string(&config).map_err(|error| {
@@ -115,6 +189,8 @@ pub async fn run_with_env(
         }
         injector = injector.with_fcitx5(client);
     }
+    // At most one fallback, and only to a different backend; its warning
+    // precedes `ready` in the event stream so consumers learn the switch.
     let primary = config.asr.streaming_backend.clone();
     let opened = match open_transport(&primary, &config, &env).await {
         Ok(transport) => Ok((primary, transport)),
@@ -133,6 +209,8 @@ pub async fn run_with_env(
     let (backend, transport) = match opened {
         Ok(opened) => opened,
         Err(OpenError::Stream(error)) => return Err(error),
+        // Model problems are session events (exit 1 after error/completed),
+        // not a command error: overlays and `--json` readers must see them.
         Err(OpenError::Model(message)) => {
             let _ = sink.emit(OutputEvent::Error(message));
             let _ = sink.emit(OutputEvent::Completed);
@@ -214,6 +292,8 @@ async fn open_transport(
             Ok(AnyTransport::Doubao(DoubaoTransport(session)))
         }
         "local-streaming" => {
+            // An explicit `local_model_dir` is used as-is; the managed model
+            // is re-verified against its manifest on every open.
             let model_dir = match config.asr.local_model_dir.clone() {
                 Some(path) => path,
                 None => resolve_managed_model(&crate::models::streaming_paraformer_spec())
@@ -228,6 +308,10 @@ async fn open_transport(
     }
 }
 
+/// Build the `local-offline` transport: reuse the daemon's warm decoder
+/// when `[local]` still matches it, otherwise resolve and verify the model
+/// and the Silero VAD from the catalog and load them on the worker thread.
+/// Never blocks on the load itself.
 fn open_local_offline(
     config: &AppConfig,
     env: &SessionEnv,
@@ -321,7 +405,9 @@ impl BackendTransport for AnyTransport {
     }
 }
 
+/// Final-text pipeline of one session, built before the backend opens.
 struct Pipeline {
+    /// Resolved mode id (the CLI may have given a name).
     mode_id: String,
     processor: PipelineProcessor,
     history: SqliteHistory,
@@ -340,6 +426,8 @@ fn build_pipeline(config: &AppConfig, options: &StreamOptions) -> Result<Pipelin
     let chat = crate::processing::from_config(&config.processing)
         .map_err(|error| StreamError::Capture(error.to_string()))?;
 
+    // A history database that cannot open disables history for this
+    // session instead of failing it; recordings are then removed too.
     let store = if config.history.enabled {
         crate::history::HistoryStore::open(
             crate::models::default_data_dir().join("history.sqlite3"),
@@ -366,6 +454,8 @@ fn build_pipeline(config: &AppConfig, options: &StreamOptions) -> Result<Pipelin
     })
 }
 
+/// `$XDG_CONFIG_HOME/voiceless/modes.json` (falling back to `~/.config`):
+/// the processing modes file, shared with the console settings API.
 pub fn modes_path() -> std::path::PathBuf {
     let root = std::env::var("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
@@ -376,8 +466,12 @@ pub fn modes_path() -> std::path::PathBuf {
     root.join("voiceless").join("modes.json")
 }
 
+/// Production `TextProcessor`: `[text]` cleanup, then the mode's prompt
+/// rendered around the text and sent to the configured chat provider.
 struct PipelineProcessor {
+    /// `(mode id, prompt template)` pairs from `modes::prompt_table`.
     prompts: Vec<(String, String)>,
+    /// `None` when `[processing]` configures no provider.
     chat: Option<crate::processing::ChatProcessor<crate::processing::UreqPoster>>,
     cleaner: crate::text::TextCleaner,
 }
@@ -388,6 +482,7 @@ impl TextProcessor for PipelineProcessor {
     }
 
     async fn process(&mut self, mode_id: &str, text: &str) -> Result<String, String> {
+        // A mode without a prompt in the table sends the transcript itself.
         let prompt = self
             .prompts
             .iter()
@@ -397,6 +492,7 @@ impl TextProcessor for PipelineProcessor {
         let Some(chat) = self.chat.clone() else {
             return Err("no text processing provider configured".to_owned());
         };
+        // The HTTP client is blocking (ureq); keep it off the runtime thread.
         tokio::task::spawn_blocking(move || chat.process(&prompt))
             .await
             .map_err(|error| error.to_string())?
@@ -404,8 +500,13 @@ impl TextProcessor for PipelineProcessor {
     }
 }
 
+/// Production `HistoryRecorder`: inserts into the SQLite history and keeps
+/// rows and audio files paired, deleting a recording whose row was not
+/// written.
 struct SqliteHistory {
+    /// `None` when history is disabled or the database failed to open.
     store: Option<crate::history::HistoryStore>,
+    /// Managed audio directory; only files directly inside it are removed.
     audio_dir: Option<PathBuf>,
 }
 
@@ -424,6 +525,8 @@ impl HistoryRecorder for SqliteHistory {
     }
 }
 
+/// Audio retention directory: only when history is enabled and
+/// `[history].save_audio` is set (a recording without a row is useless).
 fn audio_dir(config: &AppConfig) -> Option<PathBuf> {
     if config.history.enabled && config.history.save_audio {
         Some(crate::models::default_audio_dir())
@@ -451,6 +554,9 @@ fn resolve_managed_model(spec: &crate::models::ModelSpec) -> Result<std::path::P
     crate::models::installed_model_dir(&spec.id)
 }
 
+/// Session parameters from config and CLI: backend id, injection, mode
+/// and the retention directory. Bounds and timeouts stay at the
+/// coordinator defaults; `run_with_env` adjusts them per backend.
 fn session_plan(
     config: &AppConfig,
     options: &StreamOptions,
@@ -463,10 +569,15 @@ fn session_plan(
     plan
 }
 
+/// Control channel fed by process signals: the first SIGINT sends `Stop`,
+/// every later SIGINT sends `Cancel`, SIGTERM sends `Cancel` and ends the
+/// task. Also used by `ctl::stream_via_daemon`, which relays the same
+/// commands to the daemon over D-Bus.
 pub(crate) fn control_receiver() -> tokio::sync::mpsc::Receiver<ControlCommand> {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
         let mut first_stop = false;
+        // The signal streams are re-created on every iteration.
         loop {
             let mut sigint =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -533,6 +644,8 @@ impl AudioCapture for PwCapture {
     }
 }
 
+/// DashScope realtime WebSocket (`realtime::RealtimeSession`) behind the
+/// trait; `finish` sends `session.finish` once, `cancel` closes the socket.
 struct CloudTransport(RealtimeSession);
 
 impl BackendTransport for CloudTransport {
@@ -553,6 +666,10 @@ impl BackendTransport for CloudTransport {
     }
 }
 
+/// `local-offline` worker thread (`offline_asr::OfflineTransport`).
+/// `send_audio`, `finish` and `cancel` are synchronous channel sends, so
+/// the session never waits on a decode; `Ready` is queued immediately and
+/// a model-load failure arrives later as an `Error` event.
 struct OfflineTransportAdapter(crate::offline_asr::OfflineTransport);
 
 impl BackendTransport for OfflineTransportAdapter {
@@ -573,6 +690,9 @@ impl BackendTransport for OfflineTransportAdapter {
     }
 }
 
+/// Volcengine Doubao WebSocket (`doubao::DoubaoSession`); it buffers
+/// chunks into 100 ms packets and `finish` flushes the remainder as the
+/// last packet.
 struct DoubaoTransport(crate::doubao::DoubaoSession);
 
 impl BackendTransport for DoubaoTransport {
@@ -595,15 +715,20 @@ impl BackendTransport for DoubaoTransport {
 
 /// Local streaming backend exposed through the same event boundary. The
 /// recognizer is synchronous; it reports Ready immediately and drains
-/// decoded events before each await.
+/// decoded events before each await. Decoding happens inline in
+/// `send_audio` on the runtime thread (Sherpa-ONNX online models are
+/// cheap per 32 ms chunk); `next_event` polls the queue every 2 ms.
 struct LocalTransport {
     state: parking_lot::Mutex<LocalTransportState>,
 }
 
 struct LocalTransportState {
     recognizer: crate::local_asr::LocalStreamingRecognizer,
+    /// Decoded events not yet handed to the coordinator.
     pending: std::collections::VecDeque<io::Result<RealtimeEvent>>,
+    /// `Ready` is delivered exactly once, on the first `next_event`.
     ready_sent: bool,
+    /// Set by `finish` and `cancel`; audio is refused afterwards.
     finished: bool,
 }
 
@@ -654,6 +779,9 @@ impl BackendTransport for LocalTransport {
                 if let Some(event) = state.pending.pop_front() {
                     return event;
                 }
+                // Nothing left after finish: report EOF so a recognizer
+                // that never produced `Finished` fails the session instead
+                // of hanging until the flush deadline.
                 if state.finished {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -688,6 +816,10 @@ impl BackendTransport for LocalTransport {
     }
 }
 
+/// CLI sink. With `--json`, one `JsonEvent` line per event on stdout.
+/// In plain mode live partials redraw a single stderr line (`\r`), the
+/// final transcript is the only stdout line (so `stream` composes with
+/// pipes), warnings and errors go to stderr, other events are silent.
 struct StdoutSink {
     json: bool,
     sequence: u64,
@@ -699,6 +831,8 @@ impl StdoutSink {
     }
 }
 
+/// Lets `run_with_env` stack sinks (`PreeditSink` over the base sink)
+/// behind one trait object.
 impl<T: EventSink + ?Sized> EventSink for Box<T> {
     fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
         (**self).emit(event)
@@ -722,6 +856,8 @@ impl EventSink for BroadcastSink {
     }
 }
 
+/// Map an `OutputEvent` to its JSON line; the `type` names are listed on
+/// `JsonEvent` and on each `OutputEvent` variant.
 fn json_event(event: &OutputEvent, sequence: u64) -> JsonEvent<'_> {
     let (kind, transcript, message, injection, rms) = match event {
         OutputEvent::Ready => ("ready", None, None, None, None),
@@ -770,14 +906,19 @@ impl EventSink for StdoutSink {
     }
 }
 
-/// Config-driven injector: selects the wtype or clipboard method from
-/// `[inject]` and applies the clipboard fallback when wtype fails.
+/// Config-driven injector: selects the wtype, clipboard or fcitx5 method
+/// from `[inject].prefer` and applies the clipboard fallback when the
+/// primary method fails (see `inject_text` for the rules).
 pub struct ConfiguredInjector {
     config: InjectConfig,
+    /// Bridge client shared with the session's preedit sink, so the commit
+    /// is ordered after the last preedit update.
     fcitx5: Option<crate::fcitx5::Fcitx5Client>,
 }
 
 impl ConfiguredInjector {
+    /// Injector without a bridge client; the `fcitx5` method then spawns a
+    /// client per injection.
     pub fn new(config: InjectConfig) -> Self {
         Self {
             config,
@@ -805,10 +946,18 @@ impl TextInjector for ConfiguredInjector {
 /// so apps whose input method (Fcitx5) reinterprets typed keys receive the
 /// text verbatim. The fcitx5 method commits through the Voiceless Fcitx5
 /// bridge module, the same path as text typed with the input method.
+///
+/// Rules: `prefer = "clipboard"` never falls back. When the fallback runs
+/// and succeeds, its result (`method: "clipboard"`) is returned; when it
+/// fails too, the primary method's failure is returned. Used directly by
+/// `transcribe --inject` and the latency benchmark; sessions go through
+/// `ConfiguredInjector`.
 pub async fn inject_text(config: &InjectConfig, text: &str) -> InjectionResult {
     inject_text_with(config, text, None).await
 }
 
+/// Shared implementation of `inject_text`; `fcitx5` reuses the session's
+/// bridge client when given so the commit queues after its preedit.
 async fn inject_text_with(
     config: &InjectConfig,
     text: &str,
@@ -846,6 +995,7 @@ async fn inject_via_fcitx5(
     };
     match client.commit(text).await {
         Ok((true, _)) => method_result(true, "fcitx5", ""),
+        // The bridge answered but could not commit (no focused context).
         Ok((false, reason)) => method_result(false, "fcitx5", &reason),
         Err(error) => method_result(false, "fcitx5", &error),
     }
@@ -857,6 +1007,9 @@ pub async fn inject_via_wtype(text: &str) -> InjectionResult {
     inject_via_wtype_with(&InjectConfig::default(), text).await
 }
 
+/// One `wtype` process per invocation from `wtype_invocations`, 1 s each.
+/// The first failure aborts the rest, so part of the text may already have
+/// been typed when the clipboard fallback runs.
 async fn inject_via_wtype_with(config: &InjectConfig, text: &str) -> InjectionResult {
     for args in wtype_invocations(text) {
         let result = run_command(&config.wtype_command, &args, Duration::from_secs(1)).await;
@@ -873,6 +1026,8 @@ async fn inject_via_wtype_with(config: &InjectConfig, text: &str) -> InjectionRe
 /// window, synthesize the paste keypress with `paste_tool`, then restore the
 /// previous selection after the paste has been consumed.
 async fn inject_via_clipboard(config: &InjectConfig, text: &str) -> InjectionResult {
+    // `timeout_seconds` bounds the clipboard reads/writes; the paste, focus
+    // and X11 mirror steps use a fixed 1 s each.
     let limit = Duration::from_secs_f64(config.timeout_seconds.max(0.1));
 
     let prev_wayland = capture_stdout(&wayland_paste_command(&config.wl_copy_command), limit).await;
@@ -928,6 +1083,9 @@ fn wayland_paste_command(copy_command: &str) -> String {
     }
 }
 
+/// Put `previous` back with the same writer command (`wl-copy` or the X11
+/// writer). An unreadable or empty previous selection is not restored, so
+/// the transcript then stays in the clipboard.
 async fn restore_clipboard(command: &str, previous: Option<String>, limit: Duration) {
     // Nothing readable before injection: leave the selection as-is.
     let Some(previous) = previous else {
@@ -988,10 +1146,17 @@ pub fn wtype_invocations(text: &str) -> Vec<Vec<&str>> {
     invocations
 }
 
+/// Run `command` with `args` and no stdin, capturing stderr for the error
+/// message.
 async fn run_command(command: &str, args: &[&str], limit: Duration) -> Result<(), String> {
     run_command_with_stdin(command, args, "", true, limit).await
 }
 
+/// Spawn `command` split on whitespace (no shell, no quoting) followed by
+/// `args`, write `stdin_text` to its stdin, and wait up to `limit`. A
+/// non-zero exit reports the trimmed stderr (when `piped_stderr`) or
+/// `<command> failed`; a timeout reports `<command> timed out` and
+/// abandons the wait without killing the child.
 async fn run_command_with_stdin(
     command: &str,
     args: &[&str],
@@ -1018,6 +1183,7 @@ async fn run_command_with_stdin(
     if let Some(stdin) = child.stdin.as_mut() {
         let _ = stdin.write_all(stdin_text.as_bytes()).await;
     }
+    // Close stdin so tools like wl-copy see EOF and return.
     child.stdin.take();
     match timeout(limit, child.wait_with_output()).await {
         Ok(Ok(output)) if output.status.success() => Ok(()),
@@ -1034,6 +1200,7 @@ async fn run_command_with_stdin(
     }
 }
 
+/// Build an `InjectionResult` for `method`.
 fn method_result(ok: bool, method: &str, message: &str) -> InjectionResult {
     InjectionResult {
         ok,

@@ -1,21 +1,40 @@
 //! `voiceless doctor`: verify runtime dependencies without requiring models.
+//!
+//! Checks are chosen from the default config's `[inject] prefer`: `pw-record`
+//! and the data directory are always required; `wtype` is required unless
+//! the Fcitx5 bridge is the injector; `wl-copy` is required only for the
+//! clipboard method; with `prefer = "fcitx5"` the bridge's `Status` method
+//! is called. Results are plain data (serializable for the console's
+//! `/api/doctor`); `main` prints them and exits 1 if any required check
+//! fails. `run_checks` blocks (PATH lookups, `mkdir -p`, a blocking D-Bus
+//! call), so callers on a Tokio runtime use `spawn_blocking`.
 
 use std::path::PathBuf;
 
+/// One dependency check result.
 #[derive(Debug, serde::Serialize)]
 pub struct Check {
+    /// Executable name, `data directory` or `fcitx5 bridge`.
     pub name: String,
+    /// The dependency was found / answered.
     pub present: bool,
+    /// Whether absence fails `doctor` (depends on the configured injector).
     pub required: bool,
+    /// Resolved path, directory, bridge status text or the error.
     pub detail: String,
 }
 
 impl Check {
+    /// A check passes when present, or when it was optional anyway.
     pub fn pass(&self) -> bool {
         self.present || !self.required
     }
 }
 
+/// Run every applicable check and return them in display order. Blocking.
+/// Side effect: creates the data directory if it is missing. An unreadable
+/// or invalid config is treated as the defaults here (so `doctor` still
+/// runs), which means the checks reflect `prefer = "wtype"` in that case.
 pub fn run_checks() -> Vec<Check> {
     let prefer = crate::config::load_default_config()
         .map(|config| config.inject.prefer)
@@ -36,6 +55,8 @@ pub fn run_checks() -> Vec<Check> {
 
 /// The bridge is reachable when its `Status` call answers; a missing focused
 /// input context (doctor runs from a terminal) still counts as present.
+/// Uses the blocking zbus API, which must not run on a Tokio runtime thread
+/// (it would panic in `block_on`); `main` runs it under `spawn_blocking`.
 fn fcitx5_bridge_check() -> Check {
     use crate::fcitx5::{INTERFACE, PATH, SERVICE};
     let status = zbus::blocking::Connection::session().and_then(|connection| {
@@ -59,6 +80,7 @@ fn fcitx5_bridge_check() -> Check {
     }
 }
 
+/// Look `name` up in `PATH`; the detail is the resolved path when found.
 fn executable_check(name: &str, required: bool) -> Check {
     match find_in_path(name) {
         Some(path) => Check {
@@ -76,6 +98,8 @@ fn executable_check(name: &str, required: bool) -> Check {
     }
 }
 
+/// Create (if needed) and report the XDG data directory that holds models,
+/// recordings and the history database.
 fn directory_check() -> Check {
     let data_dir = crate::models::default_data_dir();
     match std::fs::create_dir_all(&data_dir) {
@@ -94,6 +118,7 @@ fn directory_check() -> Check {
     }
 }
 
+/// First regular file named `name` in `PATH` (no executable-bit check).
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&paths) {

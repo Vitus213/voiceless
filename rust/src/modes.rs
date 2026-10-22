@@ -1,38 +1,96 @@
 //! Text processing modes: builtin catalog plus a JSON-persisted repository
 //! compatible with the Python `modes.json` layout.
+//!
+//! A mode decides what happens to the final transcript between `[text]`
+//! cleanup and injection. `quick` types the text as is; every other mode is
+//! a prompt template (`{text}` = the cleaned transcript) sent to the
+//! `[processing]` chat provider. The builtin catalog is `quick`,
+//! `voice-polish`, `prompt-optimize` and `translate-en`; users add their
+//! own through `voiceless mode add|update|remove` (`mode_cmd.rs`) or the
+//! console's `/api/modes` handlers (`console/settings.rs`).
+//!
+//! Who reads it: `stream::build_pipeline` opens the repository once per
+//! session, resolves the requested mode (`stream --mode`, `ctl start
+//! --mode`, the daemon's default mode, the console picker), builds the
+//! `prompt_table` and expands the chosen template with `render_template`;
+//! `coordinator` skips processing for `quick` by id. The mode id is stored
+//! in history as `processing_mode`. `[processing].prompt` overrides the
+//! prompt-optimize template at table-build time without touching the file.
+//!
+//! File: `<config>/voiceless/modes.json` (`stream::modes_path`,
+//! `models::default_config_dir`), a JSON array of `Mode` objects, pretty
+//! printed, written atomically through a `modes.tmp` sibling and rename.
+//! A missing file is served from the builtins in memory and only created
+//! on the first mutation. Unknown keys and a file lacking any builtin id
+//! are read errors; nothing is repaired silently.
+//!
+//! Invariants: the four builtins are always present and immutable; ids are
+//! unique; names are unique after trimming, case-insensitively; the list
+//! is kept sorted by `sort_order`, then name, then id. No file locking:
+//! CLI and console writers can race, last write wins.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// One processing mode as stored in `modes.json` and returned by the CLI
+/// and `/api/modes`. `deny_unknown_fields` makes a file with extra keys a
+/// read error, in line with the strict config contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mode {
+    /// Fixed ids for builtins (`quick`, ...), a hyphenated UUID v4 for user
+    /// modes. The value of `--mode`, of the console `mode` field and of the
+    /// history `processing_mode` column.
     pub id: String,
+    /// Display name; also accepted by `resolve` (case-insensitive, trimmed).
+    /// Unique across the repository.
     pub name: String,
+    /// Prompt template; `{text}` is replaced by the transcript. Empty for
+    /// `quick`. Note that only `quick` bypasses the provider: a user mode
+    /// with an empty prompt still sends an (empty) prompt.
     pub prompt: String,
+    /// Short status label shown while the provider works ("润色中").
+    /// Stored and echoed by CLI/console; the Rust pipeline itself does not
+    /// display it.
     pub processing_label: String,
+    /// `true` for the catalog modes; `update` and `remove` refuse them.
     pub builtin: bool,
+    /// Primary list order. Builtins use 0..3; a new user mode gets the
+    /// current maximum plus one.
     pub sort_order: i64,
 }
 
+/// Failures of the modes repository; `Display` strings are user-facing.
 #[derive(Debug, thiserror::Error)]
 pub enum ModesError {
+    /// No mode with that id (or, for `resolve`, that id or name).
     #[error("mode not found: {0}")]
     NotFound(String),
+    /// `update`/`remove` on a mode with `builtin = true`.
     #[error("builtin mode cannot be modified: {0}")]
     BuiltinImmutable(String),
+    /// Another mode already has this name (trimmed, case-insensitive).
     #[error("mode name already exists: {0}")]
     DuplicateName(String),
+    /// The name was empty or whitespace only.
     #[error("mode name must not be empty")]
     EmptyName,
+    /// `modes.json` cannot be read, parsed or fails validation (duplicate
+    /// or empty id, missing builtin). First field is the path.
     #[error("cannot read modes file {0}: {1}")]
     Read(String, String),
+    /// `modes.json` cannot be serialized or written (directory creation,
+    /// temp file, rename). First field is the path.
     #[error("cannot write modes file {0}: {1}")]
     Write(String, String),
 }
 
+/// The four catalog modes in `sort_order` 0..3. `quick` has an empty
+/// prompt and never calls a provider; the other prompts are Chinese
+/// instructions that ask for the result only, no explanation, with the
+/// transcript substituted for `{text}`.
 pub fn builtin_modes() -> Vec<Mode> {
     vec![
         Mode {
@@ -72,6 +130,14 @@ pub fn builtin_modes() -> Vec<Mode> {
 
 /// One-pass template expansion; only known placeholders are substituted and
 /// inserted content is never re-parsed.
+///
+/// Placeholders: `{text}`, `{selected}`, `{clipboard}`. Unknown
+/// placeholders (`{unknown}`) and a `{` without a closing `}` are copied
+/// verbatim, so a prompt can contain literal braces. The current pipeline
+/// passes empty strings for `selected` and `clipboard` (kept for the
+/// Python template format), so those expand to nothing. Single pass means
+/// a transcript containing `{clipboard}` is inserted literally, never
+/// expanded: user speech cannot inject template directives.
 pub fn render_template(template: &str, text: &str, selected: &str, clipboard: &str) -> String {
     let mut output = String::with_capacity(template.len());
     let mut cursor = 0;
@@ -83,6 +149,7 @@ pub fn render_template(template: &str, text: &str, selected: &str, clipboard: &s
         };
         let opening = cursor + opening;
         output.push_str(&template[cursor..opening]);
+        // Unterminated brace: the rest of the template is literal.
         let Some(closing) = template[opening + 1..].find('}') else {
             output.push_str(&template[opening..]);
             break;
@@ -105,7 +172,8 @@ pub fn render_template(template: &str, text: &str, selected: &str, clipboard: &s
 pub const PROMPT_OPTIMIZE_ID: &str = "prompt-optimize";
 
 /// The builtin prompt-optimize template (the type4me design). This is the
-/// effective organize prompt when `[processing].prompt` is empty.
+/// effective organize prompt when `[processing].prompt` is empty; the
+/// console's `GET /api/prompt` returns it as the default.
 pub fn builtin_prompt_optimize_prompt() -> String {
     builtin_modes()
         .into_iter()
@@ -118,6 +186,11 @@ pub fn builtin_prompt_optimize_prompt() -> String {
 /// A non-empty `organize_prompt` replaces the builtin prompt-optimize
 /// template, keeping the dictation-organizing prompt editable without a
 /// rebuild.
+///
+/// Whitespace-only `organize_prompt` counts as empty. Every other mode
+/// keeps its stored prompt; the override is applied at build time and is
+/// never written back to `modes.json`. Called once per session by
+/// `stream::build_pipeline` with `[processing].prompt`.
 pub fn prompt_table(modes: &[Mode], organize_prompt: &str) -> Vec<(String, String)> {
     modes
         .iter()
@@ -132,8 +205,15 @@ pub fn prompt_table(modes: &[Mode], organize_prompt: &str) -> Vec<(String, Strin
         .collect()
 }
 
+/// In-memory copy of `modes.json` bound to its path. Reads serve from
+/// memory; every mutation validates, sorts, rewrites the whole file and
+/// updates memory, so the struct and the file agree after each call. Not
+/// shared between processes: open a fresh repository (or `reload`) to see
+/// another writer's changes.
 pub struct ModesRepository {
+    /// Location of `modes.json`; may not exist yet.
     path: PathBuf,
+    /// Always sorted (see `sort_modes`) and validated.
     modes: Vec<Mode>,
 }
 
@@ -141,6 +221,10 @@ impl ModesRepository {
     /// Open the repository. A missing file loads the builtin modes into
     /// memory without touching disk; the file is only created on the first
     /// mutation so read-only commands work anywhere.
+    ///
+    /// An existing file that is unreadable, not a JSON array of `Mode`,
+    /// has unknown keys, duplicate or empty ids, or lacks a builtin id is a
+    /// `Read` error; the repository never repairs or overwrites it.
     pub fn open(path: PathBuf) -> Result<Self, ModesError> {
         let modes = if path.exists() {
             Self::load(&path)?
@@ -150,6 +234,7 @@ impl ModesRepository {
         Ok(Self { path, modes })
     }
 
+    /// Read, parse, validate and sort the file at `path`.
     fn load(path: &Path) -> Result<Vec<Mode>, ModesError> {
         let raw = fs::read_to_string(path)
             .map_err(|error| ModesError::Read(path.display().to_string(), error.to_string()))?;
@@ -160,19 +245,26 @@ impl ModesRepository {
         Ok(sort_modes(modes))
     }
 
+    /// The `modes.json` path this repository reads and writes.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// All modes in display order (sorted by `sort_order`, name, id).
     pub fn list(&self) -> &[Mode] {
         &self.modes
     }
 
+    /// Re-read the file from disk (`voiceless mode reload`, picking up
+    /// edits by another process). On error the in-memory list is left
+    /// unchanged, so a later mutation can still persist a good file. A
+    /// missing file is a `Read` error here, unlike `open`.
     pub fn reload(&mut self) -> Result<&[Mode], ModesError> {
         self.modes = Self::load(&self.path)?;
         Ok(&self.modes)
     }
 
+    /// Look up a mode by exact id.
     pub fn get(&self, mode_id: &str) -> Result<&Mode, ModesError> {
         self.modes
             .iter()
@@ -182,6 +274,10 @@ impl ModesRepository {
 
     /// Resolve by id first, then by case-insensitive name; empty input maps
     /// to quick mode.
+    ///
+    /// This is what `--mode` and the console `mode` field go through, so a
+    /// user can type either `translate-en` or `翻译为英文`. The name match
+    /// trims and lower-cases both sides; the id match is exact.
     pub fn resolve(&self, identifier: Option<&str>) -> Result<&Mode, ModesError> {
         match identifier {
             None => self.get("quick"),
@@ -199,6 +295,11 @@ impl ModesRepository {
         }
     }
 
+    /// Create a user mode and persist the file. The name is trimmed and
+    /// must be non-empty and unique; `prompt` and `processing_label` are
+    /// stored verbatim (an empty prompt is allowed). The new mode gets a
+    /// fresh UUID id, `builtin = false` and the next `sort_order`, and is
+    /// returned as stored. Errors: `EmptyName`, `DuplicateName`, `Write`.
     pub fn add(
         &mut self,
         name: &str,
@@ -221,6 +322,13 @@ impl ModesRepository {
         Ok(mode)
     }
 
+    /// Change any of name, prompt and label of a user mode; `None` leaves a
+    /// field untouched. The id and `sort_order` never change. Builtins are
+    /// refused with `BuiltinImmutable` before anything is modified; a new
+    /// name goes through the same trimming and uniqueness rules as `add`
+    /// (the mode's own current name does not count as a duplicate). The
+    /// file is rewritten even when every argument is `None`. Returns the
+    /// updated mode.
     pub fn update(
         &mut self,
         mode_id: &str,
@@ -252,6 +360,10 @@ impl ModesRepository {
         Ok(mode)
     }
 
+    /// Delete a user mode and persist the file; returns the removed mode.
+    /// Builtins are refused with `BuiltinImmutable`. Sessions already
+    /// running with the mode are unaffected (they hold their own copy of
+    /// the prompt table).
     pub fn remove(&mut self, mode_id: &str) -> Result<Mode, ModesError> {
         let index = self
             .modes
@@ -266,6 +378,8 @@ impl ModesRepository {
         Ok(mode)
     }
 
+    /// Sort, validate and write the in-memory list. Validation before the
+    /// write guarantees the file on disk is always loadable by `open`.
     fn persist(&mut self) -> Result<(), ModesError> {
         self.modes = sort_modes(std::mem::take(&mut self.modes));
         validate(&self.modes)
@@ -273,6 +387,8 @@ impl ModesRepository {
         store(&self.path, &self.modes)
     }
 
+    /// Highest existing `sort_order` plus one (0 for an empty list), so new
+    /// modes append to the end of the display order.
     fn next_sort_order(&self) -> i64 {
         self.modes
             .iter()
@@ -282,6 +398,8 @@ impl ModesRepository {
             + 1
     }
 
+    /// Reject `name` if another mode (ignoring the id in `excluding`)
+    /// already uses it after trim + lower-case normalisation.
     fn ensure_unique_name(&self, name: &str, excluding: Option<&str>) -> Result<(), ModesError> {
         let key = normalized_name(name);
         if self
@@ -295,6 +413,11 @@ impl ModesRepository {
     }
 }
 
+/// Write the list as pretty JSON (trailing newline) atomically: the
+/// content goes to a `<stem>.tmp` sibling (`modes.tmp`) and is renamed
+/// over the target, so a crash mid-write leaves the old file intact and a
+/// concurrent reader never sees a truncated one. Creates the parent
+/// directory (`~/.config/voiceless`) on first use.
 fn store(path: &Path, modes: &[Mode]) -> Result<(), ModesError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -311,6 +434,8 @@ fn store(path: &Path, modes: &[Mode]) -> Result<(), ModesError> {
     Ok(())
 }
 
+/// Display order: `sort_order`, then name, then id (a total order, so the
+/// file and the listing are deterministic).
 fn sort_modes(mut modes: Vec<Mode>) -> Vec<Mode> {
     modes.sort_by(|left, right| {
         left.sort_order
@@ -321,6 +446,10 @@ fn sort_modes(mut modes: Vec<Mode>) -> Vec<Mode> {
     modes
 }
 
+/// Structural rules shared by load and persist: non-empty unique ids and
+/// every builtin id present. Names are not checked here (uniqueness is
+/// enforced at mutation time only, so a hand-edited file with duplicate
+/// names still loads).
 fn validate(modes: &[Mode]) -> Result<(), String> {
     let mut ids = std::collections::HashSet::new();
     for mode in modes {
@@ -339,6 +468,7 @@ fn validate(modes: &[Mode]) -> Result<(), String> {
     Ok(())
 }
 
+/// Trimmed name, or `EmptyName` when nothing is left.
 fn clean_name(name: &str) -> Result<String, ModesError> {
     let cleaned = name.trim();
     if cleaned.is_empty() {
@@ -347,6 +477,7 @@ fn clean_name(name: &str) -> Result<String, ModesError> {
     Ok(cleaned.to_owned())
 }
 
+/// Comparison key for names: trimmed and Unicode lower-cased.
 fn normalized_name(value: &str) -> String {
     value.trim().to_lowercase()
 }

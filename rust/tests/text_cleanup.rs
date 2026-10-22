@@ -1,5 +1,14 @@
 //! `[text]` cleanup on transcripts as Qwen3-ASR actually produced them from
 //! real dictation.
+//!
+//! Contract of `text::TextCleaner` and the `[text]` validation in
+//! `config::AppConfig`: filler removal with punctuation repair, phonetic
+//! hotword correction (identical and confusable syllables, untouched
+//! correct spellings), exact replacements, regex rules and trailing-period
+//! stripping in pipeline order, plus the config errors for a bad regex or
+//! threshold and the merge of `[text].hotwords` into the engine lists.
+//! Fixtures: `TextConfig` values built inline; `clean` compiles a fresh
+//! cleaner per call. No fakes.
 
 use voiceless::config::{AppConfig, TextConfig, TextReplacement, TextRule};
 use voiceless::text::TextCleaner;
@@ -8,6 +17,8 @@ fn clean(config: &TextConfig, text: &str) -> String {
     TextCleaner::new(config).unwrap().clean(text)
 }
 
+/// "呃" goes wherever it appears (with the pause mark it leaves); a
+/// standalone "嗯" goes; punctuation doubled by the removal is repaired.
 #[test]
 fn fillers_are_removed_and_punctuation_repaired() {
     let config = TextConfig::default();
@@ -58,6 +69,7 @@ fn sound_alike_spans_become_the_hotword() {
     assert_eq!(clean(&config, "今天天气很好"), "今天天气很好");
 }
 
+/// Replacement, then regex rule, then one trailing period, in that order.
 #[test]
 fn replacements_rules_and_trailing_period() {
     let config = TextConfig {

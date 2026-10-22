@@ -1,7 +1,33 @@
+//! The `voiceless` binary: a clap front end over the `voiceless` library
+//! crate (see `src/lib.rs` for the pipeline and module map).
+//!
+//! Every subcommand maps to one library module that returns the process
+//! exit code, which `main` hands to `std::process::exit`:
+//!
+//! - `0`: success (for `doctor`: every required check passed).
+//! - `1`: failure (configuration, I/O, backend or injection error, a failed
+//!   quality gate, a required `doctor` check missing).
+//! - `2`: `benchmark asr|latency` skipped because credentials, corpus or
+//!   audio were missing; a skip is never reported as a pass.
+//! - `130`: a `stream` session cancelled by the second Ctrl-C or SIGTERM.
+//!
+//! `stream` is special-cased: when the configured streaming backend needs a
+//! local model (`local-offline`, `local-streaming`) and a running daemon owns
+//! `dev.voiceless.Daemon` on the session bus, the session runs inside the
+//! daemon (which already holds the model; a second copy would not fit in
+//! VRAM) and this process only relays events and Ctrl-C through
+//! `ctl::stream_via_daemon`.
+//!
+//! `///` comments on the clap items below are their `--help` text: keep each
+//! to one short sentence. Doc comments are deliberately absent from the
+//! `Subcommand` enums themselves, because clap would apply an enum-level doc
+//! comment as the `about` of the parent command.
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// Top-level command line: one global `--config` option and one subcommand.
 #[derive(Debug, Parser)]
 #[command(
     name = "voiceless",
@@ -9,33 +35,50 @@ use clap::{Args, Parser, Subcommand};
     about = "Fast realtime voice input for Linux"
 )]
 struct Cli {
+    /// Config file for stream and daemon (default: ~/.config/voiceless/config.toml).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// The subcommand to run.
     #[command(subcommand)]
     command: Command,
 }
 
+// Variant docs are the `about` lines in `voiceless --help`; keep them in
+// step with the command table in README.md.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Record and transcribe in realtime, then type the final text.
     Stream(StreamArgs),
+    /// Transcribe one WAV file with the batch backend.
     Transcribe(TranscribeArgs),
+    /// Record for N seconds, then transcribe.
     Record(RecordArgs),
+    /// Manage the model catalog: list, install, check, remove.
     Model(ModelArgs),
+    /// Check dependencies and the data directory.
     Doctor,
+    /// Manage text processing modes.
     Mode(ModeArgs),
+    /// Query the recognition history or serve the web console.
     History(HistoryArgs),
+    /// Run the resident daemon (warm engine, D-Bus control, hotkey, console).
     Daemon(DaemonArgs),
     /// Control the resident daemon (one D-Bus call; for hotkey bindings).
     Ctl(CtlArgs),
+    /// Run the CER and stop-to-inject latency gates.
     Benchmark(BenchmarkArgs),
 }
 
+/// Arguments of `voiceless ctl`.
 #[derive(Debug, Args)]
 struct CtlArgs {
+    /// Which daemon call to make.
     #[command(subcommand)]
     action: CtlCommand,
 }
 
+// One variant per `dev.voiceless.Daemon.Controller` method (`Watch`
+// subscribes to the `Event` signal instead); see `ctl::CtlAction`.
 #[derive(Debug, Subcommand)]
 enum CtlCommand {
     /// Start a session when idle, stop it when recording.
@@ -46,6 +89,7 @@ enum CtlCommand {
     },
     /// Start a session (hold-to-talk press).
     Start {
+        /// Processing mode; empty uses the daemon default.
         #[arg(long, default_value = "")]
         mode: String,
     },
@@ -59,107 +103,166 @@ enum CtlCommand {
     Watch,
 }
 
+/// Arguments of `voiceless benchmark`.
 #[derive(Debug, Args)]
 struct BenchmarkArgs {
+    /// Which gate to run.
     #[command(subcommand)]
     action: BenchmarkAction,
 }
 
+// Both gates exit 2 ("skipped, unverified") without credentials, corpus or
+// audio, so a missing environment can never look like a pass.
 #[derive(Debug, Subcommand)]
 enum BenchmarkAction {
+    /// Replay the corpus through a realtime backend and report the CER.
     Asr {
+        /// Corpus split to replay (the `<split>.jsonl` corpus file).
         #[arg(long, default_value = "test")]
         split: String,
+        /// Streaming backend to benchmark.
         #[arg(long, default_value = "cloud-realtime")]
         backend: String,
+        /// Exit 1 when the cloud-realtime CER exceeds 0.02.
         #[arg(long)]
         enforce: bool,
     },
+    /// Run cloud sessions and measure stop-to-inject latency.
     Latency {
+        /// Number of trials to run.
         #[arg(long, default_value_t = 100)]
         trials: usize,
+        /// Inject each final text with the configured [inject] method.
         #[arg(long)]
         inject: bool,
+        /// Accepted for parity with asr; the latency gate is always enforced.
         #[arg(long)]
         enforce: bool,
     },
 }
 
+/// Arguments of `voiceless stream`.
 #[derive(Debug, Args)]
 struct StreamArgs {
+    /// Streaming backend for this run (overrides [asr] streaming_backend).
     #[arg(long)]
     backend: Option<String>,
+    /// Print every session event as a JSON line.
     #[arg(long)]
     json: bool,
+    /// Recognize without typing the result.
     #[arg(long)]
     no_inject: bool,
+    /// Processing mode (quick types the text as recognized).
     #[arg(long, default_value = "quick")]
     mode: String,
 }
 
+/// Arguments of `voiceless transcribe`.
 #[derive(Debug, Args)]
 struct TranscribeArgs {
+    /// WAV file to transcribe.
     wav: PathBuf,
+    /// Batch backend for this run (overrides [asr] batch_backend).
     #[arg(long)]
     backend: Option<String>,
+    /// Type the result into the focused window.
     #[arg(long)]
     inject: bool,
+    /// Print the result as JSON.
     #[arg(long)]
     json: bool,
 }
 
+/// Arguments of `voiceless record`.
 #[derive(Debug, Args)]
 struct RecordArgs {
+    /// Recording length in seconds.
     #[arg(long, default_value_t = 5.0)]
     seconds: f64,
+    /// Batch backend for this run (overrides [asr] batch_backend).
     #[arg(long)]
     backend: Option<String>,
+    /// Recognize without typing the result.
     #[arg(long)]
     no_inject: bool,
+    /// Print the result as JSON.
     #[arg(long)]
     json: bool,
 }
 
+/// Arguments of `voiceless model`.
 #[derive(Debug, Args)]
 struct ModelArgs {
+    /// Catalog operation.
     #[command(subcommand)]
     action: ModelAction,
+    /// Print the model list as JSON lines.
     #[arg(long, global = true)]
     json: bool,
 }
 
+// Mapped one-to-one onto `model_cmd::ModelCommand`.
 #[derive(Debug, Subcommand)]
 enum ModelAction {
+    /// List catalog entries with their install state and supply-chain fields.
     List,
-    Install { id: String },
-    Check { id: String },
-    Remove { id: String },
+    /// Download, verify and activate a catalog model.
+    Install {
+        /// Catalog id (see model list).
+        id: String,
+    },
+    /// Verify an installed model against the catalog.
+    Check {
+        /// Catalog id (see model list).
+        id: String,
+    },
+    /// Remove an installed model.
+    Remove {
+        /// Catalog id (see model list).
+        id: String,
+    },
 }
 
+/// Arguments of `voiceless mode`. The options are global so they may follow
+/// the action (`mode add --name ...`).
 #[derive(Debug, Args)]
 struct ModeArgs {
+    /// Mode operation.
     #[command(subcommand)]
     action: ModeAction,
+    /// Mode id (required by update and remove).
     #[arg(long, global = true)]
     id: Option<String>,
+    /// Display name (required by add).
     #[arg(long, global = true)]
     name: Option<String>,
+    /// Prompt template; {text} is replaced by the transcript.
     #[arg(long, global = true)]
     prompt: Option<String>,
+    /// Label shown while the mode processes text.
     #[arg(long, global = true)]
     processing_label: Option<String>,
 }
+// Every action prints its result as JSON; see `mode_cmd::run`.
 #[derive(Debug, Subcommand)]
 enum ModeAction {
+    /// Print all modes as a JSON array (builtins first).
     List,
+    /// Re-read the modes file and print the modes.
     Reload,
+    /// Add a custom mode (--name, --prompt, --processing-label).
     Add,
+    /// Update a custom mode by --id.
     Update,
+    /// Remove a custom mode by --id (builtins are rejected).
     Remove,
 }
 
+/// Arguments of `voiceless daemon`.
 #[derive(Debug, Args)]
 struct DaemonArgs {
+    /// Default processing mode for sessions that do not name one.
     #[arg(long, default_value = "quick")]
     mode: String,
     /// Recognize without typing the result (debugging).
@@ -167,43 +270,64 @@ struct DaemonArgs {
     no_inject: bool,
 }
 
+/// Arguments of `voiceless history`. The options are global so they may
+/// follow the action; each action reads only the ones it needs.
 #[derive(Debug, Args)]
 struct HistoryArgs {
+    /// History operation.
     #[command(subcommand)]
     action: HistoryAction,
+    /// Record ids to delete (repeat the flag for several).
     #[arg(long, global = true)]
     ids: Vec<String>,
+    /// Delete every record and recording.
     #[arg(long, global = true)]
     all: bool,
+    /// Page size for list.
     #[arg(long, global = true, default_value_t = 50)]
     limit: i64,
+    /// Continue list from a previous next_cursor.
     #[arg(long, global = true)]
     cursor: Option<String>,
+    /// CSV file written by export.
     #[arg(long, global = true)]
     destination: Option<PathBuf>,
+    /// Usage window in days: 1, 7 or 30.
     #[arg(long, global = true, default_value_t = 7)]
     days: i64,
+    /// Address the console binds to (serve).
     #[arg(long, global = true, default_value = "127.0.0.1")]
     host: String,
+    /// Port the console binds to (serve).
     #[arg(long, global = true, default_value_t = 8790)]
     port: u16,
 }
 
+// `Serve` is dispatched to `console::serve_standalone`; the others go
+// through `history_cmd::run` by name.
 #[derive(Debug, Subcommand)]
 enum HistoryAction {
+    /// Print a page of records as JSON (--limit, --cursor).
     List,
+    /// Delete records by --ids or --all, together with their recordings.
     Delete,
+    /// Export all records to a CSV file (--destination).
     Export,
+    /// Print aggregate counts.
     Totals,
+    /// Print usage over the last --days days.
     Usage,
     /// Open the local web console for browsing records and recordings.
     Serve,
 }
 
+/// Parse the command line, run one subcommand and exit with its code.
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
+        // A daemon that already holds the local model runs the session; the
+        // relay returns `None` when no daemon owns the bus name.
         Command::Stream(args) if uses_local_model(&cli.config, &args) => {
             match voiceless::ctl::stream_via_daemon(&args.mode, !args.no_inject, args.json).await {
                 Some(Ok(code)) => code,
@@ -298,7 +422,9 @@ async fn main() {
         }
         Command::Doctor => {
             println!("Voiceless doctor");
-            // zbus::blocking calls block_on, which panics on a runtime thread.
+            // The fcitx5 bridge check uses zbus::blocking, whose block_on
+            // panics on a tokio runtime thread; run the checks on a blocking
+            // worker instead (commit 156f6a4).
             let checks = tokio::task::spawn_blocking(voiceless::doctor::run_checks)
                 .await
                 .expect("doctor checks panicked");
@@ -314,6 +440,7 @@ async fn main() {
                     check.detail
                 );
             }
+            // Optional tools that are missing still pass; see `Check::pass`.
             i32::from(!all_ok)
         }
         Command::Ctl(args) => {
@@ -368,6 +495,7 @@ async fn main() {
             }
         },
     };
+    // Never returns; the subcommand's code becomes the process status.
     std::process::exit(code);
 }
 
@@ -387,6 +515,8 @@ fn uses_local_model(config: &Option<PathBuf>, args: &StreamArgs) -> bool {
     })
 }
 
+/// Run `stream` in this process (SIGINT/SIGTERM control) and map a setup
+/// error to exit code 1 after printing it.
 async fn run_stream(config_path: Option<PathBuf>, args: StreamArgs) -> i32 {
     match voiceless::stream::run(voiceless::stream::StreamOptions {
         config_path,

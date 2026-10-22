@@ -1,3 +1,10 @@
+//! Contract of `history::HistoryStore` against a real SQLite file in a
+//! temporary directory (`tempfile`): insert/get round trip, schema version
+//! and 0600 mode, v1 -> v2 migration of a hand-seeded file, keyset
+//! pagination, deletion together with the retained recordings, totals and
+//! usage aggregates, CSV escaping and idempotent reopening. `entry` builds
+//! a minimal successful-session `coordinator::HistoryEntry`.
+
 use tempfile::tempdir;
 use voiceless::coordinator::HistoryEntry;
 use voiceless::history::HistoryStore;
@@ -15,6 +22,8 @@ fn entry(raw: &str, final_text: &str, mode: &str) -> HistoryEntry {
     }
 }
 
+/// The stored row carries the backend as `asr_provider`, a character
+/// count in Unicode scalars and a UTC `Z` timestamp.
 #[test]
 fn insert_and_get_roundtrip_records_authoritative_text() {
     let root = tempdir().expect("temporary root");
@@ -78,6 +87,8 @@ fn insert_records_audio_path_and_duration_for_playback() {
     );
 }
 
+/// A file seeded with the v1 table (no `audio_path`) opens, keeps its
+/// row with `audio_path = None`, accepts v2 inserts and reports version 2.
 #[test]
 fn v1_database_migrates_to_v2_and_keeps_records_without_audio() {
     use rusqlite::Connection;
@@ -127,6 +138,7 @@ fn v1_database_migrates_to_v2_and_keeps_records_without_audio() {
     assert_eq!(version, 2);
 }
 
+/// Deleting one row unlinks only its WAV; `delete_all` unlinks the rest.
 #[test]
 fn delete_and_delete_all_remove_retained_audio_files() {
     let root = tempdir().expect("temporary root");
@@ -151,6 +163,8 @@ fn delete_and_delete_all_remove_retained_audio_files() {
     store.delete_all().expect("delete all");
     assert!(!audio_two.exists(), "delete_all must drop remaining audio");
 }
+/// Five rows in pages of two: no row repeats across pages, the last
+/// page has one row and no cursor; limit 0 and a garbage cursor fail.
 #[test]
 fn query_paginates_with_stable_cursors() {
     let root = tempdir().expect("temporary root");
@@ -217,6 +231,8 @@ fn delete_targets_specific_ids_and_delete_all_clears() {
     assert_eq!(store.totals().expect("totals").records, 0);
 }
 
+/// `characters` sums the final texts (3 + 2); `usage(7)` counts rows per
+/// provider; a 3-day window is rejected.
 #[test]
 fn totals_and_usage_aggregate_character_counts() {
     let root = tempdir().expect("temporary root");
@@ -242,6 +258,7 @@ fn totals_and_usage_aggregate_character_counts() {
     assert!(store.usage(3).is_err(), "window must be 1, 7 or 30 days");
 }
 
+/// Commas and quotes inside fields are quoted and doubled (RFC 4180).
 #[test]
 fn export_csv_contains_header_and_escaped_records() {
     let root = tempdir().expect("temporary root");

@@ -1,7 +1,14 @@
+//! Contract of `processing::ChatProcessor` and `processing::from_config`:
+//! request URL and body per provider, bearer handling, reply extraction,
+//! error mapping and API-key resolution. `ScriptedPoster` is a fake
+//! `HttpPoster` that answers every call with one canned status/body and
+//! records the last URL, body and bearer for assertions. No network.
+
 use std::time::Duration;
 
 use voiceless::processing::{ChatProcessor, HttpPoster, ProcessingError};
 
+/// Fake HTTP boundary: fixed reply, last request captured.
 struct ScriptedPoster {
     status: u16,
     body: String,
@@ -37,6 +44,8 @@ impl HttpPoster for ScriptedPoster {
     }
 }
 
+/// `/chat/completions` under the trimmed base URL, `{model, messages}`
+/// body, bearer from the key, text from `choices[0].message.content`.
 #[test]
 fn openai_compatible_extracts_choice_content() {
     let poster = ScriptedPoster::new(
@@ -68,6 +77,8 @@ fn openai_compatible_extracts_choice_content() {
     );
 }
 
+/// `/api/chat` with `stream: false`, no bearer for an empty key, text
+/// from `message.content`.
 #[test]
 fn ollama_reads_message_content_with_stream_disabled() {
     let poster = ScriptedPoster::new(
@@ -95,6 +106,8 @@ fn ollama_reads_message_content_with_stream_disabled() {
     assert!(processor.poster_ref().last_bearer.lock().is_none());
 }
 
+/// 401 maps to `Status(401)`; a 200 reply whose content is blank is a
+/// `Response` error, so the raw transcript is kept.
 #[test]
 fn non_success_status_and_empty_content_are_errors() {
     let poster = ScriptedPoster::new(401, serde_json::json!({"error": "unauthorized"}));
@@ -137,6 +150,8 @@ fn none_provider_is_never_built_from_config() {
         .is_none());
 }
 
+/// `from_config` copies the direct key and the default model and base
+/// URL into the processor (the `api_key_env` path is not exercised).
 #[test]
 fn direct_api_key_is_used_as_the_bearer() {
     use voiceless::config::ProcessingConfig;
