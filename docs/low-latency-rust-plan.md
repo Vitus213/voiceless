@@ -1,3 +1,5 @@
+> **历史文档（2026-08-14）。** 这是促成 Rust 重写的方案稿，保留作为决策记录。当前实现以 [`architecture.md`](architecture.md) / [`architecture.zh.md`](architecture.zh.md) 为准；本文中的模块名、阶段和数字不再更新。
+
 # 极速语音输入：Rust 重写 + 真流式识别方案
 
 > 状态：OpenSpec 已校验；Grilling 决策已确认；最终资产待用户批准

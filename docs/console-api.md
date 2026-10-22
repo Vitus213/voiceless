@@ -7,8 +7,9 @@ HTTP unless noted.
 
 ## Security
 
-- Every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`
-  (blocks DNS rebinding). Anything else → `421`.
+- Every request must carry `Host: 127.0.0.1:<port>`, `localhost:<port>` or
+  `[::1]:<port>` with the bound port (blocks DNS rebinding). Anything else →
+  `421`.
 - Every `/api/*` request must carry the session token: header
   `X-Voiceless-Token: <token>`, or `?token=<token>` for `EventSource` and
   `<audio src>` URLs. Missing/wrong → `403`. The token is random per server
@@ -16,7 +17,8 @@ HTTP unless noted.
   `<meta name="voiceless-token" content="...">`; cross-site pages cannot
   read it.
 - Mutating requests with an `Origin` header must have a loopback origin on
-  the same port → otherwise `403`.
+  the same port (`http://127.0.0.1:<port>`, `http://localhost:<port>` or
+  `http://[::1]:<port>`) → otherwise `403`.
 - Secrets are write-only: config reads return `""` for `api_key`,
   `access_key` (and the `[doubao]`/`[cloud]`/`[processing]` keys) plus a
   boolean `has_<field>`; writing `""` keeps the stored secret, writing
@@ -34,7 +36,7 @@ Errors: non-2xx with body `{"error": "message"}`.
 | POST | `/api/session/start` | `{"mode": "..."}` | `{"ok": true}` |
 | POST | `/api/session/stop` | — | `{"ok": true}` |
 | POST | `/api/session/cancel` | — | `{"ok": true}` |
-| POST | `/api/engine/reload` | — | `{"ok": true, "engine": "qwen3-asr-1.7b-gguf on cuda", "load_seconds": 2.1}` (re-reads config, reloads warm engine and hotkey listener) |
+| POST | `/api/engine/reload` | — | `{"ok": true, "engine": "qwen3-asr-1.7b-gguf on cuda", "load_seconds": 2.1, "error": null}` (re-reads config, reloads warm engine and hotkey listener; `engine` is `null` and `error` holds the message when the load failed; 409 with `{"error": …}` while a session is active or when the config file cannot be re-read) |
 
 `Status`:
 

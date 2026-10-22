@@ -87,14 +87,16 @@ The flake includes `homeManagerModules.default`. The module performs these tasks
 
   programs.voiceless = {
     enable = true;
-    settings.asr.streaming_backend = "cloud-realtime"; # or "local-streaming"
-    settings.cloud.api_key = "sk-...";                 # the generated file has mode 0600
+    settings.asr.streaming_backend = "local-offline";  # or "cloud-realtime", "doubao-realtime", "local-streaming"
+    settings.local.model = "qwen3-asr-1.7b-gguf";      # see "Model catalog"
     service.enable = true;                             # run `voiceless daemon` persistently
     overlay.enable = true;                             # eww pill with the live transcript (contrib/eww-overlay)
     shortcuts.sway.enable = true;                      # $mod+Shift+d toggles recording
   };
 }
 ```
+
+Do not put API keys in `settings`: Home Manager writes the generated file into the world-readable Nix store, and Voiceless refuses to load a file that contains `api_key` or `access_key` unless its mode is `0600` or stricter. For a cloud backend, leave `settings` empty and write `~/.config/voiceless/config.toml` yourself with mode `0600`, or let the web console write the key into that file.
 
 `shortcuts.sway` adds only the Sway binding. You configure the GlobalShortcuts portal backend at the NixOS level. Without the portal, the daemon still works through D-Bus.
 
@@ -355,7 +357,14 @@ just bridge-test  # Fcitx5 bridge end-to-end test in a private D-Bus session
 
 The real quality gate is `benchmark asr` (CER ≤ 0.02). The real latency gate is `benchmark latency` (stop-to-inject p99 ≤ 1.0 s). Both are documented in `docs/low-latency-rust-plan.md` and the OpenSpec change. Without real credentials or a Wayland injection environment they report skip and never report a pass.
 
-Design documents: `openspec/changes/migrate-voiceless-native-streaming/`. Low-latency plan: `docs/low-latency-rust-plan.md`.
+Documentation:
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): dev shells, `just` recipes, known build quirks, how to run a session without a microphone, how to add a backend, model, config key or console endpoint.
+- [`docs/architecture.md`](docs/architecture.md): process model, session invariants, backends, injection, daemon, console, persistence, packaging.
+- [`docs/console-api.md`](docs/console-api.md): every console HTTP endpoint and its security rules.
+- [`CHANGELOG.md`](CHANGELOG.md) and [`SECURITY.md`](SECURITY.md).
+- Code: every Rust module starts with a `//!` comment; `cargo doc --no-deps --document-private-items` renders the crate.
+- History: `openspec/changes/migrate-voiceless-native-streaming/` (the Rust cutover spec) and `docs/low-latency-rust-plan.md` (the plan that led to it).
 
 ## Related
 

@@ -1,92 +1,382 @@
-# Voiceless 架构
+# Voiceless architecture
 
-本文描述 Voiceless（原 type4me-linux，`migrate-voiceless-native-streaming` change 完成后的产物）的运行时边界、持久化契约和集成接口。运行时是单一原生 Rust 二进制 `voiceless`，不再依赖 Python；GTK/Adwaita 桌面入口已移除。
+This document describes how the `voiceless` binary is put together: the
+process model, the realtime session pipeline and its invariants, the ASR
+backends, text processing and injection, the resident daemon, the web
+console, persistence, the model supply chain, quality gates and packaging.
+It is the reference for anyone changing the code; the user-facing contract
+(commands, configuration keys, console pages) lives in
+[`README.md`](../README.md), and the console's HTTP API in
+[`console-api.md`](console-api.md). 中文版见
+[`architecture.zh.md`](architecture.zh.md).
 
-## 设计约束
+Module-level details are in the Rust source itself: every module starts
+with a `//!` comment that states its purpose and guarantees, and
+`cargo doc --no-deps --document-private-items` renders them.
 
-- 音频、模型和历史属于当前用户，不写入 Nix store；模型权重不随仓库分发。
-- 默认云端后端 `cloud-realtime`（DashScope OpenAI-Realtime 风格 WebSocket，`qwen3-asr-flash-realtime`）在说话期间持续发送 32 ms PCM 块并消费局部/确认文本；`local-streaming` 使用 Sherpa-ONNX `OnlineRecognizer`，零云端连接。后端失败不隐式切换。
-- `coordinator::run_session` 是实时会话唯一的副作用边界：它拥有捕获、传输、转写累加、模式处理、历史写入和注入的顺序，并保证停止冲刷的固定次序与一次注入。
-- 连接先于采集：ready 门未通过前不产生任何音频；鉴权/连接失败在捕获构造前结束。
-- 稳定协议标识保持不变：CLI 命令与选项、TOML/JSON 字段、模型 ID 和 D-Bus 名称都不翻译。
-- 旧 `type4me-linux` XDG 目录永不自动读取、移动或删除。
+## 1. Design constraints
 
-## 模块分层（rust/）
+- **One native binary.** No Python runtime, no desktop shell. Everything a
+  session needs (capture, transport, text processing, injection, history)
+  is linked into `voiceless`; the only subprocesses are `pw-record`,
+  `wtype`/`wl-copy`/`xdotool` for injection, `pw-play` for cues and
+  `nvidia-smi` for diagnostics.
+- **User data stays in the user's XDG directories**, never in the Nix
+  store. Model weights are downloaded on demand and verified; they are not
+  part of the repository or the package.
+- **Stable identifiers.** CLI commands and flags, TOML keys, JSON event
+  fields, model ids and D-Bus names are not translated and not renamed
+  silently. Unknown config keys and removed legacy values are errors.
+- **Explicit failure.** A backend that cannot open fails the session (or
+  falls back once, loudly, to `[asr] fallback_backend`). Audio is never
+  dropped or reordered; a full queue fails the session instead.
+- **One injection per session, never on cancel.** The final text is typed
+  at most once, and a cancelled session types nothing, not even the partial
+  text that was already recognized.
+- **Old `type4me-linux` directories are never read, moved or deleted.**
 
-| 层 | 模块 | 职责 |
+## 2. Process model
+
+Voiceless runs in three shapes that share one session implementation:
+
+| Shape | Entry | Control source | Output |
+| --- | --- | --- | --- |
+| One-shot CLI | `voiceless stream` | SIGINT (first: stop, second: cancel), SIGTERM (cancel), end of capture | stdout/stderr, or JSON lines with `--json`; exit code 0 / 1 / 130 (cancelled) |
+| Resident daemon | `voiceless daemon` (systemd user unit from the Home Manager module) | D-Bus `dev.voiceless.Daemon`, evdev push-to-talk key, portal `GlobalShortcuts`, web console | `Event` D-Bus signals (same JSON lines), console SSE, overlay |
+| Batch | `voiceless transcribe <wav>`, `voiceless record --seconds N` | none | text, optional injection, history row |
+
+When a daemon is running and `stream` is asked for a local backend, the
+CLI does not load a second copy of the model. `ctl::stream_via_daemon`
+checks that the daemon owns the bus name and is idle, subscribes to its
+`Event` signal, calls `StartSession(mode, inject)`, relays SIGINT/SIGTERM
+as `Stop`/`Cancel`, prints the session events exactly like the standalone
+sink would, and derives the exit code from the daemon's state transitions.
+`--config` or `--backend` disables delegation because the daemon would not
+honour them.
+
+## 3. Module map (`rust/src`)
+
+| Layer | Modules | Responsibility |
 | --- | --- | --- |
-| 入口 | `main.rs`、`cli_*` 测试 | clap 子命令、退出码 |
-| 会话编排 | `coordinator.rs`、`session.rs`、`daemon.rs` | 有界队列、停止冲刷、一次注入；gateway 一次会话 |
-| 音频与传输 | `capture.rs`、`realtime.rs`、`local_asr.rs` | `pw-record --raw -` 捕获、DashScope 协议、Sherpa 在线识别 |
-| 批量路径 | `batch.rs`、`batch_cmd.rs` | WAV 解析、DashScope 多模态批量、Sherpa 离线 SenseVoice |
-| 产品数据 | `modes.rs`、`history.rs`、`processing.rs`、`model_cmd.rs`/`mode_cmd.rs`/`history_cmd.rs` | 模式、SQLite 历史、文本处理、模型目录 CLI |
-| 模型供应链 | `models.rs` | 固定目录、HTTPS 下载、SRI SHA-256、成员白名单、manifest、原子激活 |
-| 质量门禁 | `benchmark.rs`、`benchmark_cmd.rs`、`latency.rs`、`latency_cmd.rs` | CER 重放、p50/p95/p99 延迟门禁、版本化报告 |
-| 系统集成 | `doctor.rs`、`stream.rs`（注入） | 依赖诊断、`[inject]` 配置驱动注入（wtype / 剪贴板 + X11 镜像 + 兜底） |
-| 音频保留 | `capture.rs`（`WavRecorder`） | 装饰 `AudioCapture`：chunk 镜像到 `.wav.partial`，成功会话 finalize WAV；取消/失败/空会话不留文件，镜像失败不影响主路径 |
-| Web 控制台 | `history_web.rs`、`assets/history-console.html` | `history serve`：仅回环的零依赖 HTTP/1.1，内嵌单页，`/api/records`/`/api/totals`/`/api/audio`，Range 流式 |
-| 配置 | `config.rs` | 严格 TOML、0600 密钥门禁、`voiceless` XDG 根 |
+| Entry | `main.rs`, `lib.rs` | clap command tree, exit codes, crate docs |
+| Session core | `coordinator.rs`, `session.rs`, `capture.rs`, `stream.rs`, `engine.rs` | `run_session` (the only side-effect boundary), transcript accumulator, `pw-record` capture with `WavRecorder`, backend selection and fallback, injection methods, warm engine handle |
+| Streaming backends | `realtime.rs`, `doubao.rs`, `local_asr.rs`, `offline_asr.rs`, `gguf_asr.rs` | DashScope realtime WebSocket, Volcengine Doubao binary protocol, Sherpa-ONNX online Paraformer, VAD-segmented offline decoders (Sherpa offline or transcribe.cpp GGUF) |
+| Batch | `batch.rs`, `batch_cmd.rs` | WAV parsing, DashScope multimodal batch, Sherpa SenseVoice |
+| Text | `text.rs`, `processing.rs`, `modes.rs` | `[text]` cleanup, LLM modes over OpenAI-compatible or Ollama APIs, mode repository |
+| Daemon and desktop | `daemon.rs`, `ctl.rs`, `hotkey.rs`, `media.rs`, `fcitx5.rs`, `doctor.rs` | gateway state machine, D-Bus interface, hotkey gesture machine, portal shortcut, MPRIS pause and cues, Fcitx5 bridge client with ordered preedit, dependency checks |
+| Console | `console/mod.rs`, `console/library.rs`, `console/settings.rs`, `assets/console/` | axum router with loopback/token/origin guards, live SSE, history and audio, config read/write, models, modes, diagnostics; embedded single-page app |
+| Persistence | `config.rs`, `history.rs`, `models.rs` | strict TOML schema with the 0600 secret gate, SQLite history (schema v2), pinned model catalog with verified installs |
+| Quality gates | `benchmark.rs`, `benchmark_cmd.rs`, `latency.rs`, `latency_cmd.rs` | CER replay against the corpus, stage-timestamped latency trials, thresholds and versioned reports |
+| CLI adapters | `model_cmd.rs`, `mode_cmd.rs`, `history_cmd.rs` | thin wrappers that print tables or `--json` |
 
-`stream::run_with_control` 把控制源参数化：CLI 走 SIGINT/SIGTERM（第一次停止、第二次取消），daemon 走 channel（Activate/Cancel 语义由 gateway 状态机保证）。
+Outside the crate: `fcitx5-bridge/` (C++ Fcitx5 addon), `contrib/eww-overlay/`
+(overlay driven by `voiceless ctl watch`), `nix/` (Home Manager module,
+bridge package), `scripts/asr_benchmark/` (corpus and TTS generation).
 
-## 会话生命周期
+## 4. The realtime session
+
+`coordinator::run_session` owns one session end to end. It is generic over
+six traits so the CLI, the daemon and the tests share the same code:
+
+| Trait | Production implementation | Test fake |
+| --- | --- | --- |
+| `AudioCapture` | `stream::PwCapture` (`pw-record --raw`, 16 kHz mono PCM16, 32 ms chunks), wrapped in `capture::WavRecorder` when audio retention is on | scripted chunk sequences |
+| `BackendTransport` | one of the backends in section 5 | scripted `RealtimeEvent`s, blocking sends |
+| `TextProcessor` | `stream::PipelineProcessor` (`[text]` cleanup, then the mode's LLM call) | identity / failing processor |
+| `TextInjector` | `stream::ConfiguredInjector` | recording injector |
+| `HistoryRecorder` | `stream::SqliteHistory` | in-memory list |
+| `EventSink` | stdout/JSON sink, daemon broadcast sink, optionally wrapped in `fcitx5::PreeditSink` | collected events |
+
+### 4.1 Lifecycle
 
 ```mermaid
 flowchart LR
-    R[ready gate] --> C[pw-record capture]
-    C --> Q[bounded queue 16x32ms]
-    Q --> S[transport send deadline 500ms]
+    R[ready gate<br/>backend connects] --> C[pw-record capture]
+    C --> Q[bounded queue<br/>16 x 32 ms]
+    Q --> S[transport.send_audio<br/>500 ms deadline]
     S --> T[transcript accumulator]
-    T --> E[events: partial/confirmed]
-    Stop[Stop / EOF] --> F[flush: tail -> finish -> final]
-    F --> P[mode processing]
-    P --> I[configured inject once]
-    I --> H[history record]
+    T --> E[events: partial / confirmed / level]
+    Stop[Stop or EOF] --> F[flush: tail frame -> finish -> final]
+    F --> X[text cleanup + mode processing]
+    X --> I[inject once]
+    I --> H[history row + WAV]
 ```
 
-- 正常停止：停止接受新块 → SIGINT 捕获进程 → drain 尾帧 → 队列 FIFO 冲刷 → 一次 `session.finish` → 等待最终事件 → 可选一次注入。功能超时 2 秒。
-- 取消：第二次 SIGINT、SIGTERM 或 daemon Cancel；终止捕获与后端会话，发布 `cancelled`，不处理、不记录、不注入任何部分文本。
-- 空文本：完成会话，输出 warning，不注入。
-- 反压：队列满或单块发送超过 500 ms deadline 时整个会话失败，不丢块、不重排。
+1. **Ready gate.** The transport connects and authenticates before capture
+   exists (`DEFAULT_READY_TIMEOUT` 5 s). A missing API key or a broken
+   model never produces audio.
+2. **Capture.** `pw-record` streams raw PCM16; chunks enter a queue of 16
+   slots. The coordinator also publishes an RMS level event at most every
+   66 ms when a live UI asked for it.
+3. **Send.** Each chunk must be accepted by the backend within
+   `DEFAULT_SEND_DEADLINE` (500 ms). A full queue or a missed deadline fails
+   the session; nothing is dropped or reordered.
+4. **Transcript.** `session::RecognitionSession` folds backend events into
+   a `TranscriptSnapshot` (`authoritative_text`, `partial_text`,
+   `confirmed_segments`, `is_final`) and decides which updates are worth an
+   event.
+5. **Stop.** Normal stop runs in a fixed order: stop accepting chunks →
+   stop capture (SIGINT to `pw-record`) → drain the queue FIFO plus the
+   aligned tail frame → exactly one `finish` → wait for the final event
+   (`finish_timeout`, 2 s; 20 s for `local-offline`, whose final waits for
+   the last segment decode) → text processing → at most one injection →
+   history. Empty text completes with a warning and no injection.
+6. **Cancel.** Second SIGINT, SIGTERM or daemon `Cancel`: capture and
+   backend are aborted, a `cancelled` event is published, and nothing is
+   processed, injected or recorded. The partial WAV is deleted.
 
-## 持久化与 XDG
+### 4.2 Events
+
+The sink receives `OutputEvent`s; the JSON sink prints one object per line
+with a `type` field: `ready`, `level` (`rms`), `transcript`
+(`transcript` snapshot), `finalized` (`injection` result or `null`),
+`warning`, `error`, `cancelled`, `completed`. The daemon adds
+`state`, `session` (metrics) and `log` lines. `voiceless ctl watch`, the
+overlay and the console all consume this schema, so a new event type must
+be added to the README table and `docs/console-api.md`.
+
+### 4.3 Audio retention
+
+`WavRecorder<C>` decorates any `AudioCapture`: it mirrors every chunk into
+`<data>/audio/<id>.wav.partial`, finalizes the RIFF header and renames on
+success, and deletes the partial file on cancel, failure, empty text or
+drop. A mirror failure only disables saving for that session. The history
+row stores `audio_path` and `duration_seconds`; deleting the row deletes
+the file.
+
+## 5. Backends
+
+| `streaming_backend` | Module | Reads | Model | Partial / confirmed |
+| --- | --- | --- | --- | --- |
+| `cloud-realtime` (default) | `realtime.rs` | `[cloud] api_key`, `realtime_endpoint`, `realtime_model` | DashScope `qwen3-asr-flash-realtime` | server deltas / server commits |
+| `doubao-realtime` | `doubao.rs` | `[doubao]` (`api_key` or `app_key`+`access_key`, `resource_id`, ITN/punctuation/DDC flags, hotwords) | Volcengine Seed ASR bigmodel | per-utterance results; optional second-pass `enable_nonstream` |
+| `local-streaming` | `local_asr.rs` | `[asr] local_model_dir` or the managed model | Sherpa-ONNX `streaming-paraformer-bilingual-zh-en` | online recognizer partials / endpoint-detected finals |
+| `local-offline` | `offline_asr.rs` (+ `gguf_asr.rs` with the `transcribe` feature) | `[local] model`, `provider`, `num_threads`, `partial_interval_ms`, `max_segment_seconds`, hotwords | `qwen3-asr-1.7b-gguf` / `qwen3-asr-0.6b-gguf` on CUDA via transcribe.cpp, or `qwen3-asr-0.6b-int8` / `sense-voice-int8` on CPU via Sherpa-ONNX | re-decoded open segment every `partial_interval_ms` / final decode of each VAD-closed segment |
+
+Batch (`[asr] batch_backend`): `cloud` uses the DashScope multimodal API,
+`local` uses Sherpa-ONNX SenseVoice. `transcribe` and `record` share
+`batch.rs`.
+
+### 5.1 Fallback
+
+`stream::run_with_env` opens the primary backend; if that fails and
+`[asr] fallback_backend` names a different backend, it emits a `warning`
+event and opens the fallback once. Missing-model errors are reported as an
+`error` event followed by `completed` with exit code 1, so JSON consumers
+and overlays see them; configuration errors abort the command. Backends
+never fall back internally.
+
+### 5.2 `local-offline` in detail
+
+Silero VAD (512-sample windows) splits the stream at pauses. Ten windows
+of pre-roll are kept so the first syllable is not clipped. Every closed
+segment is decoded once and published as confirmed text; the open segment
+is re-decoded every `partial_interval_ms` for the live partial. A segment
+longer than `max_segment_seconds` (default 30 s for GGUF, 15 s for Sherpa)
+is force-closed. Decoding runs on a dedicated worker thread so a slow
+decode never stalls capture; audio queued meanwhile is coalesced before the
+next partial. Context-aware decoders receive the last 120 characters of
+confirmed text to keep segments coherent. `[text] hotwords` are merged
+into the recognizer's hotword list for models that support biasing.
+
+### 5.3 Warm engine
+
+`engine::WarmEngine` is loaded once by the daemon (`spawn_blocking`) and
+lent to each session through `stream::SessionEnv`. A session reuses it only
+when model, device, thread count and hotwords match the current config;
+otherwise it loads cold on the worker. The daemon verified the model files
+at load, so warm sessions skip the per-session hash check of 1–2 GB of
+weights. `POST /api/engine/reload` releases the old engine first so its
+VRAM is free for the new one.
+
+## 6. Text pipeline
+
+1. **`text::TextCleaner`** runs on every final result, in this order:
+   filler removal (all `呃`, and `嗯` when it stands alone, with punctuation
+   repair), pinyin-based hotword correction (Chinese hotwords of ≥ 2
+   characters; candidate spans are compared syllable by syllable, common
+   confusions such as zh/z, n/l and front/back nasals score 0.8, and a span
+   is replaced when its score reaches `hotword_threshold`), exact
+   `replacements` in order, regex `rules` in order, then the optional
+   trailing-period strip.
+2. **Modes.** `quick` injects the cleaned text. `voice-polish`,
+   `prompt-optimize`, `translate-en` and user-defined modes send it to
+   `[processing]` (`openai-compatible` or `ollama`) with the mode's prompt
+   template (`{text}` placeholder; `[processing] prompt` overrides the
+   prompt-optimize template). A processing failure keeps the cleaned text
+   and emits a warning. Modes live in `<config>/modes.json`; built-ins
+   cannot be deleted.
+3. **History** records raw, processed and final text, the mode, backend
+   and model, only for successful sessions.
+
+## 7. Injection
+
+`[inject] prefer` selects the method; `clipboard_fallback = true` retries
+with the clipboard when `wtype` or `fcitx5` fails. `timeout_seconds`
+bounds every external command.
+
+- **`wtype`**: Wayland virtual keyboard, text split into `wtype`
+  invocations (`stream::wtype_invocations`).
+- **`clipboard`**: read the current clipboard, `wl-copy` the text, run
+  `focus_command` if set, send the paste chord through `paste_tool`
+  (`wtype` or `xdotool` with `paste_command`), optionally mirror to the X11
+  clipboard (`x11_clipboard_command`, for rootless Xwayland), then restore
+  the previous clipboard. Applications whose input method re-interprets
+  key events (XWayland IME apps) receive clean text this way.
+- **`fcitx5`**: `fcitx5::Fcitx5Client` is an actor owning one D-Bus
+  connection to `org.fcitx.Fcitx5` at `/voiceless`
+  (`dev.voiceless.Fcitx5Bridge1`). Requests are applied strictly in order
+  and consecutive preedit updates collapse to the newest, so a stale
+  preedit can never land after the commit that replaced it. With
+  `preedit = true`, `PreeditSink` wraps the event sink and shows each
+  partial as underlined preedit in the focused field; `CommitString`
+  replaces it with the final text. The bridge (`fcitx5-bridge/`) is a
+  small Fcitx5 addon that commits into the most recent focused input
+  context and reports the target program.
+
+## 8. The daemon
+
+`daemon::serve` loads config, loads the warm engine, starts the session
+metrics tracker, starts the console if `[console] enabled`, then runs the
+gateway loop.
+
+- **Gateway.** `Gateway<R: SessionRunner>` holds at most one session.
+  States: `idle` → `recording` (start) → `stopping` (normal stop) → `idle`
+  (session task finished). `activate`/`toggle` start when idle, stop when
+  recording and are rejected while stopping; `start`/`stop` are the
+  hold-to-talk press/release; `cancel` aborts from any active state.
+- **Command sources** feed one `DaemonCommand` channel: the D-Bus interface
+  `dev.voiceless.Daemon.Controller` at `/dev/voiceless/Daemon` (`Activate`,
+  `Toggle(mode)`, `Start(mode)`, `StartSession(mode, inject)`, `Stop`,
+  `Cancel`, `Status`), the evdev listener, the portal shortcut and the
+  console's `/api/session/*` endpoints.
+- **Hotkey gestures.** `hotkey::listen` watches every keyboard that has
+  `[hotkey] key` (read-only, never grabbed; needs the `input` group) and
+  reports presses with Ctrl state. `daemon::HotkeyMachine` turns them into
+  gestures: a press while idle starts a session (`ctrl_mode` when Ctrl is
+  held, else `mode` or the daemon default); releasing after
+  `hold_threshold_ms` stops it (hold-to-talk); releasing earlier keeps
+  recording until the next press (tap-to-toggle); any press while
+  recording stops.
+- **Portal.** `GlobalShortcuts` is best effort: when the compositor has no
+  portal backend the daemon logs it and relies on compositor bindings that
+  call `voiceless ctl`.
+- **Events.** Every session event is broadcast on a channel; the D-Bus
+  task forwards each line as an `Event` signal, the console as SSE, and
+  `track_sessions` derives per-session metrics (audio seconds,
+  stop-to-final latency, characters) published as `session` events and in
+  `Status`.
+- **Session side effects.** With `[audio] pause_media` the session pauses
+  every playing MPRIS player and resumes exactly those afterwards;
+  `[audio] cues` plays start/stop sounds through `pw-play`.
+- **Reload.** `POST /api/engine/reload` re-reads config, reloads the engine
+  and restarts the hotkey listener without restarting the process.
+
+## 9. Web console
+
+`console::serve_daemon` (full API) and `console::serve_standalone`
+(`voiceless history serve`: everything except live control, which answers
+503) share one axum router. Guards, in order: the `Host` header must be
+loopback on the served port (421 otherwise, blocks DNS rebinding); every
+`/api/*` request must carry the per-start random token, as a header or as
+`?token=` for `EventSource` and `<audio>` URLs (403 otherwise; the token is
+embedded in the page, which cross-site documents cannot read); mutating
+requests with an `Origin` must come from the console's own origin. Secrets
+are write-only. Settings are patched into `config.toml` with `toml_edit`
+so comments survive, validated with the normal loader before writing, and
+the response says whether the engine must be reloaded. The page is a
+dependency-free single-page app embedded with `include_str!`. Routes are
+listed in [`console-api.md`](console-api.md).
+
+## 10. Persistence and XDG layout
 
 ```text
-config  ${XDG_CONFIG_HOME:-~/.config}/voiceless      config.toml (0600 密钥门禁)、modes.json
-data    ${XDG_DATA_HOME:-~/.local/share}/voiceless   models/、history.sqlite3 (WAL, 0600)、audio/（成功会话的 WAV 保留）
-cache   ${XDG_CACHE_HOME:-~/.cache}/voiceless        model-downloads/
+config  ${XDG_CONFIG_HOME:-~/.config}/voiceless/     config.toml (0600 when it holds a key), modes.json
+data    ${XDG_DATA_HOME:-~/.local/share}/voiceless/  history.sqlite3 (WAL, 0600), audio/<id>.wav, models/
+cache   ${XDG_CACHE_HOME:-~/.cache}/voiceless/       model-downloads/
 ```
 
-模型目录布局：`models/versions/<id>/<version>-<digest12>/`（含 manifest.json）+ `models/<id>/current` 符号链接，原子替换激活。`local-streaming` 会话前重新校验完整性，损坏模型不可用。
+- **Config** (`config.rs`): sections `asr`, `cloud`, `doubao`, `local`,
+  `text`, `hotkey`, `audio`, `console`, `inject`, `processing`, `history`,
+  all optional with defaults; `deny_unknown_fields` everywhere. Legacy
+  values (`cloud-vad`, `sensevoice-vad`, `final_backend`) are rejected
+  with a message rather than rewritten. A file containing an API key must
+  be mode 0600 or stricter. `local_engine()` and `doubao_engine()` merge
+  `[text] hotwords` into the recognizer hotwords.
+- **History** (`history.rs`): table `recognition_history` (id, created_at,
+  duration_seconds, raw_text, processing_mode, processed_text, final_text,
+  status, character_count, asr_provider, asr_model, audio_path). Schema
+  version is `PRAGMA user_version`; v1 databases gain `audio_path` on open.
+  Cursor pagination, totals and per-day usage back the CLI and the
+  console.
+- **Models** (`models.rs`): `models/versions/<id>/<version>-<digest12>/`
+  holds the payload plus `manifest.json`; `models/<id>/current` is a
+  symlink swapped atomically on activation.
 
-历史只记录成功会话的权威文本（raw/processed/final、processing_mode、status、backend），兼容 Python 时代的 `recognition_history` 表结构与游标分页；取消、失败和空会话不写入。
+## 11. Model supply chain
 
-## D-Bus 与 daemon
-
-`voiceless daemon` 在会话总线上声明 `dev.voiceless.Daemon`（对象 `/dev/voiceless/Daemon`，接口 `dev.voiceless.Daemon.Controller`），导出 `Activate` 与 `Cancel`。gateway 状态机：idle→Started、recording→Stopping（正常停止）、stopping 期间拒绝并发 Start；会话回收后回到 idle。Sway 快捷键经 busctl 调用 Activate（见 `nix/home-manager.nix`）。
-
-## 录音保留与 Web 控制台
-
-- `WavRecorder<C: AudioCapture>` 在 `run_session` 边界装饰 capture：`next_chunk`/`stop_capture` 透明镜像 chunk；成功路径上 `finish_recording` 补 RIFF 头并 rename 到正式文件，路径随 `HistoryEntry.audio_path` 入历史；`abort`/drop 清理 `.partial`。
-- `SessionPlan.save_audio_dir` 由 `stream::session_plan` 按 `[history] save_audio` 与 `enabled` 注入；history 关闭或 insert 失败时 `SqliteHistory` 删除孤儿录音；`HistoryStore::delete/delete_all` 连音频一起删除。
-- schema v2 为 `recognition_history` 增加 `audio_path`、`duration_seconds`，v1 幂等迁移，旧行 audio 为 null。
-- `history_web` 为手写 HTTP/1.1（tokio TCP、GET only、每连接单响应），默认仅绑定回环；音频路径只从数据库行解析，URL 只含 record id（uuid 校验），支持 `Range: bytes=`（206 部分响应）；前端 `include_str!` 内嵌，波形由客户端从 PCM16 渲染。
-
-## 质量门禁（真实环境）
-
-| 门禁 | 阈值 | 实测（2026-08-15） | 报告 |
+| Id | What | Runs on | Used by |
 | --- | --- | --- | --- |
-| 云端 CER（test split） | ≤ 0.02 | 0.0070（12 样本，0 失败） | `scripts/asr_benchmark/reports/cloud-realtime-test-2026-08-14T20-34-40Z.json` |
-| first partial p95 | ≤ 1.0 s | 0.422 s | `scripts/asr_benchmark/reports/latency-cloud-realtime-2026-08-14T21-27-28Z.json` |
-| stop→final p50 | ≤ 0.6 s | 0.252 s | 同上 |
-| stop→inject p99 | ≤ 1.0 s | 0.535 s | 同上（100 trials，quick 模式，wtype 注入，0 失败） |
+| `streaming-paraformer-bilingual-zh-en` | Sherpa-ONNX online Paraformer | CPU | `local-streaming` |
+| `qwen3-asr-1.7b-gguf` | Qwen3-ASR 1.7B, Q8_0 GGUF | CUDA (transcribe.cpp) | `local-offline` (default) |
+| `qwen3-asr-0.6b-gguf` | Qwen3-ASR 0.6B, Q8_0 GGUF | CUDA (transcribe.cpp) | `local-offline` |
+| `qwen3-asr-0.6b-int8` | Qwen3-ASR 0.6B int8 ONNX | CPU (Sherpa-ONNX) | `local-offline` |
+| `sense-voice-int8` | SenseVoice int8 ONNX | CPU (Sherpa-ONNX) | `local-offline`, batch `local` |
+| `silero-vad` | Silero VAD ONNX | CPU | `local-offline` segmentation |
 
-缺真实凭据、音频或注入环境时门禁命令退出 2 并标记 unverified，不产生通过结论。本地后端 CER 单独报告，不与云端合并。
+Every entry pins URL, byte size, SRI SHA-256, archive type, member
+allow-list, required paths and a `license_status` string. `ModelManager::
+install` downloads over HTTPS into the cache dir with progress, checks the
+size and hash, rejects any archive member outside the allow-list, writes
+the manifest and activates by rename plus symlink swap. `check` re-verifies
+an installed model; the CLI and every cold session call it before use.
 
-## Nix 集成
+## 12. Quality gates
 
-`flake.nix` 的默认包是 `voiceless`（`rustPlatform.buildRustPackage`，提交 `Cargo.lock`；Sherpa-ONNX 走 shared feature + `SHERPA_ONNX_LIB_DIR` 指向 nixpkgs 构建，构建期不联网下载库）。`nix/home-manager.nix` 提供 `programs.voiceless`（settings、daemon 服务、Sway 快捷键）。`nix flake check` 在沙箱内运行全部 Rust 测试。
+| Gate | Command | Threshold | Measured 2026-08-15 |
+| --- | --- | --- | --- |
+| Cloud CER (test split) | `benchmark asr --enforce` | ≤ 0.02 | 0.0070 (12 samples) |
+| First partial p95 | `benchmark latency --enforce` | ≤ 1.0 s | 0.422 s |
+| Stop → final p50 | same | ≤ 0.6 s | 0.252 s |
+| Stop → inject p99 | same, `--inject` | ≤ 1.0 s | 0.535 s (100 trials, quick mode, wtype) |
 
-## 从 type4me-linux 迁移
+Reports are written under `scripts/asr_benchmark/reports/`. Without
+credentials, models or a Wayland session the commands exit 2 and mark the
+report `unverified`; they never report a pass they did not measure.
 
-手动边界：旧配置、模型、词汇和历史保留在旧 XDG 目录不被自动导入；迁移步骤与回滚方式见 README「从 type4me-linux 迁移」。
+## 13. Packaging
+
+- **Flake outputs** (`flake.nix`): `packages.voiceless` (default; CUDA
+  stack with transcribe.cpp built for `cudaArchitectures = "86"`, adjust for
+  other GPUs), `packages.voiceless-cpu` (what CI builds and tests),
+  `packages.voiceless-fcitx5-bridge`, `checks.default` (CPU package tests
+  including doctests), `devShells.default` / `.cpu`, `overlays.default`,
+  `homeManagerModules.default`. The binary is wrapped with `pipewire`,
+  `wtype` and `wl-clipboard` on `PATH` and the Sherpa/ONNX runtime on
+  `LD_LIBRARY_PATH`; the CUDA ONNX provider is patched to link NVRTC.
+- **Home Manager module** (`nix/home-manager.nix`): `programs.voiceless`
+  installs the package, generates `config.toml` from `settings`, and
+  optionally enables `voiceless.service` (the daemon),
+  `voiceless-overlay-eww.service` plus `voiceless-overlay.service` (the
+  overlay watcher running `voiceless ctl watch`), and a Sway binding.
+- **Fcitx5 bridge** (`nix/fcitx5-bridge.nix`): built against the
+  consumer's nixpkgs so the addon matches the running Fcitx5 ABI; add
+  `pkgs.voiceless-fcitx5-bridge` to `i18n.inputMethod.fcitx5.addons`.
+
+## 14. Testing
+
+`rust/tests/` holds integration tests that drive `run_session`, the
+gateway, the console and the protocols with the fakes in
+`tests/common/mod.rs`: scripted captures, transports that block or fail on
+demand, recording injectors and in-memory history. Protocol tests replay
+captured frames. Tests prefixed `real_` touch installed models or services
+and skip when they are absent. `scripts/fcitx5-bridge-test.sh` starts a
+private D-Bus session with a real Fcitx5 and exercises the bridge end to
+end. CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`,
+`cargo test --all-targets` in the CPU shell and `nix flake check`.
+
+## 15. Migration from type4me-linux
+
+Voiceless only touches `voiceless`-named XDG directories. Configuration,
+models and history of the old Python tool are left in place; the README
+lists the manual steps and the rollback.

@@ -87,14 +87,16 @@ flake 提供 `homeManagerModules.default`。模块完成以下任务：
 
   programs.voiceless = {
     enable = true;
-    settings.asr.streaming_backend = "cloud-realtime"; # 或 "local-streaming"
-    settings.cloud.api_key = "sk-...";                 # 生成的文件权限为 0600
+    settings.asr.streaming_backend = "local-offline";  # 或 "cloud-realtime"、"doubao-realtime"、"local-streaming"
+    settings.local.model = "qwen3-asr-1.7b-gguf";      # 见「模型目录」
     service.enable = true;                             # 常驻 `voiceless daemon`
     overlay.enable = true;                             # eww 浮层显示实时文字（contrib/eww-overlay）
     shortcuts.sway.enable = true;                      # $mod+Shift+d 切换录音
   };
 }
 ```
+
+不要把 API 密钥写进 `settings`：Home Manager 生成的文件放在所有用户可读的 Nix store 里，而 Voiceless 拒绝加载含 `api_key` 或 `access_key` 且权限宽于 `0600` 的文件。使用云端后端时，让 `settings` 留空，自己以 `0600` 权限写 `~/.config/voiceless/config.toml`，或者通过 Web 控制台把密钥写进该文件。
 
 `shortcuts.sway` 只添加 Sway 绑定。GlobalShortcuts 门户后端在 NixOS 层配置。无门户时 daemon 仍通过 D-Bus 工作。
 
@@ -341,7 +343,7 @@ flowchart TB
 7. **内嵌控制台。** `console/` 是 daemon 内的 axum 服务：仅监听回环、校验 `Host`、每次启动生成令牌、拒绝跨站写入、密钥只写不读。前端经 `include_str!` 内嵌。音频 URL 只含 record id，文件路径从数据库行读取。
 8. **严格配置契约。** 未知键报错；已移除的旧值被拒绝，Voiceless 不静默改写。
 
-完整运行时、持久化与集成契约见 [`docs/architecture.md`](docs/architecture.md)，含会话生命周期图与实测质量门禁。
+完整运行时、持久化与集成契约见 [`docs/architecture.zh.md`](docs/architecture.zh.md)，含会话生命周期图与实测质量门禁。
 
 ## 开发
 
@@ -355,7 +357,14 @@ just bridge-test  # 在私有 D-Bus 会话里跑 Fcitx5 桥接端到端测试
 
 真实质量门禁为 `benchmark asr`（CER ≤ 0.02）；真实延迟门禁为 `benchmark latency`（stop→inject p99 ≤ 1.0 s）。两者见 `docs/low-latency-rust-plan.md` 与 OpenSpec change。缺真实凭据或 Wayland 注入环境时报告 skip，不报告通过。
 
-设计文档：`openspec/changes/migrate-voiceless-native-streaming/`；低延迟方案：`docs/low-latency-rust-plan.md`。
+文档：
+
+- [`CONTRIBUTING.zh.md`](CONTRIBUTING.zh.md)：开发 shell、`just` 配方、已知构建坑、没有麦克风怎么跑会话、如何添加后端 / 模型 / 配置键 / 控制台端点。
+- [`docs/architecture.zh.md`](docs/architecture.zh.md)：进程模型、会话不变量、后端、注入、daemon、控制台、持久化、打包。
+- [`docs/console-api.md`](docs/console-api.md)：控制台全部 HTTP 端点及其安全规则。
+- [`CHANGELOG.md`](CHANGELOG.md) 与 [`SECURITY.md`](SECURITY.md)。
+- 代码：每个 Rust 模块以 `//!` 注释开头；`cargo doc --no-deps --document-private-items` 可渲染整个 crate。
+- 历史：`openspec/changes/migrate-voiceless-native-streaming/`（Rust 切换规格）与 `docs/low-latency-rust-plan.md`（促成它的方案）。
 
 ## 相关
 
