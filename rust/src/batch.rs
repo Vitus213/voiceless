@@ -270,16 +270,24 @@ impl<P: BatchPoster> CloudBatchClient<P> {
                 Ok((status, _body)) if status == 429 || status >= 500 => {
                     last_error =
                         BatchError::Cloud(format!("HTTP {status} (attempt {})", attempt + 1));
-                    std::thread::sleep(Duration::from_millis(250 * 2_u64.pow(attempt)));
+                    backoff(attempt);
                 }
                 Ok((status, _body)) => return Err(BatchError::Cloud(format!("HTTP {status}"))),
                 Err(error) => {
                     last_error = error;
-                    std::thread::sleep(Duration::from_millis(250 * 2_u64.pow(attempt)));
+                    backoff(attempt);
                 }
             }
         }
         Err(last_error)
+    }
+}
+
+/// Sleep 250 ms, 500 ms, ... between attempts; nothing after the last one
+/// (the caller returns the error right away).
+fn backoff(attempt: u32) {
+    if attempt < 2 {
+        std::thread::sleep(Duration::from_millis(250 * 2_u64.pow(attempt)));
     }
 }
 
@@ -338,6 +346,10 @@ impl LocalBatchRecognizer {
         config.model_config.sense_voice.model = Some(path_string(&model)?);
         config.model_config.tokens = Some(path_string(&tokens)?);
         config.model_config.num_threads = 1;
+        // Same inverse text normalization as the streaming SenseVoice path
+        // (`offline_asr::create_recognizer`), so numbers come out the same
+        // whether a file is transcribed or dictated.
+        config.model_config.sense_voice.use_itn = true;
         let recognizer = sherpa_onnx::OfflineRecognizer::create(&config).ok_or_else(|| {
             BatchError::Local(format!(
                 "cannot create offline recognizer from {}",
@@ -432,7 +444,23 @@ pub fn transcribe(
 /// child (see the `let _ = seconds` below): no duration limit is applied
 /// here, the recording lasts until `pw-record` itself exits.
 pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError> {
-    let status = std::process::Command::new("pw-record")
+    record_seconds_with("pw-record", seconds, destination)
+}
+
+/// `record_seconds` with the recorder binary made explicit (tests use a
+/// fake that honours SIGINT). `pw-record` has no duration option, so the
+/// child runs for `seconds` and is then sent SIGINT, on which pw-cat drains
+/// the stream and finalizes the WAV header before exiting. The child is
+/// polled every 20 ms so an early exit (no device, unwritable destination)
+/// is reported at once instead of after the full timer.
+pub fn record_seconds_with(
+    recorder: &str,
+    seconds: f64,
+    destination: &Path,
+) -> Result<(), BatchError> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let mut child = std::process::Command::new(recorder)
         .args([
             "--rate",
             &SAMPLE_RATE.to_string(),
@@ -444,10 +472,32 @@ pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError
         .arg("--file-format=wav")
         .arg(destination)
         .stdin(std::process::Stdio::null())
-        .status()?;
-    let _ = seconds;
-    if !status.success() {
-        return Err(BatchError::Local(format!("pw-record exited with {status}")));
+        .spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
+    let mut interrupted = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Our own child, still running: ask it to stop. pw-cat exits 0
+            // on SIGINT; a recorder that dies from the signal instead is
+            // also accepted below, since the stop was requested.
+            // SAFETY: `kill` on a pid this process spawned and has not
+            // reaped; no memory is involved.
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+            }
+            interrupted = true;
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stopped_by_us = interrupted && status.signal() == Some(libc::SIGINT);
+    if !status.success() && !stopped_by_us {
+        return Err(BatchError::Local(format!(
+            "{recorder} exited with {status}"
+        )));
     }
     Ok(())
 }

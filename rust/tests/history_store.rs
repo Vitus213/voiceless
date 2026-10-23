@@ -17,6 +17,7 @@ fn entry(raw: &str, final_text: &str, mode: &str) -> HistoryEntry {
         processing_mode: mode.to_owned(),
         status: "completed".to_owned(),
         backend: "cloud-realtime".to_owned(),
+        model: None,
         duration_seconds: None,
         audio_path: None,
     }

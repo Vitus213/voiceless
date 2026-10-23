@@ -613,12 +613,26 @@ impl DoubaoSession {
     /// `BrokenPipe` once the writer task has exited.
     pub async fn send_audio(&self, pcm: &[u8]) -> io::Result<()> {
         let mut pending = self.pending.lock().await;
-        pending.extend_from_slice(pcm);
-        while pending.len() >= AUDIO_PACKET_BYTES {
-            let packet: Vec<u8> = pending.drain(..AUDIO_PACKET_BYTES).collect();
+        // Cancel safety: the coordinator may drop this future while the
+        // inner send is pending and then retry the same chunk. Nothing is
+        // committed (`pending` unchanged, no byte of `pcm` consumed) until a
+        // packet send has completed, so a dropped attempt leaves both as
+        // they were and the retry sends the same bytes exactly once. The
+        // invariant `pending.len() < AUDIO_PACKET_BYTES` holds between
+        // calls; with 1 024-byte capture chunks a call sends at most one
+        // packet, so there is no second await to be cancelled at.
+        let mut consumed = 0;
+        while pending.len() + (pcm.len() - consumed) >= AUDIO_PACKET_BYTES {
+            let take = AUDIO_PACKET_BYTES - pending.len();
+            let mut packet = Vec::with_capacity(AUDIO_PACKET_BYTES);
+            packet.extend_from_slice(&pending);
+            packet.extend_from_slice(&pcm[consumed..consumed + take]);
             self.send(Command::Audio(encode_audio(&packet, false)))
                 .await?;
+            pending.clear();
+            consumed += take;
         }
+        pending.extend_from_slice(&pcm[consumed..]);
         Ok(())
     }
 

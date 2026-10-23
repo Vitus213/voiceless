@@ -223,7 +223,7 @@ impl HistoryStore {
     /// Append one row for a successful session and return it as stored.
     /// The id and `created_at` are generated here, `character_count` is
     /// derived from `final_text`, `backend` becomes `asr_provider` and
-    /// `asr_model` is left NULL. Does not touch the audio file: the
+    /// `entry.model` becomes `asr_model` (NULL when unknown). Does not touch the audio file: the
     /// recorder already finalized it at `entry.audio_path`.
     pub fn insert(
         &self,
@@ -251,7 +251,7 @@ impl HistoryStore {
                     entry.status,
                     entry.final_text.chars().count() as i64,
                     backend,
-                    None::<String>,
+                    entry.model,
                     entry.audio_path,
                 ],
             )
@@ -267,7 +267,7 @@ impl HistoryStore {
             status: entry.status.clone(),
             character_count: entry.final_text.chars().count() as i64,
             asr_provider: Some(backend.to_owned()),
-            asr_model: None,
+            asr_model: entry.model.clone(),
             audio_path: entry.audio_path.clone(),
         })
     }

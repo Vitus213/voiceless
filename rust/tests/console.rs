@@ -82,6 +82,7 @@ async fn start() -> Fixture {
                 processing_mode: "quick".to_owned(),
                 status: "completed".to_owned(),
                 backend: "local-offline".to_owned(),
+                model: None,
                 duration_seconds: Some(0.016),
                 audio_path: Some(audio_path.display().to_string()),
             },
@@ -215,6 +216,17 @@ async fn history_records_audio_and_delete() {
     .unwrap();
     assert_eq!(audio.status(), 206);
     assert_eq!(audio.header("Content-Range"), Some("bytes 0-43/1068"));
+    let reversed = ureq::get(&format!(
+        "{}/api/audio/{}?token={TOKEN}",
+        fixture.base, fixture.record_id
+    ))
+    .set("Range", "bytes=50-10")
+    .call();
+    assert_eq!(
+        status(reversed),
+        416,
+        "a reversed range is unsatisfiable, not a panic"
+    );
 
     send(
         &fixture,

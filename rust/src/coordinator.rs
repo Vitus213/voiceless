@@ -163,6 +163,10 @@ pub struct SessionPlan {
     pub save_audio_dir: Option<PathBuf>,
     /// Emit `OutputEvent::Level` while recording (daemon sessions only).
     pub emit_levels: bool,
+    /// Model identifier recorded with the history row (`asr_model`): the
+    /// cloud model name, the Doubao resource id or the local catalog id.
+    /// Empty when unknown (tests), stored as NULL.
+    pub model: String,
 }
 
 /// Minimum spacing of `OutputEvent::Level`.
@@ -182,6 +186,7 @@ impl SessionPlan {
             ready_timeout: DEFAULT_READY_TIMEOUT,
             save_audio_dir: None,
             emit_levels: false,
+            model: String::new(),
         }
     }
 }
@@ -297,6 +302,8 @@ pub struct HistoryEntry {
     pub status: String,
     /// `SessionPlan::backend`.
     pub backend: String,
+    /// Model the backend ran (`SessionPlan::model`); `None` when unknown.
+    pub model: Option<String>,
     /// Captured audio length: bytes / 32 000 (16 kHz mono PCM16);
     /// `None` when less than one sample was captured.
     pub duration_seconds: Option<f64>,
@@ -396,8 +403,15 @@ where
             },
             result = timeout_at(ready_deadline, transport.next_event()) => match result {
                 Ok(Ok(RealtimeEvent::Ready)) => break,
-                // Other events before Ready are discarded (an early `Error`
-                // event only surfaces as a ready timeout).
+                // An in-band error before Ready is the connect/auth failure
+                // itself (e.g. a rejected key): report its message now
+                // instead of waiting for the ready timeout.
+                Ok(Ok(RealtimeEvent::Error(message))) => {
+                    let _ = transport.cancel().await;
+                    return fail(sink, &format!("backend ready: {message}"));
+                }
+                // Partial or completed text before Ready has no session to
+                // land in and is discarded.
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
                     let _ = transport.cancel().await;
@@ -636,6 +650,7 @@ where
                 processing_mode: plan.mode_id.clone(),
                 status: "completed".to_owned(),
                 backend: plan.backend.clone(),
+                model: (!plan.model.is_empty()).then(|| plan.model.clone()),
                 // 16 kHz mono PCM16 is 32 000 bytes per second.
                 duration_seconds: (audio_bytes >= 2).then(|| audio_bytes as f64 / 32_000.0),
                 audio_path: capture

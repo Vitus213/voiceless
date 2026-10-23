@@ -198,11 +198,11 @@ fn report_serializes_with_versioned_shape() {
     }
 }
 
-/// Despite the name, this only pins that the replay loop hands the whole
-/// sample buffer to the factory exactly once; splitting into 32 ms frames
-/// is the backend's job (`benchmark_cmd::replay_cloud` / `replay_local`).
+/// The replay loop hands each sample's whole PCM buffer to the factory
+/// exactly once; splitting into 32 ms frames is the backend's job
+/// (`benchmark_cmd::replay_cloud` / `replay_local`).
 #[test]
-fn replay_feeds_32ms_chunks() {
+fn replay_hands_each_sample_to_the_factory_once() {
     use std::sync::{Arc, Mutex};
 
     struct ChunkRecorder {
@@ -217,8 +217,8 @@ fn replay_feeds_32ms_chunks() {
             pcm: &[u8],
             interval: Duration,
         ) -> Result<String, String> {
-            // The benchmark contract: audio arrives as 32 ms frames
-            // (1024 bytes at 16 kHz mono PCM16) paced by the interval.
+            // The factory receives the whole sample and the 32 ms pacing
+            // interval; chunking happens inside the real backends.
             let _ = interval;
             self.seen.lock().unwrap().push(pcm.len());
             Ok(self.transcript.clone())

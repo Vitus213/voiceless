@@ -35,8 +35,7 @@
 //! Writers: the console's `PUT /api/config` edits the file with `toml_edit`
 //! (`console::settings::patch_file`), re-validates the merged text with
 //! `from_toml` and writes it back with 0600 permissions, preserving comments
-//! and layout. `AppConfig::save` instead serializes the whole struct (the
-//! file's comments are lost); nothing in the crate calls it today. `stream`
+//! and layout. `stream`
 //! re-validates a `--backend` override by round-tripping the struct through
 //! TOML, and the console serializes it to JSON for `GET /api/config` (secrets
 //! are masked there, not here); both are why every section derives
@@ -70,7 +69,7 @@ pub enum ConfigError {
     #[error("unknown configuration field: {field}")]
     UnknownField { field: String },
     /// A value failed `AppConfig::validate` (message names `section.key`),
-    /// or `save` could not serialize the config.
+    /// or the config could not be serialized for a `--backend` override.
     #[error("invalid configuration: {0}")]
     Invalid(String),
     /// Not valid TOML, or a type mismatch (any serde error other than an
@@ -691,31 +690,6 @@ impl AppConfig {
             }
         }
         Self::from_toml(&input)
-    }
-
-    /// Serialize the full config to TOML and write it back to `path` with
-    /// 0600 permissions (the file may contain an API key).
-    ///
-    /// Parent directories are created. The output is `toml::to_string` of
-    /// the struct, so comments, ordering and omitted defaults of the
-    /// original file are lost; the console uses
-    /// `console::settings::patch_file` for comment-preserving edits and the
-    /// crate has no caller of this method today. On unix the mode is
-    /// tightened after the write (a new file briefly has the umask mode).
-    /// Errors: `Invalid` (serialization), `Io` (write or chmod).
-    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        let content =
-            toml::to_string(self).map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
     }
 
     /// Cross-field checks after deserialization. The first failure wins and

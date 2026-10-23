@@ -30,7 +30,6 @@ import unicodedata
 
 _PUNCT_RE = re.compile(r"[\s\W_]+", re.UNICODE)
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9]+")
-_CJK = "".join(chr(code) for code in range(0x4E00, 0xA000))
 
 
 def normalize_content(text: str) -> str:

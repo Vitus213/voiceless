@@ -132,10 +132,10 @@ enum BenchmarkAction {
         /// Number of trials to run.
         #[arg(long, default_value_t = 100)]
         trials: usize,
-        /// Inject each final text with the configured [inject] method.
+        /// Inject each final text with the configured [inject] method; without it the stop-to-inject gate is unverified.
         #[arg(long)]
         inject: bool,
-        /// Accepted for parity with asr; the latency gate is always enforced.
+        /// Exit 1 when a latency budget is exceeded (otherwise report only).
         #[arg(long)]
         enforce: bool,
     },

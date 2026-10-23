@@ -249,3 +249,60 @@ fn empty_content_array_maps_to_empty_text() {
     let client = client_with(poster);
     assert_eq!(client.transcribe_wav_bytes(b"x").expect("silent"), "");
 }
+
+/// Writes an executable shell script and returns its path.
+fn fake_recorder(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-pw-record");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// `record_seconds_with` stops the recorder after the requested time: the
+/// fake runs until SIGINT, then writes the destination (its last argument)
+/// and exits 0, like pw-cat finalizing the WAV. The call returns close to
+/// the requested length instead of waiting for the recorder to end itself.
+#[test]
+fn record_seconds_interrupts_the_recorder_after_the_requested_time() {
+    use voiceless::batch::record_seconds_with;
+
+    let dir = tempdir().unwrap();
+    let recorder = fake_recorder(
+        dir.path(),
+        "#!/bin/sh\nfor arg; do dest=\"$arg\"; done\ntrap 'printf RIFF > \"$dest\"; exit 0' INT\nwhile :; do sleep 0.02; done\n",
+    );
+    let destination = dir.path().join("take.wav");
+
+    let started = std::time::Instant::now();
+    record_seconds_with(recorder.to_str().unwrap(), 0.3, &destination).unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the recorder was not interrupted: {elapsed:?}"
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"RIFF");
+}
+
+/// A recorder that exits on its own before the timer (no device, bad
+/// destination) is reported immediately with its exit status.
+#[test]
+fn record_seconds_reports_a_recorder_that_exits_early() {
+    use voiceless::batch::record_seconds_with;
+
+    let dir = tempdir().unwrap();
+    let recorder = fake_recorder(dir.path(), "#!/bin/sh\nexit 3\n");
+    let started = std::time::Instant::now();
+    let error = record_seconds_with(recorder.to_str().unwrap(), 5.0, &dir.path().join("x.wav"))
+        .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must not wait out the timer"
+    );
+    assert!(
+        matches!(error, BatchError::Local(ref message) if message.contains("exited")),
+        "{error:?}"
+    );
+}

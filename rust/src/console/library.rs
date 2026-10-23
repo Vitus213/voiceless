@@ -97,12 +97,16 @@ pub async fn list_models(State(state): State<Arc<ConsoleState>>) -> ApiResult {
         .map(|spec| {
             let install = installs.get(&spec.id);
             let installing = matches!(install, Some(None));
-            let progress = installing.then(|| {
-                std::fs::metadata(manager.download_path(&spec))
-                    .map(|metadata| metadata.len() as f64 / spec.size_bytes as f64)
-                    .unwrap_or(0.0)
-                    .min(1.0)
-            });
+            // Download ratio while bytes are still arriving; `null` once the
+            // file is complete and the installer is verifying/extracting, so
+            // the page can show an indeterminate "verifying" state.
+            let progress = installing
+                .then(|| {
+                    std::fs::metadata(manager.download_path(&spec))
+                        .map(|metadata| metadata.len() as f64 / spec.size_bytes as f64)
+                        .unwrap_or(0.0)
+                })
+                .filter(|ratio| *ratio < 1.0);
             json!({
                 "id": spec.id,
                 "version": spec.version,
@@ -317,7 +321,9 @@ pub async fn audio(
         .and_then(|value| value.split_once('-'))
         .and_then(|(start, end)| Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok())));
     Ok(match range {
-        Some((start, end)) if start < length => {
+        // A reversed range (`bytes=50-10`) must not reach the slice below:
+        // `start..=end` with `end < start` would panic the handler task.
+        Some((start, end)) if start < length && !matches!(end, Some(end) if end < start) => {
             let end = end.map_or(length - 1, |end| end.min(length - 1));
             (
                 StatusCode::PARTIAL_CONTENT,
@@ -357,14 +363,13 @@ pub async fn delete_record(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
 ) -> ApiResult {
-    let record = find_record(&state, &id)?;
+    // Existence check first so an unknown id is 404 rather than a silent
+    // no-op; `HistoryStore::delete` removes the recording with the row.
+    find_record(&state, &id)?;
     state
         .store
         .delete(std::slice::from_ref(&id))
         .map_err(ApiError::internal)?;
-    if let Some(path) = record.audio_path {
-        let _ = std::fs::remove_file(path);
-    }
     Ok(Json(json!({ "ok": true })))
 }
 

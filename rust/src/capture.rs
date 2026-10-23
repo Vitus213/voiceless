@@ -23,7 +23,7 @@
 use std::io::{self, Seek, Write};
 use std::process::Stdio;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdout, Command};
 
 use crate::coordinator::AudioCapture;
@@ -142,27 +142,6 @@ impl RawCapture {
             Ok(Some(std::mem::take(&mut self.pending)))
         }
     }
-}
-
-/// Read a whole PCM16 stream and split it into `CHUNK_BYTES` chunks (the
-/// last one may be shorter); an odd total length is `InvalidData`.
-pub async fn read_fixed_chunks<R>(mut reader: R) -> io::Result<Vec<Vec<u8>>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut data = Vec::new();
-    reader.read_to_end(&mut data).await?;
-    if data.len() % 2 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "capture ended with an incomplete PCM16 sample",
-        ));
-    }
-    Ok(data
-        .chunks(CHUNK_BYTES)
-        .filter(|chunk| !chunk.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
 }
 
 /// Streaming WAV recorder wrapping a capture boundary: every chunk that

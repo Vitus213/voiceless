@@ -4,11 +4,11 @@
 //!
 //! Everything talks to `dev.voiceless.Daemon` / `/dev/voiceless/Daemon` /
 //! `dev.voiceless.Daemon.Controller` (constants in `daemon`) on the session
-//! bus. The daemon answers mutating calls with `"queued"` before acting, so
-//! `ctl toggle|start|stop|cancel` exiting 0 means the command was accepted
-//! into the daemon's queue, not that a session started or stopped; use
-//! `status`, `watch` or the daemon log for the outcome. A missing daemon is
-//! turned into an actionable message (`explain`).
+//! bus. The daemon acts before it answers: a mutating call replies
+//! `started`, `stopping` or `cancelled`, or fails with the gateway's reason
+//! (start while recording, toggle while stopping, stop while idle), which
+//! `ctl` prints and turns into exit code 1. A missing daemon is turned into
+//! an actionable message (`explain`).
 //!
 //! The second half of the module is `stream_via_daemon`: when `voiceless
 //! stream` would need the local model a running daemon already holds,

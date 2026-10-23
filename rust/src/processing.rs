@@ -27,19 +27,12 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-
 use crate::config::ProcessingConfig;
 
 /// Why a processing call produced no text. All variants end up as the
 /// warning text of the session; none is retried.
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessingError {
-    /// No provider configured. Not produced inside this module today:
-    /// `from_config` returns `Ok(None)` for `none` and the pipeline reports
-    /// the missing provider as a plain string.
-    #[error("no text processing provider configured")]
-    NoProvider,
     /// The request could not be built or sent: unknown provider, missing
     /// `base_url`/`model`, DNS, TLS, connection or timeout failure.
     #[error("processing request failed: {0}")]
@@ -265,12 +258,4 @@ pub fn from_config(
             "unknown processing provider: {other}"
         ))),
     }
-}
-
-/// Serializable `{text, provider}` pair. Currently unused inside the
-/// crate.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProcessedText {
-    pub text: String,
-    pub provider: String,
 }

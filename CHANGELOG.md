@@ -4,7 +4,7 @@ All notable changes to Voiceless are listed here. The project has no
 tagged releases yet; entries are grouped by the day the work landed on
 `main`. Commit hashes refer to <https://github.com/Vitus213/voiceless>.
 
-## Unreleased (2026-10-21)
+## Unreleased
 
 ### Added
 - `voiceless stream` with a local backend now delegates to a running
@@ -16,6 +16,43 @@ tagged releases yet; entries are grouped by the day the work landed on
 ### Fixed
 - `voiceless doctor` runs its blocking checks off the Tokio runtime thread.
   (156f6a4)
+- `voiceless record --seconds N` now stops `pw-record` after N seconds; the
+  value was silently ignored before.
+- The console's `GET /api/audio/{id}` no longer panics on a reversed
+  `Range` (`bytes=50-10`); it answers 416.
+- `benchmark latency` marks the gate unverified when an interval was not
+  measured (notably stop→inject without `--inject`) instead of passing it,
+  and honours `--enforce` like `benchmark asr` (budget failures exit 1 only
+  when enforced).
+- A backend `error` event that arrives before `ready` (a rejected API key)
+  now fails the session with that message instead of a 5 s ready timeout.
+- Doubao `send_audio` is cancel-safe: a chunk whose send was interrupted
+  and retried is no longer sent twice.
+- `[console] host` accepts a hostname such as `localhost`, not only an IP
+  literal.
+- History rows record `asr_model` (cloud model, Doubao resource id or local
+  catalog id); it was always NULL, so `history usage` had no per-model
+  counts.
+- Injection helpers kill a `wtype`/paste tool that exceeds
+  `[inject] timeout_seconds` instead of orphaning it; the batch cloud client
+  no longer sleeps after its final retry; local SenseVoice batch
+  transcription enables inverse text normalization like the streaming path;
+  the daemon's per-session `audio_seconds` metric starts at `ready` rather
+  than at the state change.
+
+### Changed
+- D-Bus `Activate`/`Toggle`/`Start`/`StartSession`/`Stop`/`Cancel` wait for
+  the gateway and reply `started`, `stopping` or `cancelled`; a rejected
+  command (start while recording, stop while idle) is a D-Bus error, so
+  `voiceless ctl` exits 1 instead of 0 with "queued". The console's
+  `POST /api/session/*` likewise answers 409 with the reason and names the
+  outcome in its body.
+- The model list reports `progress: null` while a completed download is
+  being verified, so the console shows a verifying state instead of 100 %.
+
+### Removed
+- Dead code: `AppConfig::save`, `ProcessingError::NoProvider`,
+  `ProcessedText`, `capture::read_fixed_chunks`, `TrialStage::TailSent`.
 
 ### Documentation
 - Module docs (`//!`) and item docs (`///`) across the whole crate, the

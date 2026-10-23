@@ -30,8 +30,11 @@
 //! Bus name `dev.voiceless.Daemon`, object `/dev/voiceless/Daemon`, interface
 //! `dev.voiceless.Daemon.Controller`: `Activate()`, `Toggle(s mode)`,
 //! `Start(s mode)`, `StartSession(s mode, b inject)`, `Stop()`, `Cancel()`
-//! each reply `"queued"` as soon as the command is in the channel (they do
-//! not wait for the gateway, so a rejected command is only logged);
+//! each wait for the command loop to act and reply `"started"`,
+//! `"stopping"` or `"cancelled"`, or fail with
+//! `org.freedesktop.DBus.Error.Failed` carrying the gateway's reason when
+//! the command is rejected (`Start` while recording, `Toggle` while
+//! stopping, `Stop` while idle);
 //! `Status()` returns `idle`, `recording` or `stopping`; the `Event(s json)`
 //! signal carries every broadcast line. An empty mode means the daemon's
 //! `--mode` default.
@@ -309,49 +312,69 @@ pub const INTERFACE: &str = "dev.voiceless.Daemon.Controller";
 /// semantics, Start/Stop to hold-to-talk press/release, Cancel force-stops.
 /// An empty mode selects the daemon's default mode.
 ///
-/// Every mutating method only enqueues a `DaemonCommand` and replies
-/// `"queued"`; the gateway acts on it later in the command loop. A caller
-/// therefore learns about a rejected command (e.g. `Start` while recording)
-/// only from the daemon log or the next `Status`/`Event`, never from the
-/// method reply. The reply is an error only when the queue (8 slots) is
-/// full or the daemon loop has gone.
+/// Every mutating method sends a `DaemonCommand` with a reply channel and
+/// waits for the command loop to act on it, so the reply reports the
+/// outcome: `"started"`, `"stopping"` or `"cancelled"` on success, and
+/// `org.freedesktop.DBus.Error.Failed` with the gateway's reason when the
+/// command was rejected (`Start` while recording, `Toggle` while stopping,
+/// `Stop` while idle). `voiceless ctl` turns that error into exit code 1.
+/// A reload in progress delays replies by the model load; the wait is
+/// bounded by the caller's method timeout.
 #[zbus::interface(name = "dev.voiceless.Daemon.Controller")]
 impl ControllerInterface {
     /// `Toggle` in the daemon's default mode (the portal shortcut and
     /// mode-less bindings).
-    fn activate(&self) -> zbus::fdo::Result<String> {
-        self.queue(DaemonCommand::Toggle(String::new()))
+    async fn activate(&self) -> zbus::fdo::Result<String> {
+        self.run(|reply| DaemonCommand::Toggle {
+            mode: String::new(),
+            reply: Some(reply),
+        })
+        .await
     }
 
-    /// Start a session in `mode` when idle, stop it when recording, and
-    /// reject (logged only) while stopping.
-    fn toggle(&self, mode: &str) -> zbus::fdo::Result<String> {
-        self.queue(DaemonCommand::Toggle(mode.to_owned()))
+    /// Start a session in `mode` when idle, stop it when recording; an
+    /// error while stopping.
+    async fn toggle(&self, mode: &str) -> zbus::fdo::Result<String> {
+        self.run(|reply| DaemonCommand::Toggle {
+            mode: mode.to_owned(),
+            reply: Some(reply),
+        })
+        .await
     }
 
-    /// Hold-to-talk press: start a session in `mode`; ignored (logged) when
-    /// one is already active.
-    fn start(&self, mode: &str) -> zbus::fdo::Result<String> {
-        self.queue(DaemonCommand::Start(mode.to_owned()))
+    /// Hold-to-talk press: start a session in `mode`; an error when one is
+    /// already active.
+    async fn start(&self, mode: &str) -> zbus::fdo::Result<String> {
+        self.run(|reply| DaemonCommand::Start {
+            mode: mode.to_owned(),
+            reply: Some(reply),
+        })
+        .await
     }
 
     /// Start with an explicit injection choice (`voiceless stream`
     /// delegating to the daemon, e.g. with `--no-inject`).
-    fn start_session(&self, mode: &str, inject: bool) -> zbus::fdo::Result<String> {
-        self.queue(DaemonCommand::StartSession {
+    async fn start_session(&self, mode: &str, inject: bool) -> zbus::fdo::Result<String> {
+        self.run(|reply| DaemonCommand::StartSession {
             mode: mode.to_owned(),
             inject,
+            reply: Some(reply),
         })
+        .await
     }
 
-    /// Hold-to-talk release: normal stop, flush and type the final text.
-    fn stop(&self) -> zbus::fdo::Result<String> {
-        self.queue(DaemonCommand::Stop)
+    /// Hold-to-talk release: normal stop, flush and type the final text;
+    /// an error when nothing is recording.
+    async fn stop(&self) -> zbus::fdo::Result<String> {
+        self.run(|reply| DaemonCommand::Stop { reply: Some(reply) })
+            .await
     }
 
-    /// Abort the session without typing anything (exit code 130).
-    fn cancel(&self) -> zbus::fdo::Result<String> {
-        self.queue(DaemonCommand::Cancel)
+    /// Abort the session without typing anything (exit code 130); a no-op
+    /// when idle.
+    async fn cancel(&self) -> zbus::fdo::Result<String> {
+        self.run(|reply| DaemonCommand::Cancel { reply: Some(reply) })
+            .await
     }
 
     /// Current session state: idle, recording or stopping. Reads the copy
@@ -376,13 +399,41 @@ impl ControllerInterface {
 }
 
 impl ControllerInterface {
-    /// Enqueue without waiting; maps a full or closed channel to
-    /// `org.freedesktop.DBus.Error.Failed`.
-    fn queue(&self, command: DaemonCommand) -> zbus::fdo::Result<String> {
+    /// Send one command and wait for the loop's verdict. A gone loop, or a
+    /// loop that dropped the reply, is `org.freedesktop.DBus.Error.Failed`.
+    async fn run(
+        &self,
+        build: impl FnOnce(CommandReply) -> DaemonCommand,
+    ) -> zbus::fdo::Result<String> {
+        let (reply, verdict) = tokio::sync::oneshot::channel();
         self.commands
-            .try_send(command)
-            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
-        Ok("queued".to_owned())
+            .send(build(reply))
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon command loop is gone".to_owned()))?;
+        match verdict.await {
+            Ok(Ok(outcome)) => Ok(outcome_name(outcome).to_owned()),
+            Ok(Err(message)) => Err(zbus::fdo::Error::Failed(message)),
+            Err(_) => Err(zbus::fdo::Error::Failed(
+                "daemon dropped the command".to_owned(),
+            )),
+        }
+    }
+}
+
+/// Verdict of one control command, sent back to the D-Bus method or console
+/// request that issued it: the `ActivateOutcome` (`None` for `Cancel`), or
+/// the gateway's rejection reason.
+pub type CommandVerdict = Result<Option<ActivateOutcome>, String>;
+/// Reply channel the control commands carry; `None` for sources that do
+/// not wait (hotkey, portal).
+pub type CommandReply = tokio::sync::oneshot::Sender<CommandVerdict>;
+
+/// Wire name of an outcome in D-Bus method replies and console responses.
+pub fn outcome_name(outcome: Option<ActivateOutcome>) -> &'static str {
+    match outcome {
+        Some(ActivateOutcome::Started) => "started",
+        Some(ActivateOutcome::Stopping) => "stopping",
+        None => "cancelled",
     }
 }
 
@@ -392,16 +443,26 @@ impl ControllerInterface {
 #[derive(Debug)]
 pub enum DaemonCommand {
     /// `Gateway::toggle` in the given mode.
-    Toggle(String),
+    Toggle {
+        mode: String,
+        reply: Option<CommandReply>,
+    },
     /// `Gateway::start` in the given mode (hold-to-talk press).
-    Start(String),
+    Start {
+        mode: String,
+        reply: Option<CommandReply>,
+    },
     /// `Gateway::start_with` an explicit injection choice (`stream`
     /// delegation through `StartSession`).
-    StartSession { mode: String, inject: bool },
+    StartSession {
+        mode: String,
+        inject: bool,
+        reply: Option<CommandReply>,
+    },
     /// `Gateway::stop` (hold-to-talk release).
-    Stop,
+    Stop { reply: Option<CommandReply> },
     /// `Gateway::cancel`; never fails, idle is a no-op.
-    Cancel,
+    Cancel { reply: Option<CommandReply> },
     /// A raw push-to-talk press or release, interpreted by `HotkeyMachine`.
     Key(crate::hotkey::KeyEvent),
     /// Re-read the config, reload the warm engine and hotkey (idle only).
@@ -848,13 +909,16 @@ async fn track_sessions(shared: std::sync::Arc<DaemonShared>) {
         match event["type"].as_str() {
             Some("state") => match event["state"].as_str() {
                 Some("recording") => {
-                    recording_at = Some(std::time::Instant::now());
+                    // Audio starts at `ready` (after connect/model load),
+                    // not at the state event; reset until it arrives.
+                    recording_at = None;
                     stopping_at = None;
                     chars = 0;
                 }
                 Some("stopping") => stopping_at = Some(std::time::Instant::now()),
                 _ => {}
             },
+            Some("ready") => recording_at = Some(std::time::Instant::now()),
             Some("transcript") if event["transcript"]["is_final"] == true => {
                 chars = event["transcript"]["authoritative_text"]
                     .as_str()
@@ -985,8 +1049,12 @@ where
                 // Capture the requested mode before the gateway acts, so the
                 // idle->recording event names the mode the session runs in.
                 if gateway.state() == State::Idle {
-                    if let DaemonCommand::Toggle(requested)
-                    | DaemonCommand::Start(requested)
+                    if let DaemonCommand::Toggle {
+                        mode: requested, ..
+                    }
+                    | DaemonCommand::Start {
+                        mode: requested, ..
+                    }
                     | DaemonCommand::StartSession {
                         mode: requested, ..
                     } = &command
@@ -1010,9 +1078,12 @@ where
                         match action {
                             KeyAction::Start(requested) => {
                                 session_mode = mode(requested.clone());
-                                DaemonCommand::Start(requested)
+                                DaemonCommand::Start {
+                                    mode: requested,
+                                    reply: None,
+                                }
                             }
-                            KeyAction::Stop => DaemonCommand::Stop,
+                            KeyAction::Stop => DaemonCommand::Stop { reply: None },
                             KeyAction::Nothing => continue,
                         }
                     }
@@ -1047,23 +1118,33 @@ where
                     }
                     command => command,
                 };
-                let result = match command {
-                    DaemonCommand::Toggle(requested) => gateway.toggle(&mode(requested)).map(Some),
-                    DaemonCommand::Start(requested) => gateway.start(&mode(requested)).map(Some),
-                    DaemonCommand::StartSession { mode: requested, inject } => {
-                        gateway.start_with(&mode(requested), Some(inject)).map(Some)
+                let (result, reply): (CommandVerdict, Option<CommandReply>) = match command {
+                    DaemonCommand::Toggle { mode: requested, reply } => {
+                        (gateway.toggle(&mode(requested)).map(Some), reply)
                     }
-                    DaemonCommand::Stop => gateway.stop().map(Some),
+                    DaemonCommand::Start { mode: requested, reply } => {
+                        (gateway.start(&mode(requested)).map(Some), reply)
+                    }
+                    DaemonCommand::StartSession { mode: requested, inject, reply } => (
+                        gateway.start_with(&mode(requested), Some(inject)).map(Some),
+                        reply,
+                    ),
+                    DaemonCommand::Stop { reply } => (gateway.stop().map(Some), reply),
                     DaemonCommand::Key(_) | DaemonCommand::Reload(_) => {
                         unreachable!("handled above")
                     }
-                    DaemonCommand::Cancel => {
+                    DaemonCommand::Cancel { reply } => {
                         gateway.cancel().await;
-                        Ok(None)
+                        (Ok(None), reply)
                     }
                 };
-                if let Err(message) = result {
+                if let Err(message) = &result {
                     shared.log(format!("Voiceless: {message}"));
+                }
+                // Sources that wait (D-Bus methods, the console) learn the
+                // verdict here; a dropped receiver (caller timed out) is fine.
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
                 }
             },
             // Reaping tick: the gateway only returns to idle through `poll`,
@@ -1192,7 +1273,12 @@ async fn portal_shortcut_listener(commands: mpsc::Sender<DaemonCommand>) {
     // created, so matching the shortcut id is sufficient.
     while let Some(event) = activated.next().await {
         if event.shortcut_id() == TOGGLE_SHORTCUT_ID {
-            let _ = commands.send(DaemonCommand::Toggle(String::new())).await;
+            let _ = commands
+                .send(DaemonCommand::Toggle {
+                    mode: String::new(),
+                    reply: None,
+                })
+                .await;
         }
     }
 }

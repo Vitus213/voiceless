@@ -565,8 +565,25 @@ fn session_plan(
 ) -> SessionPlan {
     let mut plan = SessionPlan::new(backend, options.inject);
     plan.mode_id = mode_id.to_owned();
+    plan.model = backend_model(config, backend);
     plan.save_audio_dir = audio_dir(config);
     plan
+}
+
+/// The model identifier a history row records as `asr_model` for
+/// `backend`: the cloud model name, the Doubao resource id, the local
+/// catalog id, or the overriding directory for `local-streaming`.
+fn backend_model(config: &AppConfig, backend: &str) -> String {
+    match backend {
+        "cloud-realtime" => config.cloud.realtime_model.clone(),
+        "doubao-realtime" => config.doubao.resource_id.clone(),
+        "local-streaming" => config.asr.local_model_dir.as_ref().map_or_else(
+            || crate::models::streaming_paraformer_spec().id,
+            |dir| dir.display().to_string(),
+        ),
+        "local-offline" => config.local.model.clone(),
+        _ => String::new(),
+    }
 }
 
 /// Control channel fed by process signals: the first SIGINT sends `Stop`,
@@ -1178,6 +1195,9 @@ async fn run_command_with_stdin(
         } else {
             Stdio::null()
         })
+        // On timeout the wait future (and the child handle) is dropped:
+        // kill the tool instead of leaving a hung wtype/paste process.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|error| format!("{program}: {error}"))?;
     if let Some(stdin) = child.stdin.as_mut() {

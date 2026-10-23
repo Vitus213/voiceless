@@ -44,7 +44,6 @@ mod library;
 mod settings;
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -190,14 +189,18 @@ pub async fn serve_standalone(store_path: PathBuf, host: &str, port: u16) -> Res
     .map(|()| 0)
 }
 
-/// Bind `host:port`. The string is parsed as a `SocketAddr`, so `host`
-/// must be an IP literal that is valid with `:port` appended (`127.0.0.1`,
-/// or `[::1]` with its brackets); a hostname such as `localhost` fails with
-/// "invalid listen address" rather than being resolved.
+/// Bind `host:port`. `host` may be an IP literal (`127.0.0.1`, `::1`) or a
+/// name such as `localhost`; the first address it resolves to is bound.
+/// Errors name the address and the OS reason (port in use, name unknown).
 async fn bind(host: &str, port: u16) -> Result<tokio::net::TcpListener, String> {
-    let address: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|error| format!("invalid listen address: {error}"))?;
+    // `host` may be an IP literal or a name (`localhost`); the first
+    // resolved address is bound. The loopback `Host` check in
+    // `require_loopback_host` is independent of what is bound here.
+    let address = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| format!("invalid listen address {host}:{port}: {error}"))?
+        .next()
+        .ok_or_else(|| format!("listen address {host}:{port} resolves to nothing"))?;
     tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| format!("cannot bind {address}: {error}"))
@@ -550,6 +553,9 @@ async fn events(
 /// recording) is reported through the event stream, not here. 404 for any
 /// other action, 503 without a daemon, 500 if the daemon's command channel
 /// is closed.
+/// A command the gateway rejects (start while recording, toggle while
+/// stopping, stop while idle) is 409 with the reason; the 200 body names
+/// the outcome (`started`, `stopping`, `cancelled`).
 async fn session(
     State(state): State<Arc<ConsoleState>>,
     axum::extract::Path(action): axum::extract::Path<String>,
@@ -561,11 +567,13 @@ async fn session(
         .and_then(|Json(body)| body["mode"].as_str())
         .unwrap_or_default()
         .to_owned();
+    let (reply, verdict) = tokio::sync::oneshot::channel();
+    let reply = Some(reply);
     let command = match action.as_str() {
-        "toggle" => DaemonCommand::Toggle(mode),
-        "start" => DaemonCommand::Start(mode),
-        "stop" => DaemonCommand::Stop,
-        "cancel" => DaemonCommand::Cancel,
+        "toggle" => DaemonCommand::Toggle { mode, reply },
+        "start" => DaemonCommand::Start { mode, reply },
+        "stop" => DaemonCommand::Stop { reply },
+        "cancel" => DaemonCommand::Cancel { reply },
         other => {
             return Err(ApiError(
                 StatusCode::NOT_FOUND,
@@ -578,7 +586,16 @@ async fn session(
         .send(command)
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "ok": true })))
+    // The gateway's verdict: a rejected command (start while recording,
+    // stop while idle) is 409 with the reason, so the page can say why.
+    let outcome = verdict
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(|message| ApiError(StatusCode::CONFLICT, message))?;
+    Ok(Json(json!({
+        "ok": true,
+        "outcome": crate::daemon::outcome_name(outcome),
+    })))
 }
 
 /// `POST /api/engine/reload` (console API "Live session"): asks the daemon

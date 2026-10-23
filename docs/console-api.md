@@ -32,11 +32,16 @@ Errors: non-2xx with body `{"error": "message"}`.
 |---|---|---|---|
 | GET | `/api/status` | — | `Status` |
 | GET | `/api/events?token=` | — | `text/event-stream`, one `data: <json>` per event |
-| POST | `/api/session/toggle` | `{"mode": "quick"}` (mode optional, `""` = default) | `{"ok": true}` |
-| POST | `/api/session/start` | `{"mode": "..."}` | `{"ok": true}` |
-| POST | `/api/session/stop` | — | `{"ok": true}` |
-| POST | `/api/session/cancel` | — | `{"ok": true}` |
+| POST | `/api/session/toggle` | `{"mode": "quick"}` (mode optional, `""` = default) | `{"ok": true, "outcome": "started"}` |
+| POST | `/api/session/start` | `{"mode": "..."}` | `{"ok": true, "outcome": "started"}` |
+| POST | `/api/session/stop` | — | `{"ok": true, "outcome": "stopping"}` |
+| POST | `/api/session/cancel` | — | `{"ok": true, "outcome": "cancelled"}` |
 | POST | `/api/engine/reload` | — | `{"ok": true, "engine": "qwen3-asr-1.7b-gguf on cuda", "load_seconds": 2.1, "error": null}` (re-reads config, reloads warm engine and hotkey listener; `engine` is `null` and `error` holds the message when the load failed; 409 with `{"error": …}` while a session is active or when the config file cannot be re-read) |
+
+A session command the gateway rejects (`start` while recording, `toggle`
+while stopping, `stop` while idle) answers 409 `{"error": "…"}`; `cancel`
+never fails. `outcome` is `started`, `stopping` or `cancelled`; `toggle`
+reports whichever it did.
 
 `Status`:
 
@@ -96,7 +101,7 @@ Sections: `asr`, `cloud`, `doubao`, `local`, `text`, `hotkey`, `audio`,
 
 | Method | Path | Response |
 |---|---|---|
-| GET | `/api/models` | `[{"id","version","size_bytes","license_status","installed":bool,"installing":bool,"progress":0.0-1.0|null,"error":null,"kind":"gguf|sherpa|vad|streaming","in_use":bool}]` |
+| GET | `/api/models` | `[{"id","version","size_bytes","license_status","installed":bool,"installing":bool,"progress":0.0-1.0|null,"error":null,"kind":"gguf|sherpa|vad|streaming","in_use":bool}]` (`progress` is the download ratio while bytes arrive and `null` once the file is complete and being verified/extracted) |
 | POST | `/api/models/{id}/install` | `{"ok": true}` (starts a background install; poll `/api/models`) |
 | DELETE | `/api/models/{id}` | `{"ok": true}` (refused with 409 if it is the loaded engine) |
 

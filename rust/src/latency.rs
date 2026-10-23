@@ -37,10 +37,6 @@ pub enum TrialStage {
     /// Last audio chunk sent and paced: the "hotkey released" moment the
     /// stop-based intervals are measured from.
     Stop,
-    /// Reserved for the tail-frame flush of a live session. `latency_cmd`
-    /// never records it (replay has no tail frame), so it only appears in
-    /// hand-built fixtures.
-    TailSent,
     /// `finish` acknowledged by the session.
     FinishSent,
     /// `Finished` event (final transcript) received.
@@ -202,19 +198,19 @@ pub fn evaluate_gate(outcomes: &[TrialOutcome], thresholds: &LatencyThresholds) 
     let stop_to_inject_p99 = optional_percentile(&stop_to_injects, 99.0);
 
     let trials = quick_success.len() + failed_trials;
-    let unverified = quick_success.len() < thresholds.min_trials;
+    // An interval nobody measured (no injection, no partial, no final) is
+    // not "within budget": the gate is unverified, never passed. Without
+    // `--inject` the stop-to-inject percentile is always absent.
+    let measured =
+        first_partial_p95.is_some() && stop_to_final_p50.is_some() && stop_to_inject_p99.is_some();
+    let unverified = quick_success.len() < thresholds.min_trials || !measured;
     let within_budgets = [
         (first_partial_p95, thresholds.first_partial_p95_seconds),
         (stop_to_final_p50, thresholds.stop_to_final_p50_seconds),
         (stop_to_inject_p99, thresholds.stop_to_inject_p99_seconds),
     ]
     .iter()
-    .all(|(value, budget)| match value {
-        Some(value) => *value <= *budget,
-        // An interval nobody measured cannot fail its budget; the report
-        // shows it as null so a reader can tell it was not verified.
-        None => true,
-    });
+    .all(|(value, budget)| matches!(value, Some(value) if *value <= *budget));
     let passed = !unverified && failed_trials == 0 && within_budgets;
 
     LatencyGate {

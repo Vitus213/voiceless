@@ -20,8 +20,8 @@
 //! (`stream::inject_text`), and the text really lands in the focused
 //! window, so run it with a scratch editor focused.
 //!
-//! Exit codes: 0 gate passed; 1 gate not passed, or the report could not
-//! be serialized or written; 2 unverified (unsupported backend or mode,
+//! Exit codes: 0 gate passed; 1 gate not passed under `--enforce`, or the report
+//! could not be serialized or written; 2 unverified (unsupported backend or mode,
 //! missing credentials, corpus or audio, or fewer successful trials than
 //! `LatencyThresholds::min_trials`). A skip is never a pass.
 
@@ -51,8 +51,9 @@ pub struct LatencyBenchmarkArgs {
     /// never be measured against the 1 s gate.
     pub mode: String,
     /// Inject each trial's final text with `stream::inject_text`. Without
-    /// it `InjectionComplete` is never recorded and the stop-to-inject
-    /// percentile is absent (`null`) in the report.
+    /// it `InjectionComplete` is never recorded, the stop-to-inject
+    /// percentile is absent (`null`) in the report and the gate is
+    /// unverified (exit 2): the headline budget cannot pass unmeasured.
     pub inject: bool,
     /// JSONL corpus the trials draw samples from.
     pub corpus_path: PathBuf,
@@ -60,8 +61,9 @@ pub struct LatencyBenchmarkArgs {
     pub audio_dir: PathBuf,
     /// Directory the JSON `LatencyGate` is written into.
     pub report_path: PathBuf,
-    /// Accepted from the CLI for symmetry with `benchmark asr`;
-    /// `run_latency` does not read it, the default thresholds always apply.
+    /// Exit 1 when a verified gate exceeds a budget (as `benchmark asr
+    /// --enforce`); without it the verdict is printed and the exit code is
+    /// 0. Unverified runs exit 2 either way.
     pub enforce: bool,
 }
 
@@ -205,8 +207,11 @@ pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
         gate.stop_to_inject_p99
     );
     if gate.unverified {
+        if !args.inject {
+            eprintln!("Voiceless: stop-to-inject was not measured; run with --inject");
+        }
         eprintln!(
-            "Voiceless: fewer than {} successful trials; gate unverified",
+            "Voiceless: fewer than {} successful trials or an interval unmeasured; gate unverified",
             thresholds.min_trials
         );
         return 2;
@@ -214,9 +219,12 @@ pub async fn run_latency(args: LatencyBenchmarkArgs) -> i32 {
     if gate.passed {
         println!("Voiceless: latency gate passed");
         0
-    } else {
+    } else if args.enforce {
         eprintln!("Voiceless: latency gate not passed");
         1
+    } else {
+        eprintln!("Voiceless: latency gate not passed (reported only; pass --enforce to fail)");
+        0
     }
 }
 

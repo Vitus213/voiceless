@@ -91,6 +91,7 @@ async fn main() {
             processing_mode: (*mode).to_owned(),
             status: "completed".to_owned(),
             backend: (*backend).to_owned(),
+            model: None,
             duration_seconds: (*seconds > 0.0).then_some(*seconds),
             audio_path: None,
         };

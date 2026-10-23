@@ -210,9 +210,11 @@ async fn clipboard_injection_restores_previous_selection() {
 /// Config validation of `[inject].prefer` (`wtype`, `clipboard`, `fcitx5`
 /// are accepted; anything else is rejected).
 #[test]
-fn prefer_accepts_wtype_and_clipboard_only() {
+fn prefer_accepts_wtype_clipboard_and_fcitx5() {
     let bad = AppConfig::from_toml("[inject]\nprefer = \"bogus\"\n");
     assert!(bad.is_err(), "bogus prefer must be rejected");
-    let good = AppConfig::from_toml("[inject]\nprefer = \"clipboard\"\n");
-    assert!(good.is_ok(), "{good:?}");
+    for method in ["wtype", "clipboard", "fcitx5"] {
+        let good = AppConfig::from_toml(&format!("[inject]\nprefer = \"{method}\"\n"));
+        assert!(good.is_ok(), "{method}: {good:?}");
+    }
 }

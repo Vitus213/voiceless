@@ -642,13 +642,11 @@ impl ModelManager {
         let files = hash_staged_files(staging)?;
         write_manifest(staging, spec, expected_digest_hex, &files)?;
 
-        let version_name = staging.file_name().expect("staging name");
         let destination = staging.parent().unwrap().join(format!(
             "{}-{}",
             spec.version,
             &expected_digest_hex[..12]
         ));
-        let _ = version_name;
         // Atomic publish: only a fully extracted, hashed and manifested
         // directory is renamed into the canonical name, and `rename` on one
         // filesystem is atomic, so a concurrent `resolve`/`check` never sees

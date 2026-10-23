@@ -268,3 +268,32 @@ async fn finish_timeout_fails_the_session_without_injection() {
         "{log_entries:?}"
     );
 }
+
+/// A backend `Error` event before `Ready` (an auth or protocol failure the
+/// service reports in-band) fails the session with that message at once
+/// instead of surfacing as a ready timeout, and never starts capture.
+#[tokio::test]
+async fn error_event_before_ready_fails_with_the_backend_message() {
+    let log = new_log();
+    let transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Error("401 invalid api key".to_owned())));
+    let capture = FakeCapture::new(log.clone(), vec![vec![0; 1024]], None);
+    let plan = SessionPlan::new("cloud-realtime", true);
+
+    let (code, events, log_entries) = run_fixture(plan, capture, transport, vec![]).await;
+
+    assert_eq!(code, 1);
+    assert_eq!(
+        event_kinds(&events),
+        vec!["error", "completed"],
+        "{events:?}"
+    );
+    let OutputEvent::Error(message) = &events[0] else {
+        panic!("expected error event: {events:?}");
+    };
+    assert!(message.contains("401 invalid api key"), "{message}");
+    assert!(
+        !log_entries.iter().any(|entry| entry == "capture.start"),
+        "capture must not start when the backend fails before ready: {log_entries:?}"
+    );
+}

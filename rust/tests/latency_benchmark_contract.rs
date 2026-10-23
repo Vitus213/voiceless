@@ -20,7 +20,6 @@ fn trial(partial: f64, stop_to_final: f64, stop_to_inject: f64) -> TrialOutcome 
             (TrialStage::UtteranceStart, 0.05),
             (TrialStage::FirstPartial, partial),
             (TrialStage::Stop, partial + 1.0),
-            (TrialStage::TailSent, partial + 1.1),
             (TrialStage::FinishSent, partial + 1.2),
             (TrialStage::FinalReceived, partial + 1.0 + stop_to_final),
             (
@@ -138,4 +137,24 @@ fn gate_serializes_with_stage_timestamps_and_percentiles() {
     ] {
         assert!(value.get(field).is_some(), "missing field {field}");
     }
+}
+
+/// Trials that never recorded `InjectionComplete` (a run without
+/// `--inject`) leave the stop-to-inject percentile unmeasured: the gate is
+/// unverified and not passed, however good the other intervals are.
+#[test]
+fn unmeasured_injection_marks_the_gate_unverified_not_passed() {
+    let outcomes: Vec<TrialOutcome> = (0..100)
+        .map(|_| {
+            let mut outcome = trial(0.3, 0.4, 0.7);
+            outcome
+                .stages
+                .retain(|(stage, _)| *stage != TrialStage::InjectionComplete);
+            outcome
+        })
+        .collect();
+    let gate = evaluate_gate(&outcomes, &LatencyThresholds::default());
+    assert!(gate.stop_to_inject_p99.is_none());
+    assert!(gate.unverified, "{gate:?}");
+    assert!(!gate.passed);
 }
