@@ -14,6 +14,10 @@ tagged releases yet; entries are grouped by the day the work landed on
   (0417c78)
 
 ### Fixed
+- The daemon's evdev push-to-talk key keeps working after a keyboard is
+  unplugged and replugged or re-enumerated (USB reset, KVM switch): the
+  listener watches `/dev/input` with inotify instead of enumerating
+  devices once at startup, and `hotkey.keyboards` in the status follows.
 - `voiceless doctor` runs its blocking checks off the Tokio runtime thread.
   (156f6a4)
 - `voiceless record --seconds N` now stops `pw-record` after N seconds; the

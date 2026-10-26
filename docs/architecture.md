@@ -251,8 +251,10 @@ gateway loop.
   `Cancel`, `Status`), the evdev listener, the portal shortcut and the
   console's `/api/session/*` endpoints.
 - **Hotkey gestures.** `hotkey::listen` watches every keyboard that has
-  `[hotkey] key` (read-only, never grabbed; needs the `input` group) and
-  reports presses with Ctrl state. `daemon::HotkeyMachine` turns them into
+  `[hotkey] key` (read-only, never grabbed; needs the `input` group),
+  follows hotplug through an inotify watch on `/dev/input` (a replugged or
+  re-enumerated keyboard is picked up again) and reports presses with Ctrl
+  state. `daemon::HotkeyMachine` turns them into
   gestures: a press while idle starts a session (`ctrl_mode` when Ctrl is
   held, else `mode` or the daemon default); releasing after
   `hold_threshold_ms` stops it (hold-to-talk); releasing earlier keeps

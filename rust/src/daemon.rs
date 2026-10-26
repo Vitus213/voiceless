@@ -580,7 +580,8 @@ pub struct EngineStatus {
 pub struct HotkeyStatus {
     /// Configured evdev key name; `None` when `[hotkey] key` is unset.
     pub key: Option<String>,
-    /// Input devices being watched for the key (0 means no read access).
+    /// Input devices being watched for the key; follows hotplug. 0 means no
+    /// read access or no keyboard with the key plugged in.
     pub keyboards: usize,
     /// Unknown key name or no readable keyboard.
     pub error: Option<String>,
@@ -824,10 +825,11 @@ async fn load_engine(shared: &std::sync::Arc<DaemonShared>, config: &crate::conf
 }
 
 /// Start the evdev push-to-talk listener for `[hotkey] key`; returns the
-/// tasks to abort on reload (one per watched device plus the forwarder that
-/// turns `KeyEvent`s into `DaemonCommand::Key`). Every failure (key unset,
-/// unknown key name, no readable keyboard) yields no tasks and is reported
-/// through `DaemonStatus::hotkey`; the daemon keeps running without a key.
+/// tasks to abort on reload (the listener, which owns every device watch,
+/// plus the forwarder that turns `KeyEvent`s into `DaemonCommand::Key`).
+/// A key unset or an unknown key name yields no tasks; both, and a
+/// keyboard count of 0 (now or after an unplug), are reported through
+/// `DaemonStatus::hotkey`; the daemon keeps running without a key.
 fn start_hotkey(
     shared: &std::sync::Arc<DaemonShared>,
     config: &crate::config::AppConfig,
@@ -850,38 +852,40 @@ fn start_hotkey(
         }
     };
     let (key_tx, mut key_rx) = mpsc::channel(16);
-    let mut tasks = crate::hotkey::listen(key, key_tx);
-    // `listen` returns no task when no device could be opened, which on a
-    // desktop almost always means the user is not in the `input` group.
-    let error = if tasks.is_empty() {
-        let message = format!(
-            "no readable keyboard has {name}; add your user to the `input` group and log in again"
-        );
-        shared.log(format!("Voiceless: {message}"));
-        Some(message)
-    } else {
-        shared.log(format!(
-            "Voiceless: push-to-talk on {name} ({} keyboards)",
-            tasks.len()
-        ));
-        None
-    };
-    shared.update(|status| {
-        status.hotkey = HotkeyStatus {
-            key: Some(name.clone()),
-            keyboards: tasks.len(),
-            error,
-        }
+    // Runs once before `listen` returns, then on every hotplug change.
+    let reporter = shared.clone();
+    let listener = crate::hotkey::listen(key, key_tx, move |keyboards| {
+        // 0 on a desktop almost always means the user is not in the
+        // `input` group, unless the only keyboard was just unplugged.
+        let error = if keyboards == 0 {
+            let message = format!(
+                "no readable keyboard has {name}; plug one in, or add your user to the `input` group and log in again"
+            );
+            reporter.log(format!("Voiceless: {message}"));
+            Some(message)
+        } else {
+            reporter.log(format!(
+                "Voiceless: push-to-talk on {name} ({keyboards} keyboards)"
+            ));
+            None
+        };
+        reporter.update(|status| {
+            status.hotkey = HotkeyStatus {
+                key: Some(name.clone()),
+                keyboards,
+                error,
+            }
+        });
     });
     let commands = shared.commands.clone();
-    tasks.push(tokio::spawn(async move {
+    let forwarder = tokio::spawn(async move {
         while let Some(event) = key_rx.recv().await {
             if commands.send(DaemonCommand::Key(event)).await.is_err() {
                 break;
             }
         }
-    }));
-    tasks
+    });
+    vec![listener, forwarder]
 }
 
 /// Derive per-session metrics from the event stream: audio length (record

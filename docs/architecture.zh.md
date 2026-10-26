@@ -207,7 +207,8 @@ Silero VAD（512 采样窗口）在停顿处切分音频流。保留 10 个窗�
   `Start(mode)`、`StartSession(mode, inject)`、`Stop`、`Cancel`、`Status`）、
   evdev 监听、门户快捷键，以及控制台的 `/api/session/*` 端点。
 - **热键手势。** `hotkey::listen` 监视每个拥有 `[hotkey] key` 的键盘（只读、
-  不抢占；需要 `input` 组），报告按下及 Ctrl 状态。`daemon::HotkeyMachine`
+  不抢占；需要 `input` 组），通过对 `/dev/input` 的 inotify 监视跟随热插拔
+  （重新插拔或重新枚举的键盘会被重新接上），报告按下及 Ctrl 状态。`daemon::HotkeyMachine`
   把它们变成手势：空闲时按下开始会话（按着 Ctrl 用 `ctrl_mode`，否则用 `mode`
   或 daemon 默认）；超过 `hold_threshold_ms` 后松开则停止（按住说话）；更早
   松开则继续录音直到下次按下（短按切换）；录音中任何按下都停止。
