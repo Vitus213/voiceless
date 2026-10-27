@@ -145,7 +145,12 @@ in
     systemd.user.services.voiceless-overlay = lib.mkIf cfg.overlay.enable {
       Unit = {
         Description = "Voiceless overlay event watcher";
+        # graphical-session.target must be listed: a target adds After= on
+        # every unit it Wants unless that unit orders itself After the
+        # target, which would close a cycle through voiceless.service and
+        # make systemd drop this job at login.
         After = [
+          "graphical-session.target"
           "voiceless.service"
           "voiceless-overlay-eww.service"
         ];

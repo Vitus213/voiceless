@@ -18,6 +18,11 @@ tagged releases yet; entries are grouped by the day the work landed on
   unplugged and replugged or re-enumerated (USB reset, KVM switch): the
   listener watches `/dev/input` with inotify instead of enumerating
   devices once at startup, and `hotkey.keyboards` in the status follows.
+- The overlay watcher starts at login again: its unit now orders itself
+  `After=graphical-session.target`, so systemd no longer breaks an ordering
+  cycle (`voiceless-overlay.service` → `voiceless.service` →
+  `graphical-session.target` → `voiceless-overlay.service`) by deleting the
+  job, which left the pill dead after every reboot.
 - `voiceless doctor` runs its blocking checks off the Tokio runtime thread.
   (156f6a4)
 - `voiceless record --seconds N` now stops `pw-record` after N seconds; the
