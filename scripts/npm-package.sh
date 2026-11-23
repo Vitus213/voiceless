@@ -8,10 +8,11 @@
 # needs the NVIDIA driver libraries to load. The release workflow therefore
 # builds the crate with plain cargo on a stock distribution and runs this
 # script on the result. The package is the binary plus every shared object
-# `sherpa-onnx-sys` copied into the profile directory: that crate also
-# emits `-rpath,$ORIGIN`, so the libraries load from the directory the
-# binary lives in (`bin/`; npm's `.bin` entry is a symlink and the loader
-# resolves $ORIGIN through it).
+# `sherpa-onnx-sys` copied into the profile directory. They load from the
+# directory the binary lives in (`bin/`; npm's `.bin` entry is a symlink and
+# the loader resolves $ORIGIN through it) through the runpath the workflow
+# passes in RUSTFLAGS: the crate's own `cargo:rustc-link-arg` rpath does not
+# reach dependent binaries.
 #
 # Name, version, description and license come from rust/Cargo.toml, so a
 # release bumps one place. Linux x86_64 only: the `cpu` field is fixed.

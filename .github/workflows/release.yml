@@ -64,8 +64,14 @@ jobs:
             exit 1
           fi
 
+      # sherpa-onnx-sys emits `-rpath,$ORIGIN` with cargo:rustc-link-arg, but
+      # Cargo applies those only to that crate's own targets: a binary that
+      # depends on it is linked without any runpath and cannot find the
+      # libraries shipped next to it. The link arg has to come from here.
       - name: Build
         working-directory: rust
+        env:
+          RUSTFLAGS: -C link-arg=-Wl,-rpath,$ORIGIN
         run: cargo build --release --locked
 
       - name: Package
