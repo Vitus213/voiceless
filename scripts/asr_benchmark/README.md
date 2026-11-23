@@ -36,6 +36,25 @@ BAILIAN_API_KEY=... nix develop --command python scripts/asr_benchmark/benchmark
 `benchmark.py --help` 可见全部选项。本地模型（`sensevoice`、`qwen3-sherpa`、
 `hybrid`）依赖仓库模型目录已安装（`type4me-linux model install sensevoice-int8`）。
 
+## 本地远讲与流式延迟
+
+先准备所选语料的 WAV，安装 `sense-voice-int8` 和 `silero-vad`。测试降噪时还需安装 `gtcrn`。
+
+```bash
+python3 scripts/asr_benchmark/replay_local.py --binary ./rust/target/debug/voiceless --split test
+python3 scripts/asr_benchmark/replay_local.py --binary ./rust/target/debug/voiceless --split test --denoise
+```
+
+脚本用 `ffmpeg` 转换到 16 kHz PCM，以 32 毫秒节奏驱动独立的 `voiceless stream` 进程。
+它按原音、两档模拟远讲和纯噪声输出 JSONL。每行包含采集启动耗时、录音开始到首条非空预览的耗时、
+预览更新间最大间隔、结束到最终文本的耗时、内容 CER 和最终文本。样本可通过 `--sample` 缩小，
+条件可通过 `--condition` 缩小。比较不同构建时使用同一语料、模型和机器。纯噪声行的 CER 为 `null`，
+可用非空文本计数检查误触发。此回放包含独立进程启动和模型校验，测量点为 CLI 转写事件。
+
+用 `--model qwen3-asr-0.6b-int8 --fast-preview` 可在标准 CPU 构建上验证 SenseVoice 预览与 Qwen ONNX 定稿。
+用 `--model qwen3-asr-1.7b-gguf --fast-preview` 可对照 GGUF 定稿，需使用支持 GGUF 的构建。
+运行前安装所选的定稿模型与 `sense-voice-int8`。
+
 ## 度量
 
 - **内容 CER**：忽略标点与空白（NFKC、小写）后的字符编辑距离 / 参考长度 —— 识别准确度。
