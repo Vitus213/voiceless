@@ -33,7 +33,9 @@ BUN_INPUTS = {
 }
 SYSTEM_LIBRARIES = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
                     "libstdc++.so.6", "libgcc_s.so.1", "libutil.so.1"}
-SYMBOL_CEILINGS = {"GLIBC": (2, 35), "GLIBCXX": (3, 4, 29), "CXXABI": (1, 3, 13)}
+# Ubuntu 22.04 ships libstdc++ from GCC 12, so GLIBCXX_3.4.30 belongs to the
+# baseline although the build runs under g++-11.
+SYMBOL_CEILINGS = {"GLIBC": (2, 35), "GLIBCXX": (3, 4, 30), "CXXABI": (1, 3, 13)}
 
 
 def unpack(archive, root, prefix=""):
@@ -83,9 +85,11 @@ def verify_elf(tree, arch, env):
         for family, ceiling in SYMBOL_CEILINGS.items():
             for symbol in re.findall(rf"\bName: ({family}_[\w.]+)", needs):
                 version = symbol.split("_", 1)[1]
-                require(re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version) and
-                        tuple(map(int, version.split("."))) <= ceiling,
-                        f"{path.name} requires unsupported symbol version {symbol}")
+                if not (re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version) and
+                        tuple(map(int, version.split("."))) <= ceiling):
+                    bound = re.findall(rf"\sUND\s+(\S+)@{re.escape(symbol)}\b",
+                                       output("readelf", "--dyn-syms", "--wide", path))
+                    raise ValueError(f"{path.name} requires unsupported symbol version {symbol}: {bound}")
         notes = output("readelf", "--notes", "--wide", path)
         require(not re.search(r"x86 ISA needed:.*x86-64-v[234]", notes),
                 f"{path.name} declares an x86-64 ISA above the baseline")
