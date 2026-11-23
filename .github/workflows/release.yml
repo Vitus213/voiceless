@@ -71,6 +71,13 @@ jobs:
       - name: Package
         run: scripts/npm-package.sh --target-dir rust/target/release --out dist
 
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-npm
+          path: dist/*.tgz
+          if-no-files-found: error
+
       - name: Smoke test
         run: |
           tarballs=(dist/*.tgz)
@@ -97,10 +104,14 @@ jobs:
           chmod a-x "$prebuilt"
           trap 'chmod u+x "$prebuilt"' EXIT
 
+          echo "dynamic section of the binary:"
+          readelf -d "$pkg/bin/voiceless" | grep -E 'NEEDED|RPATH|RUNPATH'
+
           unresolved=$(ldd "$pkg"/bin/* 2>/dev/null | grep -E 'not found|/nix/store' || true)
           if [ -n "$unresolved" ]; then
             echo "the package does not carry every library it needs:" >&2
             echo "$unresolved" >&2
+            ls -la "$pkg/bin" >&2
             exit 1
           fi
           got=$("$prefix/bin/voiceless" --version)
@@ -112,13 +123,6 @@ jobs:
           echo "highest symbol versions the package needs:"
           objdump -T "$pkg"/bin/* | grep -oE '(GLIBC|GLIBCXX|CXXABI)_[0-9.]+' \
             | sort -uV | awk -F_ '{v[$1]=$2} END {for (k in v) print k, v[k]}'
-
-      - name: Upload tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: voiceless-npm
-          path: dist/*.tgz
-          if-no-files-found: error
 
   publish:
     name: Publish to npm
