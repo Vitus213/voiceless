@@ -87,6 +87,7 @@ nix/                 Home Manager module, Fcitx5 bridge package
 docs/                architecture, console API, historical plans
 openspec/            specs and change proposals
 scripts/asr_benchmark/  corpus, TTS generation and normalization for `benchmark asr`
+scripts/npm-package.sh packs a plain-cargo build as the npm package (release workflow)
 ```
 
 Read `docs/architecture.md` before touching the session path; it lists the
@@ -152,7 +153,6 @@ unless the README uses them.
 
 ## Releasing
 
-There is no release pipeline yet. Users pin the flake by revision, so
-"shipping" means pushing to `main`, bumping the `voiceless` input in the
-consumer's `flake.lock`, and `home-manager switch`. Keep `CHANGELOG.md`
-current so a tag can be cut from it later.
+There is no release pipeline for the flake: users pin it by revision, so "shipping" to them means pushing to `main`, bumping the `voiceless` input in the consumer's `flake.lock`, and `home-manager switch`.
+
+The npm package for other Linux distributions comes from `.github/workflows/release.yml`. To release, bump `version` in `rust/Cargo.toml` (and `Cargo.lock`, which `cargo build --locked` checks), bring `CHANGELOG.md` up to date, then push a tag that matches the crate version, for example `v0.1.0`. The workflow builds the CPU binary with plain cargo on Ubuntu 24.04, packs it with `scripts/npm-package.sh`, smoke-tests the tarball and publishes it to npm with the `NPM_TOKEN` repository secret. Pull requests that touch the workflow or the script run the same build and smoke test without publishing; every run keeps the tarball as the `voiceless-npm` artifact.

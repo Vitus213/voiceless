@@ -30,7 +30,7 @@ Contents: [Compatibility](#compatibility) · [Install](#install) · [First run](
 
 | Layer | Requirement | Note |
 | --- | --- | --- |
-| OS | NixOS or Linux, `x86_64` or `aarch64` | The flake declares only these two systems |
+| OS | NixOS or Linux, `x86_64` or `aarch64` | The flake declares only these two systems; the npm package is `x86_64` only |
 | Display server | Wayland | Injection uses `wtype`; the clipboard method and fallback use `wl-copy` |
 | Audio | PipeWire | Capture spawns `pw-record` (16 kHz mono PCM16) |
 | Compositor shortcuts | XDG Desktop Portal `GlobalShortcuts` (best effort) | Without the portal, the `dev.voiceless.Daemon` D-Bus bus works; the Home Manager module ships a Sway binding |
@@ -99,6 +99,17 @@ The flake includes `homeManagerModules.default`. The module performs these tasks
 Do not put API keys in `settings`: Home Manager writes the generated file into the world-readable Nix store, and Voiceless refuses to load a file that contains `api_key` or `access_key` unless its mode is `0600` or stricter. For a cloud backend, leave `settings` empty and write `~/.config/voiceless/config.toml` yourself with mode `0600`, or let the web console write the key into that file.
 
 `shortcuts.sway` adds only the Sway binding. You configure the GlobalShortcuts portal backend at the NixOS level. Without the portal, the daemon still works through D-Bus.
+
+### Install from npm (other Linux distributions, CPU only)
+
+The `voiceless` npm package is the CPU build (the features of `packages.voiceless-cpu`, no GGUF/CUDA engine) compiled with plain `cargo` on Ubuntu 24.04 and shipped with its Sherpa-ONNX libraries. npm installs it on x86_64 Linux with glibc only; the binary needs glibc 2.39 or newer.
+
+```bash
+npm install -g voiceless
+voiceless doctor
+```
+
+The package carries the binary and its libraries and nothing else. You provide the runtime: a Wayland session, PipeWire (`pw-record`), `wtype`, `wl-clipboard`, and read access to the keyboard's `/dev/input/event*` device for the push-to-talk key (usually the `input` group). There is no daemon unit or Home Manager module in the package; start `voiceless daemon` from your own session manager if you want the hotkey and the web console.
 
 ### Build from source (development)
 

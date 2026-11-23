@@ -78,6 +78,7 @@ nix/                 Home Manager 模块、Fcitx5 桥接包
 docs/                架构、控制台 API、历史方案
 openspec/            规格与变更提案
 scripts/asr_benchmark/  `benchmark asr` 用的语料、TTS 生成与归一化
+scripts/npm-package.sh 把普通 cargo 构建产物打成 npm 包（发布工作流）
 ```
 
 动会话路径之前先读 `docs/architecture.zh.md`，里面列出了测试强制的不变量
@@ -129,6 +130,6 @@ Conventional-commit 风格，祈使语气，一次提交一个改动：`feat: �
 
 ## 发布
 
-目前没有发布流水线。用户按 revision 固定 flake，所以「发版」就是推到 `main`、
-在使用方的 `flake.lock` 里提升 `voiceless` 输入、再 `home-manager switch`。
-保持 `CHANGELOG.md` 最新，以后打 tag 可以直接从它出。
+flake 没有发布流水线：用户按 revision 固定它，所以面向他们的「发版」就是推到 `main`、在使用方的 `flake.lock` 里提升 `voiceless` 输入、再 `home-manager switch`。
+
+面向其他 Linux 发行版的 npm 包由 `.github/workflows/release.yml` 产出。发版时：改 `rust/Cargo.toml` 的 `version`（以及 `Cargo.lock`，`cargo build --locked` 会检查它），把 `CHANGELOG.md` 更新到位，再推送与 crate 版本一致的 tag，例如 `v0.1.0`。工作流在 Ubuntu 24.04 上用普通 cargo 构建 CPU 二进制，用 `scripts/npm-package.sh` 打包，对 tarball 做冒烟测试，然后用仓库 secret `NPM_TOKEN` 发布到 npm。改动工作流或打包脚本的 pull request 会跑同样的构建和冒烟测试但不发布；每次运行都把 tarball 留作 `voiceless-npm` artifact。

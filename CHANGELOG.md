@@ -7,6 +7,10 @@ tagged releases yet; entries are grouped by the day the work landed on
 ## Unreleased
 
 ### Added
+- The npm package `voiceless` for Linux x86_64: `.github/workflows/release.yml`
+  builds the CPU binary with plain cargo, packs it with `scripts/npm-package.sh`
+  and publishes it on a `v*` tag that matches the crate version. See
+  "Install from npm" in the README.
 - `voiceless stream` with a local backend now delegates to a running
   `voiceless daemon` over the new D-Bus method `StartSession(mode, inject)`
   instead of loading a second copy of the model (which could exhaust an

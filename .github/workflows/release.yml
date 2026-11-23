@@ -1,0 +1,140 @@
+# Release: builds the Linux x86_64 CPU binary with plain cargo on a stock
+# distribution, packs it as the npm package and publishes it on `v*` tags.
+#
+# Why not the flake output: the Nix package is not distributable outside
+# NixOS (its ELF interpreter and runpath point into /nix/store) and the
+# default package is the CUDA build, which needs the NVIDIA driver
+# libraries to load. This workflow builds the default features, the same
+# set as `packages.voiceless-cpu`, on ubuntu-24.04, so the binary needs
+# that distribution's glibc (2.39) or newer and no GPU.
+#
+# Triggers: a `v*` tag builds and publishes; a pull request that touches
+# this file or the packaging script runs the same build and smoke test
+# without publishing, so the release path is proven before a tag;
+# workflow_dispatch builds without publishing. The tarball is attached to
+# every run as the `voiceless-npm` artifact.
+#
+# Publishing needs the `NPM_TOKEN` repository secret, an npm access token
+# with publish permission. Without it the publish job fails on a tag and
+# the tarball stays in the artifact.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/npm-package.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: npm package (linux-x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # The tarball is named after the crate version; a tag that disagrees
+      # would publish it under a version the source does not claim.
+      - name: Check tag matches crate version
+        if: github.ref_type == 'tag'
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -n 1)
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$tag" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crate version $crate" >&2
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked
+
+      - name: Package
+        run: scripts/npm-package.sh --target-dir rust/target/release --out dist
+
+      - name: Smoke test
+        run: |
+          tarballs=(dist/*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "expected one tarball in dist/" >&2
+            exit 1
+          fi
+          tarball=${tarballs[0]}
+          version=$(basename "$tarball" .tgz)
+          version=${version#voiceless-}
+
+          prefix=$(mktemp -d)
+          npm install --global --prefix "$prefix" "$tarball"
+          pkg="$prefix/lib/node_modules/voiceless"
+
+          # sherpa-onnx-sys writes its download directory into the runpath
+          # ahead of $ORIGIN. Make it unreadable so the loader is left with
+          # $ORIGIN alone, as on a machine that never saw the build tree.
+          prebuilt=rust/target/sherpa-onnx-prebuilt
+          chmod -R a-rx "$prebuilt"
+          trap 'chmod -R u+rx "$prebuilt"' EXIT
+
+          unresolved=$(ldd "$pkg"/bin/* 2>/dev/null | grep -E 'not found|/nix/store' || true)
+          if [ -n "$unresolved" ]; then
+            echo "the package does not carry every library it needs:" >&2
+            echo "$unresolved" >&2
+            exit 1
+          fi
+          got=$("$prefix/bin/voiceless" --version)
+          if [ "$got" != "voiceless $version" ]; then
+            echo "expected 'voiceless $version', got '$got'" >&2
+            exit 1
+          fi
+
+          echo "highest symbol versions the package needs:"
+          objdump -T "$pkg"/bin/* | grep -oE '(GLIBC|GLIBCXX|CXXABI)_[0-9.]+' \
+            | sort -uV | awk -F_ '{v[$1]=$2} END {for (k in v) print k, v[k]}'
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-npm
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: package
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: voiceless-npm
+          path: dist
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish
+        run: npm publish dist/*.tgz
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

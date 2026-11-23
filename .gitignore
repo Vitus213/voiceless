@@ -7,4 +7,5 @@ models/
 reports/
 !scripts/asr_benchmark/reports/
 rust/target/
+dist/
 *.wav

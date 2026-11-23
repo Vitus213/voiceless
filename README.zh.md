@@ -30,7 +30,7 @@ nix run github:Vitus213/voiceless -- stream   # 说话，按 Ctrl-C，Voiceless 
 
 | 层 | 要求 | 说明 |
 | --- | --- | --- |
-| 系统 | NixOS 或 Linux，`x86_64` 或 `aarch64` | flake 仅声明这两个 system |
+| 系统 | NixOS 或 Linux，`x86_64` 或 `aarch64` | flake 仅声明这两个 system；npm 包只有 `x86_64` |
 | 显示服务器 | Wayland | 注入用 `wtype`，剪贴板方式与兜底用 `wl-copy` |
 | 音频 | PipeWire | 采集进程为 `pw-record`（16 kHz 单声道 PCM16） |
 | 合成器快捷键 | XDG Desktop Portal `GlobalShortcuts`（尽力而为） | 无门户时 `dev.voiceless.Daemon` D-Bus 总线可用；Home Manager 模块自带 Sway 绑定 |
@@ -99,6 +99,17 @@ flake 提供 `homeManagerModules.default`。模块完成以下任务：
 不要把 API 密钥写进 `settings`：Home Manager 生成的文件放在所有用户可读的 Nix store 里，而 Voiceless 拒绝加载含 `api_key` 或 `access_key` 且权限宽于 `0600` 的文件。使用云端后端时，让 `settings` 留空，自己以 `0600` 权限写 `~/.config/voiceless/config.toml`，或者通过 Web 控制台把密钥写进该文件。
 
 `shortcuts.sway` 只添加 Sway 绑定。GlobalShortcuts 门户后端在 NixOS 层配置。无门户时 daemon 仍通过 D-Bus 工作。
+
+### 通过 npm 安装（其他 Linux 发行版，仅 CPU）
+
+npm 包 `voiceless` 是 CPU 构建（与 `packages.voiceless-cpu` 相同的 feature，不含 GGUF/CUDA 引擎），在 Ubuntu 24.04 上用普通 `cargo` 编译，并随包附带 Sherpa-ONNX 库。npm 只在 x86_64 Linux 的 glibc 环境安装它；二进制需要 glibc 2.39 及以上。
+
+```bash
+npm install -g voiceless
+voiceless doctor
+```
+
+包里只有二进制和它的库。运行环境由你提供：Wayland 会话、PipeWire（`pw-record`）、`wtype`、`wl-clipboard`，以及读取键盘 `/dev/input/event*` 设备的权限（通常是 `input` 组），用于按键说话的热键。包内没有 daemon 单元或 Home Manager 模块；需要热键和 Web 控制台时，用你自己的会话管理器启动 `voiceless daemon`。
 
 ### 源码构建（开发）
 
