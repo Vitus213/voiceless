@@ -4,7 +4,7 @@
 
 同一版原生 Linux 构建生成两种安装包。npm 发布后用 `bun add -g voiceless` 安装，也可从 GitHub Releases 下载对应压缩包，校验后用 `voiceless install` 创建 `~/.local/bin/voiceless`。两种入口都提供 `voiceless update`。独立安装依赖系统 glibc 2.35，不依赖 Nix、Rust 工具链、Bun、Node.js 或 `sudo`。构建流程提供 x86-64 与 ARM64 标准 CPU 候选包。 [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
 
-CLI 已实现 `install`、`update` 和独立安装的 `update --rollback`。候选包工作流只上传构建产物。公开发布还需确认 npm 包名归属、两种架构的验证结果和第三方再分发条件。 [CLI 源码](../rust/src/update.rs) · [候选包工作流](../.github/workflows/native-release.yml) · [项目 Releases](https://github.com/Vitus213/voiceless/releases)
+CLI 已实现 `install`、`update` 和独立安装的 `update --rollback`。版本标签触发自动发布，手动运行用于构建和检查候选包。首次公开发布需确认 npm 包名归属及第三方再分发条件。 [CLI 源码](../rust/src/update.rs) · [发布工作流](../.github/workflows/native-release.yml) · [项目 Releases](https://github.com/Vitus213/voiceless/releases)
 
 ## Bun 全局安装与 bunx
 
@@ -68,6 +68,16 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 - **应用实现。** Bun 负责写入其全局目录。独立安装维护自己的版本目录和稳定入口。安装及更新只管理程序和推理库。桌面服务迁移、Fcitx5 和用户数据都由各自的入口管理。 [CLI 分发入口](../rust/src/main.rs) · [更新实现](../rust/src/update.rs)
 - **Release 产物。** 在匹配的 Ubuntu 22.04 主机上用 `python3 scripts/release/native.py <输出目录>` 构建，再用 `python3 -B scripts/release/validate.py <输出目录>` 验证。候选包附带推理库和第三方声明。公开发布时应保持 Cargo 版本、tag 和产物版本一致，并在发布说明里列出经实测的系统和架构。 [候选包工作流](../.github/workflows/native-release.yml) · [GitHub 不可变发布流程](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases#best-practices-for-publishing-immutable-releases)
 - **Bun 包。** 先确认维护者控制的包名或 scope。npm 平台包复用同一版本的原生构建，包含相应的共享库和许可证。平台包先发并确认可取，再发布主包并更新 `latest`。用隔离 Bun 全局目录验收首装、更新到确切版本、命令路径及真实本地识别。 [npm 发布](https://docs.npmjs.com/cli/v11/commands/npm-publish/) · [npm dist-tag](https://docs.npmjs.com/cli/v11/commands/npm-dist-tag/) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
+
+## 自动发版
+
+首次发版前确认维护者能发布 `voiceless-linux-x86_64-gnu`、`voiceless-linux-aarch64-gnu` 和 `voiceless`。新包首次创建时，可以在 GitHub 仓库 Actions secrets 中临时设置 `NPM_BOOTSTRAP_TOKEN`，使用允许发布相应包且启用 bypass 2FA 的短期 npm granular access token。已有包可以直接绑定 npm Trusted Publisher。为三个包分别填写用户 `Vitus213`、仓库 `voiceless`、文件 `native-release.yml`，勾选允许 `npm publish`。首次建包完成后可删除引导 token，后续由工作流通过 OIDC 发布。 [npm 首次发布](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/#direct-publishing) · [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/)
+
+1. 将 `rust/Cargo.toml`、`rust/Cargo.lock` 和 `CHANGELOG.md` 的版本改动合入默认分支。手动运行工作流可以提前看两种架构的候选包及额外验证结果。
+2. 在对应提交打 `vX.Y.Z` 标签并推送该标签。标签须和 Cargo 版本一致。
+3. 工作流验证两种架构后，将独立包及 `SHA256SUMS` 上传到 GitHub 草稿，依次发布两个 npm 平台包和 `voiceless` 主包。npm 核对成功后才公开 GitHub Release。npm 用户此后通过 `bun install -g voiceless` 安装，现有用户通过 `voiceless update` 升级。
+
+如果发布步骤中断，在原工作流运行中重跑失败的 job，沿用该次验收通过的产物。发布脚本会核对已发布 npm 版本和草稿资产的摘要，并继续缺少的步骤。若版本已存在但内容不同，应检查对应的发布记录。需要修复已公开版本内容时，发布一个新版本。
 
 ## 本机验证
 

@@ -152,7 +152,13 @@ unless the README uses them.
 
 ## Releasing
 
-There is no release pipeline yet. Users pin the flake by revision, so
-"shipping" means pushing to `main`, bumping the `voiceless` input in the
-consumer's `flake.lock`, and `home-manager switch`. Keep `CHANGELOG.md`
-current so a tag can be cut from it later.
+Merge the version bump in `rust/Cargo.toml` and `rust/Cargo.lock` along
+with the release notes in `CHANGELOG.md`. Push a matching `vX.Y.Z` tag from
+the default branch. The [native release workflow](.github/workflows/native-release.yml)
+builds and validates both Linux architectures before publishing the npm platform
+packages, the main npm package and the GitHub Release. A manual workflow run
+builds candidates for inspection. See [release setup and recovery](docs/non-nix-distribution.md#自动发版)
+for first-publish credentials and how to retry a partial release.
+
+Nix consumers update the pinned `voiceless` flake input and apply their Home
+Manager or NixOS configuration.

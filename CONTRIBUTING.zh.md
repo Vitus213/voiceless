@@ -129,6 +129,9 @@ Conventional-commit 风格，祈使语气，一次提交一个改动：`feat: �
 
 ## 发布
 
-目前没有发布流水线。用户按 revision 固定 flake，所以「发版」就是推到 `main`、
-在使用方的 `flake.lock` 里提升 `voiceless` 输入、再 `home-manager switch`。
-保持 `CHANGELOG.md` 最新，以后打 tag 可以直接从它出。
+把 `rust/Cargo.toml`、`rust/Cargo.lock` 的版本和 `CHANGELOG.md` 合入默认分支，再推送匹配的
+`vX.Y.Z` 标签。[原生发布工作流](.github/workflows/native-release.yml)会验收两种 Linux 架构，
+再发布 npm 平台包、主包和 GitHub Release。手动运行工作流用于生成候选包。
+首次授权和部分发布后的重试说明见 [自动发版](docs/non-nix-distribution.md#自动发版)。
+
+Nix 用户仍通过更新 `flake.lock` 中的 `voiceless` 输入并应用 Home Manager 或 NixOS 配置升级。

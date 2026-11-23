@@ -10,6 +10,8 @@ tagged releases yet; entries are grouped by the day the work landed on
 - Build standard CPU Linux release archives and matching Bun packages from
   the same native payload. `voiceless update` follows the existing installation
   manager. Standalone installations can roll back to the previous local release.
+- Stable version tags publish validated Linux packages to npm and GitHub
+  Releases. Manual workflow runs produce candidates for inspection.
 - Optional `local-offline` speech enhancement runs GTCRN and bounded gain
   ahead of speech detection and recognition. Install the `gtcrn` model and
   enable `[local] denoise` or use the console's recognition settings.

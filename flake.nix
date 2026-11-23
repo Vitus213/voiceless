@@ -149,7 +149,7 @@
           buildRustPackage (
             {
               pname = "voiceless";
-              version = "0.1.0";
+              version = (builtins.fromTOML (builtins.readFile ./rust/Cargo.toml)).package.version;
               src = ./rust;
               cargoLock.lockFile = ./rust/Cargo.lock;
               buildFeatures = if stack.gpu then [ "cuda" ] else pkgs.lib.optional gguf "transcribe";
