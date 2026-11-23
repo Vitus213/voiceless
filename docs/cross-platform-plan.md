@@ -151,9 +151,11 @@ objc2-application-services = "0.3"
   路径从 XDG 改为平台数据目录（Windows `%LOCALAPPDATA%\voiceless`，macOS
   `~/Library/Application Support/voiceless`）。
 - **`sherpa-onnx` 的 dylib/DLL 必须随包分发**：build.rs 只把它们复制到 `target/<profile>`，
-  打包时要显式收进产物目录。链接期的 rpath 已经处理好了——
-  `sherpa-onnx-sys` 的 build.rs 在 macOS 上发 `-Wl,-rpath,@loader_path`、Linux 上 `$ORIGIN`，
-  Windows 则按 exe 同目录查找 DLL，所以"库放二进制旁边"即可，不需要 `install_name_tool` 二次修补。
+  打包时要显式收进产物目录。链接期的 rpath 要由顶层构建自己传：`sherpa-onnx-sys` 的 build.rs
+  虽然用 `cargo:rustc-link-arg` 发了 rpath（macOS `@loader_path`、Linux `$ORIGIN`），但依赖它的
+  二进制链接后没有任何 runpath（普通 cargo 构建后 `readelf -d` 实测）。所以
+  `scripts/release/native.py` 在链接后用 patchelf 写入 `$ORIGIN/../lib`；Windows 则按 exe
+  同目录查找 DLL，都不需要 `install_name_tool` 二次修补。
 
 ---
 
