@@ -47,8 +47,8 @@ python3 scripts/asr_benchmark/replay_local.py --binary ./rust/target/debug/voice
 
 脚本用 `ffmpeg` 转换到 16 kHz PCM，以 32 毫秒节奏驱动独立的 `voiceless stream` 进程。
 它按原音、两档模拟远讲和纯噪声输出 JSONL。每行包含采集启动耗时、录音开始到首条非空预览的耗时、
-预览更新间最大间隔、结束到最终文本的耗时、内容 CER 和最终文本。样本可通过 `--sample` 缩小，
-条件可通过 `--condition` 缩小。比较不同构建时使用同一语料、模型和机器。纯噪声行的 CER 为 `null`，
+录音开始、预览更新和录音结束之间的最大间隔（无预览时等于录音时长）、停录到定稿的耗时、内容 CER 和最终文本。
+样本可用 `--sample` 缩小，条件可用 `--condition` 缩小。比较不同构建时使用同一语料、模型和机器。纯噪声行的 CER 为 `null`，
 可用非空文本计数检查误触发。此回放包含独立进程启动和模型校验，测量点为 CLI 转写事件。
 
 用 `--model qwen3-asr-0.6b-int8 --fast-preview` 可在标准 CPU 构建上验证 SenseVoice 预览与 Qwen ONNX 定稿。

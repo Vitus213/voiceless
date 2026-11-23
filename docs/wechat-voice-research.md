@@ -239,7 +239,7 @@ The separate native Silero probe measured 72.51 s of detected speech without enh
 
 Keep the current `[local] denoise = true` opt-in path at a 35% mix and the current enhanced VAD settings. The paired recordings establish a large benefit for these real far-field inputs. The headset results, compute cost and one tentative misfire support keeping the opt-in choice. These clips come from public meetings and intentionally exclude annotated overlapping speech. They do not measure the user's own mic and room or the stock WeChat keyboard on the same recordings.
 
-The runs use `warm_gguf_replay.py` with `--fast-preview --pcm-manifest <subset>/clips.jsonl`, with and without `--denoise`, inside `VOICE_PRIVATE_BUS=1 dbus-run-session`. The release executable is `/nix/store/gixsfvnzld7izxv3hiqc29x9y3mmhs4i-voiceless-0.1.0/bin/.voiceless-wrapped`. The `aishell4/clips.jsonl` SHA-256 is `01774bc82af1adf5e8fd5c094f284f2f30e2b2f8ea5445f758455aaa8e03301d`. The `alimeeting/clips.jsonl` SHA-256 is `e6e120c8f0dc094dad9fdaa136582e959b4c5d44abda4f01bd5689c115b4ceb1`.
+The x86-64-v3 release runs use `warm_gguf_replay.py` with `--fast-preview --pcm-manifest <subset>/clips.jsonl`, with and without `--denoise`, inside `VOICE_PRIVATE_BUS=1 dbus-run-session`. The `aishell4/clips.jsonl` SHA-256 is `01774bc82af1adf5e8fd5c094f284f2f30e2b2f8ea5445f758455aaa8e03301d`. The `alimeeting/clips.jsonl` SHA-256 is `e6e120c8f0dc094dad9fdaa136582e959b4c5d44abda4f01bd5689c115b4ceb1`.
 
 ### Far-field onset clipping
 
@@ -372,7 +372,7 @@ In the three continuous-speech clips, the median longest inter-update gap fell f
 
 Elapsed replay time was 226.81 s and 220.20 s. Child CPU time including warm-up and capture fell from 527.42 s to 275.69 s. Logged engine readiness rose from 3.5 s to 4.4 s because the daemon loads both models. Process-family peak memory was outside the measurement. The standard CPU build passed 163 tests with two opt-in model tests ignored. An independent explicit stop-then-cancel probe returned 130 and no final text. The next capture in that daemon completed with the exact same final text as its initial capture.
 
-See `onnx-fast-preview/single.jsonl`, `dual.jsonl`, `cancel.jsonl`, `cold-after.jsonl` and the `onnx-standard-*.daemon.log` files under `gguf-replay-logs/`. `onnx-fast-preview/run_standard_preview_ab.py` runs both arms against the combined PCM manifest in `qwen-model-ab/clips.jsonl`. The tested executable was `/nix/store/ac9xfsbcnn5lp78sg89dhb97wa5hs006-voiceless-0.1.0/bin/.voiceless-wrapped`.
+See `onnx-fast-preview/single.jsonl`, `dual.jsonl`, `cancel.jsonl`, `cold-after.jsonl` and the `onnx-standard-*.daemon.log` files under `gguf-replay-logs/`. `onnx-fast-preview/run_standard_preview_ab.py` runs both arms against the combined PCM manifest in `qwen-model-ab/clips.jsonl`.
 
 #### Paraformer incremental speech and short final chunks
 
@@ -408,9 +408,9 @@ After the local finish request is queued, the coordinator now waits for a final 
 
 ### Standard CPU trial package
 
-The current source built as `.#voiceless-cpu` at `/nix/store/n3p8098y7zrwjp6mcx4j7qx30r89h3ig-voiceless-0.1.0`. Its release check passed 163 tests, with two opt-in model tests skipped by the sandbox. The public executable reported `voiceless 0.1.0`. The package uses the standard CPU stack for ONNX and Paraformer.
+The standard `.#voiceless-cpu` trial build included the Paraformer model reuse and final-chunk fixes. Its release check passed 163 tests, with two opt-in model tests skipped by the sandbox. The public executable reported `voiceless 0.1.0`. The package uses the standard CPU stack for ONNX and Paraformer.
 
-In a private D-Bus session with paced PCM, Qwen 0.6B INT8 with GTCRN and SenseVoice reproduced the three pinned baseline finals exactly. The two AliMeeting array clips showed first text at 441 and 442 ms after capture, then finalized 386 and 635 ms after stop. The room-only clip briefly showed `嗯` and ended with empty text. In a separate private daemon the explicit Paraformer model loaded once in 0.9 s. The two speech clips, room control and first-clip repeat matched the development finals, including the recovered endings `最适合` and `五个`. Median request-to-capture time was 77 ms. The desktop service remained active on the same process and start timestamp. The private replays bypassed real microphone, hotkeys and text injection.
+In a private D-Bus session with paced PCM, Qwen 0.6B INT8 with GTCRN and SenseVoice reproduced the three pinned baseline finals exactly. The two AliMeeting array clips showed first text at 441 and 442 ms after capture, then finalized 386 and 635 ms after stop. The room-only clip briefly showed `嗯` and ended with empty text. In a separate private daemon the explicit Paraformer model loaded once in 0.9 s. The two speech clips, room control and first-clip repeat matched the development finals, including the recovered endings `最适合` and `五个`. Median request-to-capture time was 77 ms. The private replays bypassed real microphone, hotkeys and text injection.
 
 See `wetype-real-far/smoke_cpu_trial.py`, `trial-n3p8098y7zrwjp6mcx4j7qx30r89h3ig-onnx.jsonl`, the matching daemon log, and `paraformer-replay/trial-n3p8098y7zrwjp6mcx4j7qx30r89h3ig.jsonl` in the local research directory.
 
