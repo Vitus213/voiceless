@@ -73,6 +73,9 @@ pub enum RealtimeEvent {
     /// its confirmed segments (empty or repeated transcripts are skipped)
     /// and clears the partial.
     Completed { transcript: String },
+    /// A local segment became definite while newer speech was previewed.
+    /// Replace the unconfirmed suffix in the same snapshot as the commit.
+    SegmentFinalized { transcript: String, preview: String },
     /// The backend's answer to `finish`: the authoritative transcript of the
     /// whole session. An empty transcript makes the session fall back to the
     /// joined confirmed segments. Only honoured while the session is

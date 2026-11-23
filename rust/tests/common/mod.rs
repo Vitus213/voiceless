@@ -137,7 +137,7 @@ struct TransportState {
     before_finish: VecDeque<io::Result<RealtimeEvent>>,
     /// Events delivered only after `finish` was called (`Finished`).
     after_finish: VecDeque<io::Result<RealtimeEvent>>,
-    finished: bool,
+    final_events_at: Option<tokio::time::Instant>,
     /// Successful `send_audio` calls so far.
     appends: usize,
     /// `(append count, command)`: fire the command right after that append.
@@ -159,6 +159,7 @@ pub struct ScriptedTransport {
     state: Mutex<TransportState>,
     pub control_tx: Option<mpsc::Sender<ControlCommand>>,
     pub append_delay: Duration,
+    pub final_event_delay: Duration,
     pub finish_error: Mutex<Option<String>>,
     pub hang_on_finish: bool,
 }
@@ -172,13 +173,14 @@ impl ScriptedTransport {
             state: Mutex::new(TransportState {
                 before_finish: VecDeque::new(),
                 after_finish: VecDeque::new(),
-                finished: false,
+                final_events_at: None,
                 appends: 0,
                 triggers: Vec::new(),
                 fail_after_appends: None,
             }),
             control_tx: None,
             append_delay: Duration::ZERO,
+            final_event_delay: Duration::ZERO,
             finish_error: Mutex::new(None),
             hang_on_finish: false,
         }
@@ -244,7 +246,10 @@ impl BackendTransport for ScriptedTransport {
                 if let Some(event) = state.before_finish.pop_front() {
                     return event;
                 }
-                if state.finished {
+                if state
+                    .final_events_at
+                    .is_some_and(|at| tokio::time::Instant::now() >= at)
+                {
                     if let Some(event) = state.after_finish.pop_front() {
                         return event;
                     }
@@ -263,7 +268,8 @@ impl BackendTransport for ScriptedTransport {
         if let Some(message) = self.finish_error.lock().take() {
             return Err(io::Error::other(message));
         }
-        self.state.lock().finished = true;
+        self.state.lock().final_events_at =
+            Some(tokio::time::Instant::now() + self.final_event_delay);
         Ok(())
     }
 

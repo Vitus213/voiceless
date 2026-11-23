@@ -345,15 +345,14 @@ pub struct TextRule {
 }
 
 /// `local-offline` backend: an offline catalog model run on VAD segments.
-/// The open segment is re-decoded every `partial_interval_ms` for the live
-/// partial; `max_segment_seconds` caps a segment (the Sherpa Qwen3-ASR
-/// export holds ~25 s, GGUF models up to 60 s here).
+/// Live previews target `partial_interval_ms` after their first text.
+/// `max_segment_seconds` controls VAD segmentation for the chosen model.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
-    /// Catalog id of the offline model: `qwen3-asr-1.7b-gguf` (default) or
-    /// `qwen3-asr-0.6b-gguf` (GPU, transcribe.cpp), `qwen3-asr-0.6b-int8`
-    /// or `sense-voice-int8` (CPU, Sherpa-ONNX). Validation accepts any id
+    /// Catalog ID of the offline model: `qwen3-asr-1.7b-gguf` (default) or
+    /// `qwen3-asr-0.6b-gguf` (CPU or CUDA via transcribe.cpp), `qwen3-asr-0.6b-int8`
+    /// or `sense-voice-int8` (CPU via Sherpa-ONNX). Validation accepts any ID
     /// `offline_asr::OfflineFamily::for_model` can classify.
     pub model: String,
     /// Execution device: cuda | cpu. Unset: cuda for GGUF models, cpu for
@@ -363,9 +362,13 @@ pub struct LocalConfig {
     /// ONNX Runtime intra-op threads for Sherpa-ONNX models; default 4.
     /// GGUF models ignore it.
     pub num_threads: i32,
-    /// How often the open VAD segment is re-decoded for the live partial,
-    /// in milliseconds; default 500.
+    /// Target interval between live previews once text appears, in ms.
+    /// An expensive decode can delay the next preview. Default 500.
     pub partial_interval_ms: u64,
+    /// Use SenseVoice int8 on CPU for tentative text with Qwen ONNX or GGUF.
+    pub fast_preview: bool,
+    /// Use the local GTCRN model and bounded gain before speech detection.
+    pub denoise: bool,
     /// Unset: 30 s for GGUF models, 15 s for Sherpa-ONNX ones (see
     /// [`LocalConfig::segment_limit`]). Validated to 1..=60 (GGUF) or
     /// 1..=25 (Sherpa-ONNX).
@@ -382,6 +385,8 @@ impl Default for LocalConfig {
             provider: None,
             num_threads: 4,
             partial_interval_ms: 500,
+            fast_preview: false,
+            denoise: false,
             max_segment_seconds: None,
             hotwords: Vec::new(),
         }
@@ -426,6 +431,17 @@ impl LocalConfig {
             crate::offline_asr::OfflineFamily::for_model(&self.model),
             Ok(crate::offline_asr::OfflineFamily::Gguf)
         )
+    }
+
+    pub(crate) fn preview_model(&self) -> Option<&'static str> {
+        use crate::offline_asr::OfflineFamily;
+
+        (self.fast_preview
+            && matches!(
+                OfflineFamily::for_model(&self.model),
+                Ok(OfflineFamily::Gguf | OfflineFamily::Qwen3Asr)
+            ))
+        .then_some("sense-voice-int8")
     }
 
     /// The configured device, or the model family's default (`cuda` for

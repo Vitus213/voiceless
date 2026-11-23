@@ -35,7 +35,7 @@ Contents: [Compatibility](#compatibility) · [Install](#install) · [First run](
 | Audio | PipeWire | Capture spawns `pw-record` (16 kHz mono PCM16) |
 | Compositor shortcuts | XDG Desktop Portal `GlobalShortcuts` (best effort) | Without the portal, the `dev.voiceless.Daemon` D-Bus bus works; the Home Manager module ships a Sway binding |
 | Cloud ASR | DashScope realtime endpoint (`qwen3-asr-flash-realtime`) | Requires an API key |
-| Local ASR | Sherpa-ONNX streaming Paraformer (`streaming-paraformer-bilingual-zh-en`) | Install it with `voiceless model install`; Voiceless verifies it before each session |
+| Local ASR | Sherpa-ONNX streaming Paraformer (`streaming-paraformer-bilingual-zh-en`) | Install it with `voiceless model install`. The daemon verifies it when loading the model. |
 | Batch ASR | DashScope multimodal or local SenseVoice | Used by `transcribe` and `record` |
 
 X11, macOS and Windows are not supported.
@@ -192,11 +192,13 @@ enable_nonstream = false               # second-pass recognition of each sentenc
 hotwords = []                          # e.g. ["Voiceless", "NixOS"]
 
 [local]                                # local-offline: offline model on VAD segments
-model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf (GPU, CUDA package)
+model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf (requires a GGUF-enabled build)
                                        # qwen3-asr-0.6b-int8 | sense-voice-int8 (CPU, Sherpa-ONNX)
 provider = "cuda"                      # cuda | cpu
 num_threads = 4                        # Sherpa-ONNX models only
-partial_interval_ms = 500              # how often the open segment is re-decoded for the live partial
+partial_interval_ms = 500              # target update interval after the first live text
+fast_preview = false                   # SenseVoice CPU previews with Qwen ONNX or GGUF
+denoise = false                        # GTCRN and bounded gain before VAD and recognition
 max_segment_seconds = 30.0             # longest segment before a forced split (≤ 60 GGUF, ≤ 25 Sherpa)
 hotwords = []                          # Qwen3-ASR only
 
@@ -301,8 +303,33 @@ Security: the console listens on loopback, rejects any non-loopback `Host` (DNS 
 | `qwen3-asr-0.6b-int8` | `asr-models-2026-03-25`; `878702423` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2><br>`sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=` |
 | `sense-voice-int8` | `asr-models-2025-09-09`; `165783878` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2><br>`sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=` |
 | `silero-vad` | `asr-models`; `643854` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx><br>`sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=` |
+| `gtcrn` | `speech-enhancement-models`, 535,638 bytes | [Sherpa-ONNX GTCRN export](https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx) `sha256-53YDrAwj2sMifdLXE1s6WFy+4meQSK7PqIZlfTrhtTQ=` |
 
-The install process verifies the SRI hash and the byte count over HTTPS. It rejects archive members that are not in the allowlist. It writes a manifest with per-file hashes. It activates the model atomically with a `versions/<id>/<version>-<digest12>` directory and a `current` symlink. Voiceless verifies the model again before each session. It never uses a corrupted model. `voiceless model list --json` reports the license status in the `license_status` field. Verify the license independently before you redistribute the model.
+The install process verifies the SRI hash and byte count over HTTPS and checks archive members against the allowlist. It writes a manifest with per-file hashes and activates the model atomically through a `current` symlink to `versions/<id>/<version>-<digest12>`. Managed models are verified when loaded. If the daemon already holds a model, reload the engine or restart the daemon after activating a replacement. `voiceless model list --json` reports `license_status`. Verify the license independently before redistributing.
+
+For a quiet or distant microphone, run `voiceless model install gtcrn` and set
+`[local] denoise = true` with the `local-offline` backend. The console also
+exposes this setting on the recognition page. Enhancement runs before speech
+detection and decoding. Saved session audio comes from the original microphone
+stream. See the measured conditions in the [voice research notes](docs/wechat-voice-research.md).
+
+For faster live text with a Qwen ONNX or GGUF primary model, install SenseVoice
+with `voiceless model install sense-voice-int8` and set `[local] fast_preview = true`.
+Reload the daemon engine to apply the setting. SenseVoice runs on the CPU and
+produces the live preview. The selected Qwen model transcribes closed segments
+for final text. Preview text can differ from the final transcript. The standard
+`voiceless-cpu` package supports `qwen3-asr-0.6b-int8` with this setting.
+
+On an x86-64-v3 CPU, `nix run .#voiceless-cpu-avx2 -- doctor` uses the CPU-only
+package with an AVX2 GGUF engine. For local GGUF dictation with this package, set
+`[local] provider = "cpu"`. Both Qwen GGUF sizes support this configuration.
+Choose `model = "qwen3-asr-0.6b-gguf"` for lower finalization latency if its
+accuracy meets your needs. In the recorded Mandarin comparison, 0.6B finished
+sooner but made more transcription errors. [Model comparison](docs/wechat-voice-research.md#qwen-final-model-size-on-real-recordings)
+
+Home Manager users can select the AVX2 package with
+`programs.voiceless.package = inputs.voiceless.packages.${pkgs.system}.voiceless-cpu-avx2`.
+The standard CPU package is available as `voiceless-cpu`.
 
 ## Migration from type4me-linux
 
@@ -339,7 +366,7 @@ Design decisions:
 3. **Fixed stop order, one injection.** Stop new chunks, stop the capture, flush the tail frame, drain the queue in FIFO order, send exactly one `finish`, read the final events, type at most once. Cancel paths type no partial text.
 4. **Recording as a decorator.** `WavRecorder` wraps `AudioCapture` and mirrors chunks into a `.partial` file. Only successful sessions finalize the WAV. A mirror failure disables only the saving; it never affects recognition, injection or history. Cancel and drop remove the temporary file. Audio rows and files are created and deleted together.
 5. **Parameterized control source.** `stream::run_with_control` receives the command channel. The CLI maps SIGINT and SIGTERM (first signal stops, second cancels). The daemon maps the hotkey Activate and Cancel through a gateway state machine. The gateway allows only one session at a time.
-6. **Private XDG persistence.** The configuration has a 0600 key gate. The history is a WAL SQLite file with mode 0600. Recordings live in `data/audio/`. Models activate atomically and Voiceless verifies them before each session. User data never lives in the Nix store.
+6. **Private XDG persistence.** Configuration keys and the WAL SQLite history use 0600 permissions. Recordings live in `data/audio/`. Managed models activate atomically and are verified when loaded. User data stays outside the Nix store.
 7. **Embedded console.** `console/` is an axum server inside the daemon: loopback only, `Host` checked, a token per start, no cross-origin writes, write-only secrets. The frontend is embedded with `include_str!`. Audio URLs contain only the record id; the server reads the file path from the database row.
 8. **Strict configuration contract.** Unknown keys are errors. Removed legacy values are rejected; Voiceless never rewrites them silently.
 

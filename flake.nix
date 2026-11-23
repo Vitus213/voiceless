@@ -14,6 +14,7 @@
 #
 # Per-system outputs: packages.{default,voiceless} (CUDA stack),
 # packages.voiceless-cpu, packages.voiceless-fcitx5-bridge, apps.default,
+# packages.voiceless-cpu-avx2 on x86_64-linux adds the accelerated GGUF engine.
 # checks.default (the CPU package, whose build runs `cargo test`),
 # devShells.{default,cpu} and formatter (nixfmt over the Nix files).
 # System-independent: overlays.default (voiceless, voiceless-fcitx5-bridge)
@@ -133,8 +134,12 @@
         };
 
         mkVoiceless =
-          stack:
+          {
+            stack,
+            avx2 ? false,
+          }:
           let
+            gguf = stack.gpu || avx2;
             buildRustPackage =
               if stack.gpu then
                 pkgs.rustPlatform.buildRustPackage.override { stdenv = cuda.backendStdenv; }
@@ -147,15 +152,15 @@
               version = "0.1.0";
               src = ./rust;
               cargoLock.lockFile = ./rust/Cargo.lock;
-              buildFeatures = pkgs.lib.optional stack.gpu "cuda";
+              buildFeatures = if stack.gpu then [ "cuda" ] else pkgs.lib.optional gguf "transcribe";
               # cmake is for transcribe-cpp-sys's build script, not this crate.
               dontUseCmakeConfigure = true;
               nativeBuildInputs = [
                 pkgs.makeWrapper
                 pkgs.pkg-config
               ]
+              ++ pkgs.lib.optional gguf pkgs.cmake
               ++ pkgs.lib.optionals stack.gpu [
-                pkgs.cmake
                 cuda.cuda_nvcc
                 pkgs.autoAddDriverRunpath
               ];
@@ -202,9 +207,20 @@
               };
             }
             // pkgs.lib.optionalAttrs stack.gpu cudaEngineEnv
+            // pkgs.lib.optionalAttrs avx2 {
+              TRANSCRIBE_CMAKE_ARGS = pkgs.lib.concatStringsSep " " [
+                "-DTRANSCRIBE_X86_CONSERVATIVE=ON"
+                "-DGGML_SSE42=ON"
+                "-DGGML_AVX=ON"
+                "-DGGML_AVX2=ON"
+                "-DGGML_F16C=ON"
+                "-DGGML_FMA=ON"
+                "-DGGML_BMI2=ON"
+              ];
+            }
           );
-        voiceless = mkVoiceless stack;
-        voicelessCpu = mkVoiceless stackCpu;
+        voiceless = mkVoiceless { inherit stack; };
+        voicelessCpu = mkVoiceless { stack = stackCpu; };
         fcitx5Bridge = pkgs.callPackage ./nix/fcitx5-bridge.nix { };
 
         mkShell =
@@ -246,10 +262,18 @@
           );
       in
       {
-        packages.default = voiceless;
-        packages.voiceless = voiceless;
-        packages.voiceless-cpu = voicelessCpu;
-        packages.voiceless-fcitx5-bridge = fcitx5Bridge;
+        packages = {
+          default = voiceless;
+          inherit voiceless;
+          voiceless-cpu = voicelessCpu;
+          voiceless-fcitx5-bridge = fcitx5Bridge;
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          voiceless-cpu-avx2 = mkVoiceless {
+            stack = stackCpu;
+            avx2 = true;
+          };
+        };
 
         apps.default = flake-utils.lib.mkApp { drv = voiceless; };
 

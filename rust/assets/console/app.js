@@ -1223,6 +1223,7 @@ const MODEL_KIND = {
   gguf: ["GPU · GGUF", "ok"],
   sherpa: ["CPU · Sherpa", ""],
   vad: ["语音检测", ""],
+  denoiser: ["语音降噪", ""],
   streaming: ["流式 · CPU", ""],
 };
 
@@ -1301,10 +1302,13 @@ function EnginePage() {
           { class: "fields" },
           field("模型", selectInput(l, "model", localModelOptions(), changed)),
           field("设备", selectInput(l, "provider", [[null, "按模型默认"], ["cuda", "GPU（cuda）"], ["cpu", "CPU"]], changed)),
-          field("实时刷新间隔（毫秒）", numberInput(l, "partial_interval_ms", changed, { min: 100, max: 5000, step: 50 }), { help: "说话时多久重新识别一次当前句" }),
+          field("实时刷新间隔（毫秒）", numberInput(l, "partial_interval_ms", changed, { min: 100, max: 5000, step: 50 }), { help: "出字后的目标刷新间隔，耗时较长时会自动放缓" }),
           field("单句上限（秒）", numberInput(l, "max_segment_seconds", changed, { min: 1, max: 60, step: 1, nullable: true, placeholder: "按模型默认" }), { help: "GGUF 最多 60，Sherpa 最多 25" }),
           field("CPU 线程数", numberInput(l, "num_threads", changed, { min: 1, max: 32 }), { help: "仅 Sherpa 模型使用" }),
           field("本地专用热词", tagInput(l.hotwords, (values) => { l.hotwords = values; changed(); }).el, { wide: true }),
+        ),
+        h("div", { class: "switches", style: { marginTop: "14px" } },
+          toggleInput(l, "denoise", changed, "远讲降噪", "仅本地分段识别使用，需要安装 gtcrn 模型"),
         ),
       ),
       card(

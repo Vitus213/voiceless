@@ -139,8 +139,7 @@ pub async fn run_with_control(
 /// broadcast that replaces stdout.
 #[derive(Default, Clone)]
 pub struct SessionEnv {
-    /// Engine the daemon loaded at start; `None` makes `local-offline`
-    /// load its model cold inside the session.
+    /// Model loaded by the daemon. Standalone sessions load on demand.
     pub warm: Option<std::sync::Arc<crate::engine::WarmEngine>>,
     /// Daemon event broadcast (JSON lines). When set, events go there
     /// through `BroadcastSink` instead of stdout, and level events are on.
@@ -221,8 +220,8 @@ pub async fn run_with_env(
     // Live UIs (daemon console, overlay) draw a mic level meter.
     plan.emit_levels = env.events.is_some();
     if backend == "local-offline" {
-        // The final waits for the last segment's decode, and for the model
-        // load when the utterance is shorter than it.
+        // Bound capture drain and queuing the finish request. The worker's
+        // final event can arrive later, including after a cold model load.
         plan.finish_timeout = Duration::from_secs(20);
     }
     let code = crate::coordinator::run_session(
@@ -292,15 +291,19 @@ async fn open_transport(
             Ok(AnyTransport::Doubao(DoubaoTransport(session)))
         }
         "local-streaming" => {
-            // An explicit `local_model_dir` is used as-is; the managed model
-            // is re-verified against its manifest on every open.
-            let model_dir = match config.asr.local_model_dir.clone() {
-                Some(path) => path,
-                None => resolve_managed_model(&crate::models::streaming_paraformer_spec())
-                    .map_err(OpenError::Model)?,
+            let directory = config.asr.local_model_dir.as_deref();
+            let recognizer = match env
+                .warm
+                .as_ref()
+                .and_then(|engine| engine.streaming_for(directory))
+            {
+                Some(recognizer) => recognizer,
+                None => {
+                    let model =
+                        crate::engine::load_streaming_model(directory).map_err(OpenError::Model)?;
+                    crate::local_asr::LocalStreamingRecognizer::from_model(model)
+                }
             };
-            let recognizer = crate::local_asr::LocalStreamingRecognizer::new(&model_dir)
-                .map_err(|error| OpenError::Model(error.to_string()))?;
             Ok(AnyTransport::Local(LocalTransport::new(recognizer)))
         }
         "local-offline" => open_local_offline(config, env).map(AnyTransport::Offline),
@@ -317,14 +320,23 @@ fn open_local_offline(
     env: &SessionEnv,
 ) -> Result<OfflineTransportAdapter, OpenError> {
     let local = config.local_engine();
+    let denoise_model = local
+        .denoise
+        .then(|| {
+            resolve_managed_model(&crate::models::gtcrn_spec())
+                .map(|dir| dir.join("gtcrn_simple.onnx"))
+                .map_err(OpenError::Model)
+        })
+        .transpose()?;
     // A warm engine was verified at daemon start: skip the per-session hash
     // check of ~1-2 GB of model files, which would delay capture.
-    let warm = env
-        .warm
-        .as_ref()
-        .and_then(|engine| engine.offline_for(&local));
-    let (decoder, model_dir, vad_model) = match warm {
-        Some((decoder, vad_model)) => (Some(decoder), None, vad_model),
+    let warm = env.warm.as_ref().and_then(|engine| {
+        engine
+            .offline_for(&local)
+            .map(|(decoder, vad_model)| (decoder, engine.preview_decoder(), vad_model))
+    });
+    let (warm_decoders, model_dirs, vad_model) = match warm {
+        Some((decoder, preview, vad_model)) => (Some((decoder, preview)), None, vad_model),
         None => {
             let spec = crate::models::catalog()
                 .into_iter()
@@ -333,28 +345,49 @@ fn open_local_offline(
             let model_dir = resolve_managed_model(&spec).map_err(OpenError::Model)?;
             let vad_dir = resolve_managed_model(&crate::models::silero_vad_spec())
                 .map_err(OpenError::Model)?;
-            (None, Some(model_dir), vad_dir.join("silero_vad.onnx"))
+            let preview_dir = local
+                .preview_model()
+                .map(crate::models::installed_model_dir)
+                .transpose()
+                .map_err(OpenError::Model)?;
+            (
+                None,
+                Some((model_dir, preview_dir)),
+                vad_dir.join("silero_vad.onnx"),
+            )
         }
     };
     // Without a warm engine the model loads on the worker, so capture
     // starts at once either way.
     let transport = crate::offline_asr::OfflineTransport::start(move || {
-        use crate::offline_asr::{create_decoder, create_vad, OfflineFamily};
-        let decoder = match (decoder, model_dir) {
-            (Some(decoder), _) => decoder,
-            (None, Some(model_dir)) => create_decoder(
-                OfflineFamily::for_model(&local.model)?,
-                &model_dir,
-                &crate::engine::offline_options(&local),
-            )?,
-            (None, None) => unreachable!("cold sessions resolve the model directory"),
+        use crate::offline_asr::{create_decoder, create_session_vad, OfflineFamily};
+        let (decoder, preview) = match (warm_decoders, model_dirs) {
+            (Some(decoders), _) => decoders,
+            (None, Some((model_dir, preview_dir))) => {
+                let decoder = create_decoder(
+                    OfflineFamily::for_model(&local.model)?,
+                    &model_dir,
+                    &crate::engine::offline_options(&local),
+                )?;
+                let preview = preview_dir
+                    .as_deref()
+                    .map(|path| crate::engine::create_preview_decoder(path, local.num_threads))
+                    .transpose()?;
+                (decoder, preview)
+            }
+            (None, None) => unreachable!("cold sessions resolve the model directories"),
         };
-        let vad = create_vad(&vad_model, local.segment_limit())?;
-        Ok(crate::offline_asr::SegmentedRecognizer::new(
+        let vad = create_session_vad(&vad_model, local.segment_limit(), denoise_model.is_some())?;
+        let recognizer = crate::offline_asr::SegmentedRecognizer::new(
             decoder,
             vad,
             Duration::from_millis(local.partial_interval_ms),
-        ))
+        )
+        .with_preview(preview);
+        match denoise_model {
+            Some(path) => recognizer.with_denoiser(&path),
+            None => Ok(recognizer),
+        }
     });
     Ok(OfflineTransportAdapter(transport))
 }
@@ -840,11 +873,16 @@ impl BackendTransport for LocalTransport {
 struct StdoutSink {
     json: bool,
     sequence: u64,
+    preview: TerminalPreview,
 }
 
 impl StdoutSink {
     fn new(json: bool) -> Self {
-        Self { json, sequence: 0 }
+        Self {
+            json,
+            sequence: 0,
+            preview: TerminalPreview::default(),
+        }
     }
 }
 
@@ -909,17 +947,55 @@ impl EventSink for StdoutSink {
         match &event {
             OutputEvent::Transcript(snapshot) => {
                 if snapshot.is_final {
+                    self.preview.clear();
                     println!("{}", snapshot.authoritative_text);
                 } else {
-                    eprint!("\r{}", snapshot.authoritative_text);
-                    io::stderr().flush().ok();
+                    self.preview.render(&snapshot.authoritative_text);
                 }
             }
-            OutputEvent::Warning(message) => eprintln!("warning: {message}"),
-            OutputEvent::Error(message) => eprintln!("{message}"),
+            OutputEvent::Warning(message) => {
+                self.preview.clear();
+                eprintln!("warning: {message}");
+            }
+            OutputEvent::Error(message) => {
+                self.preview.clear();
+                eprintln!("{message}");
+            }
+            OutputEvent::Cancelled | OutputEvent::Completed => self.preview.clear(),
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// One redrawable stderr line, shared by standalone and delegated streams.
+#[derive(Default)]
+pub(crate) struct TerminalPreview {
+    shown: bool,
+}
+
+impl TerminalPreview {
+    pub(crate) fn render(&mut self, text: &str) {
+        use std::io::IsTerminal;
+
+        let mut stderr = io::stderr().lock();
+        let terminal = stderr.is_terminal();
+        let erase_line = if terminal { "\x1b[K" } else { "" };
+        let _ = write!(stderr, "\r{erase_line}{text}");
+        let _ = stderr.flush();
+        self.shown = terminal && !text.is_empty();
+    }
+
+    pub(crate) fn clear(&mut self) {
+        if std::mem::take(&mut self.shown) {
+            self.render("");
+        }
+    }
+}
+
+impl Drop for TerminalPreview {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 

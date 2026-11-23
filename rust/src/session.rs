@@ -15,8 +15,7 @@
 /// console and the Fcitx5 preedit.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TranscriptSnapshot {
-    /// Segments the backend confirmed, in order (a segment repeating the
-    /// previous one is stored once).
+    /// Segments the backend confirmed, in order.
     pub confirmed_segments: Vec<String>,
     /// Current unconfirmed text (the backend's partial plus its stash);
     /// empty in a final snapshot.
@@ -129,9 +128,10 @@ impl RecognitionSession {
 
     /// Fold one backend event into the transcript. After `Cancelled` or
     /// `Failed` every event is ignored. `Partial` replaces the partial text
-    /// (text plus stash); `Completed` appends a confirmed segment unless it
-    /// repeats the previous one, and clears the partial; `Finished` is
-    /// accepted only while `Stopping`: it completes the session, prefers
+    /// (text plus stash). `Completed` appends a non-repeated segment and
+    /// clears the preview. `SegmentFinalized` appends one local segment and
+    /// preserves newer tentative text from the same event. `Finished` is
+    /// accepted only while `Stopping`. It completes the session, prefers
     /// the backend's full transcript over the joined segments, and keeps a
     /// non-empty result as the injection text; `Error` fails the session
     /// and clears the injection text; `Ready` changes nothing.
@@ -145,12 +145,21 @@ impl RecognitionSession {
                 SessionUpdate::Transcript(self.snapshot(false))
             }
             crate::realtime::RealtimeEvent::Completed { transcript } => {
-                // Backends may repeat the last confirmed segment (for
-                // instance in the final flush); keep one copy.
+                // Backends may repeat the last confirmed segment on flush.
                 if !transcript.is_empty() && self.confirmed_segments.last() != Some(&transcript) {
                     self.confirmed_segments.push(transcript);
                 }
                 self.partial_text.clear();
+                SessionUpdate::Transcript(self.snapshot(false))
+            }
+            crate::realtime::RealtimeEvent::SegmentFinalized {
+                transcript,
+                preview,
+            } => {
+                if !transcript.is_empty() {
+                    self.confirmed_segments.push(transcript);
+                }
+                self.partial_text = preview;
                 SessionUpdate::Transcript(self.snapshot(false))
             }
             crate::realtime::RealtimeEvent::Finished { transcript } => {

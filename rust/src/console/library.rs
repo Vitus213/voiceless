@@ -49,13 +49,15 @@ fn manager() -> ModelManager {
 }
 
 /// Catalog id → the `kind` reported to the page: `gguf` (transcribe.cpp
-/// GPU models, ids ending in `-gguf`), `vad` (`silero-vad`), `streaming`
-/// (`streaming-*` Paraformer) or `sherpa` for everything else.
+/// GPU models, ids ending in `-gguf`), `vad` (`silero-vad`), `denoiser`
+/// (`gtcrn`), `streaming` (Paraformer) or `sherpa` (offline ASR).
 fn kind(id: &str) -> &'static str {
     if id.ends_with("-gguf") {
         "gguf"
     } else if id == "silero-vad" {
         "vad"
+    } else if id == "gtcrn" {
+        "denoiser"
     } else if id.starts_with("streaming-") {
         "streaming"
     } else {
@@ -395,7 +397,9 @@ fn decode_file(
             .ok_or("cannot resample")?
             .resample(wave.samples(), true)
     };
-    let (decoder, vad_model, segment_limit) = engine.decoder();
+    let (decoder, vad_model, segment_limit) = engine
+        .offline_decoder()
+        .ok_or("no offline engine is loaded")?;
     let vad =
         crate::offline_asr::create_vad(&vad_model, segment_limit).map_err(|e| e.to_string())?;
     // No partials: only the segment decodes count.
@@ -424,12 +428,16 @@ fn decode_file(
 /// daemon, `no local engine is loaded` when the backend is not
 /// `local-offline` or the load failed.
 fn warm_engine(state: &ConsoleState) -> Result<Arc<crate::engine::WarmEngine>, ApiError> {
-    state.daemon()?.warm().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no local engine is loaded (streaming_backend = \"local-offline\")".to_owned(),
-        )
-    })
+    state
+        .daemon()?
+        .warm()
+        .filter(|engine| matches!(engine.as_ref(), crate::engine::WarmEngine::Offline { .. }))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no local engine is loaded (streaming_backend = \"local-offline\")".to_owned(),
+            )
+        })
 }
 
 /// `POST /api/records/{id}/retranscribe` (console API "History"): decodes

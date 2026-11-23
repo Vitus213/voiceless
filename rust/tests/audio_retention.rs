@@ -27,22 +27,21 @@ fn plan(audio_dir: Option<PathBuf>) -> SessionPlan {
     plan
 }
 
-/// Fixture: ready -> stop after the first append -> finished transcript.
+/// Fixture: exhaust the captured chunks, flush the tail and finish.
 async fn run_success(
     audio_dir: Option<PathBuf>,
     chunks: Vec<Vec<u8>>,
     tail: Option<Vec<u8>>,
 ) -> (i32, RecordingHistory, Vec<String>) {
     let log = new_log();
-    let mut transport = ScriptedTransport::new(log.clone());
+    let transport = ScriptedTransport::new(log.clone());
     transport.before_finish(Ok(RealtimeEvent::Ready));
-    transport.trigger(1, ControlCommand::Stop);
     transport.after_finish(Ok(RealtimeEvent::Finished {
         transcript: "夜声记录".to_owned(),
     }));
-    let capture = FakeCapture::new(log.clone(), chunks, tail);
-    let (control_tx, control_rx) = mpsc::channel(8);
-    transport.control_tx = Some(control_tx);
+    let mut capture = FakeCapture::new(log.clone(), chunks, tail);
+    capture.eof_on_empty = true;
+    let (_control_tx, control_rx) = mpsc::channel(8);
     let history = RecordingHistory::new();
     let history_probe = history.clone();
     let mut sink = RecordingSink::default();

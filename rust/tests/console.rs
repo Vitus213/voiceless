@@ -290,6 +290,26 @@ async fn config_edits_keep_comments_and_secrets_are_write_only() {
     assert_eq!(get(&fixture, "/api/config")["cloud"]["has_api_key"], false);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changing_the_active_paraformer_path_requires_engine_reload() {
+    let fixture = start().await;
+    send(
+        &fixture,
+        "PUT",
+        "/api/config",
+        json!({"asr": {"streaming_backend": "local-streaming"}}),
+    )
+    .unwrap();
+    let response = send(
+        &fixture,
+        "PUT",
+        "/api/config",
+        json!({"asr": {"local_model_dir": "/models/other-paraformer"}}),
+    )
+    .unwrap();
+    assert_eq!(response["restart_engine"], true);
+}
+
 /// A `config` in the body (hotword 张三丰 plus the default filler removal)
 /// is applied instead of the saved rules; a regex rule that does not
 /// compile is 400.

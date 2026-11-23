@@ -342,9 +342,25 @@ pub fn silero_vad_spec() -> ModelSpec {
     }
 }
 
+/// GTCRN streaming speech enhancement for `[local].denoise`.
+pub fn gtcrn_spec() -> ModelSpec {
+    ModelSpec {
+        id: "gtcrn".to_owned(),
+        version: "speech-enhancement-models".to_owned(),
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx".to_owned(),
+        sha256_sri: "sha256-53YDrAwj2sMifdLXE1s6WFy+4meQSK7PqIZlfTrhtTQ=".to_owned(),
+        size_bytes: 535_638,
+        archive_type: ArchiveType::File,
+        top_level_directory: None,
+        allowed_members: names(&["gtcrn_simple.onnx"]),
+        required_paths: names(&["gtcrn_simple.onnx"]),
+        license_status: "MIT (Xiaobin-Rong/gtcrn; Sherpa-ONNX export).".to_owned(),
+    }
+}
+
 /// The whole pinned catalog, in the order `model list` and the console
 /// show it: streaming Paraformer first, then the GGUF (GPU) models, then
-/// the Sherpa-ONNX offline models, then the VAD. Ids are unique; lookups
+/// the Sherpa-ONNX offline models, the VAD and the speech denoiser. Ids are unique; lookups
 /// (`installed_model_dir`, `model_cmd::find_spec`, `stream.rs`) take the
 /// first match.
 pub fn catalog() -> Vec<ModelSpec> {
@@ -355,6 +371,7 @@ pub fn catalog() -> Vec<ModelSpec> {
         qwen3_asr_spec(),
         sense_voice_spec(),
         silero_vad_spec(),
+        gtcrn_spec(),
     ]
 }
 

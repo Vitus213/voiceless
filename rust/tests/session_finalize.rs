@@ -35,6 +35,36 @@ fn normal_stop_flushes_one_authoritative_transcript_and_one_injection() {
     assert_eq!(session.state(), SessionState::Cancelled);
 }
 
+#[test]
+fn confirming_a_segment_keeps_newer_previews_in_the_same_snapshot() {
+    let mut session = RecognitionSession::new("local-offline");
+    session.apply(RealtimeEvent::Partial {
+        text: "你号。下一句".to_owned(),
+        stash: String::new(),
+    });
+    let update = session.apply(RealtimeEvent::SegmentFinalized {
+        transcript: "你好。".to_owned(),
+        preview: "下一句".to_owned(),
+    });
+    assert!(matches!(
+        update,
+        SessionUpdate::Transcript(snapshot)
+            if snapshot.confirmed_segments == ["你好。"]
+                && snapshot.authoritative_text == "你好。下一句"
+    ));
+
+    let update = session.apply(RealtimeEvent::SegmentFinalized {
+        transcript: "你好。".to_owned(),
+        preview: "第三句".to_owned(),
+    });
+    assert!(matches!(
+        update,
+        SessionUpdate::Transcript(snapshot)
+            if snapshot.confirmed_segments == ["你好。", "你好。"]
+                && snapshot.authoritative_text == "你好。你好。第三句"
+    ));
+}
+
 /// `Finished` while stopping completes the session; the text can be
 /// taken once, then it is gone.
 #[test]

@@ -7,6 +7,14 @@ tagged releases yet; entries are grouped by the day the work landed on
 ## Unreleased
 
 ### Added
+- Optional `local-offline` speech enhancement runs GTCRN and bounded gain
+  ahead of speech detection and recognition. Install the `gtcrn` model and
+  enable `[local] denoise` or use the console's recognition settings.
+- Optional `[local] fast_preview` uses SenseVoice int8 on CPU for live
+  previews and the selected Qwen ONNX or GGUF model for final transcription.
+  Preview updates can continue while that model finalizes an earlier segment.
+- Optional `voiceless-cpu-avx2` Nix package enables the CPU GGUF engine with
+  AVX2 for x86-64-v3 machines.
 - `voiceless stream` with a local backend now delegates to a running
   `voiceless daemon` over the new D-Bus method `StartSession(mode, inject)`
   instead of loading a second copy of the model (which could exhaust an
@@ -14,6 +22,24 @@ tagged releases yet; entries are grouped by the day the work landed on
   (0417c78)
 
 ### Fixed
+- Local offline dictation confirms speech sooner on the default input path,
+  retries empty or unchanged previews sooner, spaces costly decodes, and
+  retains audio across VAD boundaries and at stop.
+- GTCRN-enhanced dictation detects weaker speech onsets to retain more of
+  the opening words in noisy audio.
+- GTCRN-enhanced dictation blends 35% aligned original audio into the
+  enhanced signal to improve transcription in simulated distant speech.
+- Live sessions keep audio capture and backend events moving during bursts
+  and preserve the send deadline for each queued audio frame.
+- The terminal and Fcitx5 clear live text when recognition retracts it.
+- Local offline dictation keeps waiting for the worker's final result after
+  capture ends, so a slow decode can still return its transcript. The wait
+  can be cancelled.
+- Paraformer local streaming decodes the remaining short audio block at stop,
+  so the last words can appear in the final transcript.
+- The `local-streaming` daemon loads Paraformer once and starts a fresh
+  recognition stream for each recording. The console requests an engine
+  reload when the selected Paraformer model path changes.
 - The daemon's evdev push-to-talk key keeps working after a keyboard is
   unplugged and replugged or re-enumerated (USB reset, KVM switch): the
   listener watches `/dev/input` with inotify instead of enumerating

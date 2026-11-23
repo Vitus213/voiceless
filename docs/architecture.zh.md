@@ -99,10 +99,10 @@ flowchart LR
 4. **转写。** `session::RecognitionSession` 把后端事件折叠成
    `TranscriptSnapshot`（`authoritative_text`、`partial_text`、
    `confirmed_segments`、`is_final`），并决定哪些更新值得发一个事件。
-5. **停止。** 正常停止按固定次序：停止接受新块 → 停止采集（给 `pw-record` 发
-   SIGINT）→ 按 FIFO 冲刷队列和对齐的尾帧 → 恰好一次 `finish` → 等待最终事件
-   （`finish_timeout` 2 秒；`local-offline` 为 20 秒，因为它的 final 要等最后
-   一段解码）→ 文本处理 → 至多一次注入 → 历史。空文本以 warning 完成，不注入。
+5. **停止。** 停止接受新块，向 `pw-record` 发送 SIGINT，按 FIFO 冲刷队列和对齐的尾帧，
+   提交一次 `finish`，收到最终事件后处理文本、至多注入一次并写入历史。冲刷阶段默认
+   限时 2 秒。`local-offline` 的 20 秒限时覆盖采集停止、送完音频及提交 `finish`，
+   随后等待本地工作线程返回结果、报错、关闭通道或收到取消。空文本发出 warning，不注入。
 6. **取消。** 第二次 SIGINT、SIGTERM 或 daemon 的 `Cancel`：中止采集与后端，
    发布 `cancelled` 事件，不处理、不注入、不记录任何东西。临时 WAV 被删除。
 
@@ -129,7 +129,7 @@ daemon 另加 `state`、`session`（指标）和 `log` 行。`voiceless ctl watc
 | `cloud-realtime`（默认） | `realtime.rs` | `[cloud] api_key`、`realtime_endpoint`、`realtime_model` | DashScope `qwen3-asr-flash-realtime` | 服务端增量 / 服务端提交 |
 | `doubao-realtime` | `doubao.rs` | `[doubao]`（`api_key` 或 `app_key`+`access_key`、`resource_id`、ITN/标点/DDC 开关、热词） | 火山引擎 Seed ASR 大模型 | 逐句结果；可选二遍 `enable_nonstream` |
 | `local-streaming` | `local_asr.rs` | `[asr] local_model_dir` 或托管模型 | Sherpa-ONNX `streaming-paraformer-bilingual-zh-en` | 在线识别器局部 / 端点检测后的最终 |
-| `local-offline` | `offline_asr.rs`（带 `transcribe` feature 时加 `gguf_asr.rs`） | `[local] model`、`provider`、`num_threads`、`partial_interval_ms`、`max_segment_seconds`、热词 | CUDA 上经 transcribe.cpp 的 `qwen3-asr-1.7b-gguf` / `qwen3-asr-0.6b-gguf`，或 CPU 上经 Sherpa-ONNX 的 `qwen3-asr-0.6b-int8` / `sense-voice-int8` | 每 `partial_interval_ms` 重解码当前开放段 / 每个 VAD 闭合段的最终解码 |
+| `local-offline` | `offline_asr.rs`（带 `transcribe` feature 时加 `gguf_asr.rs`） | `[local] model`、`provider`、`num_threads`、`partial_interval_ms`、`max_segment_seconds`、热词 | transcribe.cpp 在 CPU 或 CUDA 上运行 `qwen3-asr-1.7b-gguf` / `qwen3-asr-0.6b-gguf`，Sherpa-ONNX 在 CPU 上运行 `qwen3-asr-0.6b-int8` / `sense-voice-int8` | 每 `partial_interval_ms` 重解码当前开放段 / 每个 VAD 闭合段的最终解码 |
 
 批量（`[asr] batch_backend`）：`cloud` 用 DashScope 多模态 API，`local` 用
 Sherpa-ONNX SenseVoice。`transcribe` 与 `record` 共用 `batch.rs`。
@@ -198,6 +198,10 @@ Silero VAD（512 采样窗口）在停顿处切分音频流。保留 10 个窗�
 `daemon::serve` 加载配置、加载热引擎、启动会话指标跟踪、在 `[console] enabled`
 时启动控制台，然后进入 gateway 循环。
 
+使用 `local-streaming` 时，常驻进程保留已加载的 Paraformer 模型，每次录音创建独立
+的 Sherpa 流。重新加载引擎可应用新的模型目录或新激活的托管模型。控制台的录音重转写和
+回放基准需要已加载的 `local-offline` 引擎。
+
 - **Gateway。** `Gateway<R: SessionRunner>` 最多持有一个会话。状态：`idle` →
   `recording`（开始）→ `stopping`（正常停止）→ `idle`（会话任务结束）。
   `activate`/`toggle` 空闲时开始、录音中停止、停止中拒绝；`start`/`stop`
@@ -261,8 +265,8 @@ cache   ${XDG_CACHE_HOME:-~/.cache}/voiceless/       model-downloads/
 | ID | 内容 | 运行于 | 使用者 |
 | --- | --- | --- | --- |
 | `streaming-paraformer-bilingual-zh-en` | Sherpa-ONNX 在线 Paraformer | CPU | `local-streaming` |
-| `qwen3-asr-1.7b-gguf` | Qwen3-ASR 1.7B，Q8_0 GGUF | CUDA（transcribe.cpp） | `local-offline`（默认） |
-| `qwen3-asr-0.6b-gguf` | Qwen3-ASR 0.6B，Q8_0 GGUF | CUDA（transcribe.cpp） | `local-offline` |
+| `qwen3-asr-1.7b-gguf` | Qwen3-ASR 1.7B，Q8_0 GGUF | CPU 或 CUDA（transcribe.cpp） | `local-offline`（默认） |
+| `qwen3-asr-0.6b-gguf` | Qwen3-ASR 0.6B，Q8_0 GGUF | CPU 或 CUDA（transcribe.cpp） | `local-offline` |
 | `qwen3-asr-0.6b-int8` | Qwen3-ASR 0.6B int8 ONNX | CPU（Sherpa-ONNX） | `local-offline` |
 | `sense-voice-int8` | SenseVoice int8 ONNX | CPU（Sherpa-ONNX） | `local-offline`、批量 `local` |
 | `silero-vad` | Silero VAD ONNX | CPU | `local-offline` 分段 |

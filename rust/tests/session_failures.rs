@@ -269,6 +269,86 @@ async fn finish_timeout_fails_the_session_without_injection() {
     );
 }
 
+#[tokio::test]
+async fn local_final_text_can_arrive_after_the_flush_deadline() {
+    let log = new_log();
+    let mut transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Ready));
+    transport.trigger(1, ControlCommand::Stop);
+    transport.final_event_delay = Duration::from_millis(160);
+    transport.after_finish(Ok(RealtimeEvent::Finished {
+        transcript: "保留完整转写".to_owned(),
+    }));
+    let capture = FakeCapture::new(log, vec![vec![1; 1024]], None);
+    let mut plan = SessionPlan::new("local-offline", true);
+    plan.finish_timeout = Duration::from_millis(80);
+
+    let (code, events, log) = run_fixture(plan, capture, transport, vec![]).await;
+
+    assert_eq!(code, 0, "{:?}", event_kinds(&events));
+    assert_eq!(
+        event_kinds(&events),
+        ["ready", "final", "finalized", "completed"]
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|entry| entry.starts_with("injector.inject:"))
+            .collect::<Vec<_>>(),
+        ["injector.inject:保留完整转写"],
+    );
+}
+
+#[tokio::test]
+async fn local_final_wait_can_be_cancelled_after_the_flush_deadline() {
+    let log = new_log();
+    let mut transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Ready));
+    transport.trigger(1, ControlCommand::Stop);
+    let (control_tx, control_rx) = mpsc::channel(8);
+    transport.control_tx = Some(control_tx.clone());
+    let capture = FakeCapture::new(log.clone(), vec![vec![1; 1024]], None);
+    let mut plan = SessionPlan::new("local-offline", true);
+    plan.finish_timeout = Duration::from_millis(80);
+    let history = common::RecordingHistory::new();
+    let mut sink = RecordingSink::default();
+
+    let session = run_session(
+        plan,
+        capture,
+        transport,
+        common::CountingProcessor::noop(),
+        RecordingInjector::new(log.clone()),
+        history.clone(),
+        control_rx,
+        &mut sink,
+    );
+    let cancel = async {
+        while !entries(&log)
+            .iter()
+            .any(|entry| entry == "transport.finish")
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        control_tx.send(ControlCommand::Cancel).await.ok();
+    };
+    let (code, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(session, cancel)
+    })
+    .await
+    .expect("a pending local final must respond to cancellation");
+
+    assert_eq!(code, 130);
+    assert_eq!(
+        event_kinds(&sink.events),
+        ["ready", "cancelled", "completed"]
+    );
+    assert!(history.records().is_empty());
+    assert!(!entries(&log)
+        .iter()
+        .any(|entry| entry.starts_with("injector.inject:")));
+}
+
 /// A backend `Error` event before `Ready` (an auth or protocol failure the
 /// service reports in-band) fails the session with that message at once
 /// instead of surfacing as a ready timeout, and never starts capture.

@@ -115,12 +115,13 @@ flowchart LR
    a `TranscriptSnapshot` (`authoritative_text`, `partial_text`,
    `confirmed_segments`, `is_final`) and decides which updates are worth an
    event.
-5. **Stop.** Normal stop runs in a fixed order: stop accepting chunks →
-   stop capture (SIGINT to `pw-record`) → drain the queue FIFO plus the
-   aligned tail frame → exactly one `finish` → wait for the final event
-   (`finish_timeout`, 2 s; 20 s for `local-offline`, whose final waits for
-   the last segment decode) → text processing → at most one injection →
-   history. Empty text completes with a warning and no injection.
+5. **Stop.** Stop accepting chunks, signal `pw-record`, drain queued audio and
+   the aligned tail in order, submit `finish` once, and wait for the final
+   event before processing text, injecting at most once, and writing history.
+   The shared flush deadline defaults to 2 s. Local offline uses 20 s for
+   capture shutdown, audio drain and finish submission. Its final-event wait
+   then ends on the worker's result, error, channel closure or cancellation.
+   Empty text completes with a warning and no injection.
 6. **Cancel.** Second SIGINT, SIGTERM or daemon `Cancel`: capture and
    backend are aborted, a `cancelled` event is published, and nothing is
    processed, injected or recorded. The partial WAV is deleted.
@@ -151,7 +152,7 @@ the file.
 | `cloud-realtime` (default) | `realtime.rs` | `[cloud] api_key`, `realtime_endpoint`, `realtime_model` | DashScope `qwen3-asr-flash-realtime` | server deltas / server commits |
 | `doubao-realtime` | `doubao.rs` | `[doubao]` (`api_key` or `app_key`+`access_key`, `resource_id`, ITN/punctuation/DDC flags, hotwords) | Volcengine Seed ASR bigmodel | per-utterance results; optional second-pass `enable_nonstream` |
 | `local-streaming` | `local_asr.rs` | `[asr] local_model_dir` or the managed model | Sherpa-ONNX `streaming-paraformer-bilingual-zh-en` | online recognizer partials / endpoint-detected finals |
-| `local-offline` | `offline_asr.rs` (+ `gguf_asr.rs` with the `transcribe` feature) | `[local] model`, `provider`, `num_threads`, `partial_interval_ms`, `max_segment_seconds`, hotwords | `qwen3-asr-1.7b-gguf` / `qwen3-asr-0.6b-gguf` on CUDA via transcribe.cpp, or `qwen3-asr-0.6b-int8` / `sense-voice-int8` on CPU via Sherpa-ONNX | re-decoded open segment every `partial_interval_ms` / final decode of each VAD-closed segment |
+| `local-offline` | `offline_asr.rs` (+ `gguf_asr.rs` with the `transcribe` feature) | `[local] model`, `provider`, `num_threads`, `partial_interval_ms`, `max_segment_seconds`, hotwords | `qwen3-asr-1.7b-gguf` / `qwen3-asr-0.6b-gguf` on CPU or CUDA via transcribe.cpp, or `qwen3-asr-0.6b-int8` / `sense-voice-int8` on CPU via Sherpa-ONNX | re-decoded open segment every `partial_interval_ms` / final decode of each VAD-closed segment |
 
 Batch (`[asr] batch_backend`): `cloud` uses the DashScope multimodal API,
 `local` uses Sherpa-ONNX SenseVoice. `transcribe` and `record` share
@@ -240,6 +241,11 @@ bounds every external command.
 metrics tracker, starts the console if `[console] enabled`, then runs the
 gateway loop.
 
+For `local-streaming`, the daemon keeps the Paraformer model loaded and
+opens a fresh Sherpa stream for each recording. Engine reload applies a
+changed model path or a newly activated managed model. The console's file
+retranscription and replay benchmark require a loaded `local-offline` engine.
+
 - **Gateway.** `Gateway<R: SessionRunner>` holds at most one session.
   States: `idle` → `recording` (start) → `stopping` (normal stop) → `idle`
   (session task finished). `activate`/`toggle` start when idle, stop when
@@ -320,8 +326,8 @@ cache   ${XDG_CACHE_HOME:-~/.cache}/voiceless/       model-downloads/
 | Id | What | Runs on | Used by |
 | --- | --- | --- | --- |
 | `streaming-paraformer-bilingual-zh-en` | Sherpa-ONNX online Paraformer | CPU | `local-streaming` |
-| `qwen3-asr-1.7b-gguf` | Qwen3-ASR 1.7B, Q8_0 GGUF | CUDA (transcribe.cpp) | `local-offline` (default) |
-| `qwen3-asr-0.6b-gguf` | Qwen3-ASR 0.6B, Q8_0 GGUF | CUDA (transcribe.cpp) | `local-offline` |
+| `qwen3-asr-1.7b-gguf` | Qwen3-ASR 1.7B, Q8_0 GGUF | CPU or CUDA (transcribe.cpp) | `local-offline` (default) |
+| `qwen3-asr-0.6b-gguf` | Qwen3-ASR 0.6B, Q8_0 GGUF | CPU or CUDA (transcribe.cpp) | `local-offline` |
 | `qwen3-asr-0.6b-int8` | Qwen3-ASR 0.6B int8 ONNX | CPU (Sherpa-ONNX) | `local-offline` |
 | `sense-voice-int8` | SenseVoice int8 ONNX | CPU (Sherpa-ONNX) | `local-offline`, batch `local` |
 | `silero-vad` | Silero VAD ONNX | CPU | `local-offline` segmentation |

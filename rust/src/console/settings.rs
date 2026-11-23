@@ -92,14 +92,14 @@ pub async fn put_config(
 
 /// Settings the warm engine or hotkey listener was built from.
 ///
-/// `[asr] streaming_backend`, the whole `[local]` section, `[text]
-/// hotwords` (biased into the local decoder) and the whole `[hotkey]`
-/// section; compared as JSON so nested lists count. Everything else is
-/// read afresh by the next session.
+/// Compare the backend, its Paraformer model path when selected, the
+/// `[local]` options, decoder hotwords and the hotkey listener settings.
 fn needs_engine_reload(before: &AppConfig, after: &AppConfig) -> bool {
     let engine = |config: &AppConfig| {
         json!([
             config.asr.streaming_backend,
+            (config.asr.streaming_backend == "local-streaming")
+                .then_some(&config.asr.local_model_dir),
             config.local,
             config.text.hotwords,
             config.hotkey,

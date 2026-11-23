@@ -198,17 +198,17 @@ impl<S> PreeditSink<S> {
 }
 
 impl<S: EventSink> EventSink for PreeditSink<S> {
-    /// Mirror non-final, non-empty transcripts as preedit; clear on any end
-    /// of session that did not commit (`Finalized` without an injection
-    /// result, error, cancel, completion). The final transcript itself is
-    /// not previewed: the commit that follows it replaces the preedit.
+    /// Mirror live transcripts as preedit. Clear it when the recognizer
+    /// retracts the preview or the session ends without a commit.
     fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
         match &event {
-            OutputEvent::Transcript(snapshot)
-                if !snapshot.is_final && !snapshot.authoritative_text.is_empty() =>
-            {
-                self.client.preedit(&snapshot.authoritative_text);
-                self.shown = true;
+            OutputEvent::Transcript(snapshot) if !snapshot.is_final => {
+                if snapshot.authoritative_text.is_empty() {
+                    self.clear();
+                } else {
+                    self.client.preedit(&snapshot.authoritative_text);
+                    self.shown = true;
+                }
             }
             // The commit (queued after every preedit) replaces the preedit;
             // a session that ends without one clears it.

@@ -208,6 +208,7 @@ async fn relay(
     // Same signal mapping as standalone `stream`, forwarded as D-Bus calls.
     let mut control = crate::stream::control_receiver();
     let mut session = RelayedSession::default();
+    let mut preview = crate::stream::TerminalPreview::default();
     loop {
         tokio::select! {
             Some(command) = control.recv() => {
@@ -233,7 +234,7 @@ async fn relay(
                     return Ok(code);
                 }
                 if RelayedSession::is_session_event(&event) {
-                    print_event(&event, &line, json);
+                    print_event(&event, &line, json, &mut preview);
                 }
             }
         }
@@ -300,8 +301,12 @@ impl RelayedSession {
 /// line; otherwise partials overwrite one stderr line (`\r`), the final
 /// text goes to stdout, warnings and errors to stderr. Other event kinds
 /// (`ready`, `finalized`, `cancelled`, `completed`) print nothing.
-fn print_event(event: &serde_json::Value, line: &str, json: bool) {
-    use std::io::Write;
+fn print_event(
+    event: &serde_json::Value,
+    line: &str,
+    json: bool,
+    preview: &mut crate::stream::TerminalPreview,
+) {
     if json {
         println!("{line}");
         return;
@@ -313,14 +318,21 @@ fn print_event(event: &serde_json::Value, line: &str, json: bool) {
                 .as_str()
                 .unwrap_or_default();
             if event["transcript"]["is_final"] == true {
+                preview.clear();
                 println!("{text}");
             } else {
-                eprint!("\r{text}");
-                std::io::stderr().flush().ok();
+                preview.render(text);
             }
         }
-        Some("warning") => eprintln!("warning: {message}"),
-        Some("error") => eprintln!("{message}"),
+        Some("warning") => {
+            preview.clear();
+            eprintln!("warning: {message}");
+        }
+        Some("error") => {
+            preview.clear();
+            eprintln!("{message}");
+        }
+        Some("cancelled" | "completed") => preview.clear(),
         _ => {}
     }
 }

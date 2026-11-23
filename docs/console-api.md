@@ -84,10 +84,10 @@ Events (`/api/events`) are the daemon's event lines (same schema as
 
 The server merges the patch into the TOML file preserving comments and
 formatting (toml_edit), validates the result with the normal config loader
-before writing (0600), and reports `restart_engine: true` when `[local]`,
-`[text].hotwords`, `[asr].streaming_backend` or `[hotkey]` changed (the
-page then offers "重新加载引擎" → `POST /api/engine/reload`). Other changes
-apply from the next session.
+before writing (0600). The response sets `restart_engine: true` when `[local]`,
+`[text].hotwords`, `[asr].streaming_backend`, `[hotkey]`, or the selected
+Paraformer `[asr].local_model_dir` changes. The page then offers
+“重新加载引擎” through `POST /api/engine/reload`. Other changes apply from the next session.
 
 Sections: `asr`, `cloud`, `doubao`, `local`, `text`, `hotkey`, `audio`,
 `inject`, `processing`, `history` — same keys as `config.toml` (README
@@ -101,9 +101,9 @@ Sections: `asr`, `cloud`, `doubao`, `local`, `text`, `hotkey`, `audio`,
 
 | Method | Path | Response |
 |---|---|---|
-| GET | `/api/models` | `[{"id","version","size_bytes","license_status","installed":bool,"installing":bool,"progress":0.0-1.0|null,"error":null,"kind":"gguf|sherpa|vad|streaming","in_use":bool}]` (`progress` is the download ratio while bytes arrive and `null` once the file is complete and being verified/extracted) |
+| GET | `/api/models` | `[{"id","version","size_bytes","license_status","installed":bool,"installing":bool,"progress":0.0-1.0|null,"error":null,"kind":"gguf|sherpa|vad|denoiser|streaming","in_use":bool}]` (`progress` is the download ratio while bytes arrive and `null` once the file is complete and being verified/extracted) |
 | POST | `/api/models/{id}/install` | `{"ok": true}` (starts a background install; poll `/api/models`) |
-| DELETE | `/api/models/{id}` | `{"ok": true}` (refused with 409 if it is the loaded engine) |
+| DELETE | `/api/models/{id}` | `{"ok": true}` (refused with 409 if the loaded engine uses the model, including for fast previews) |
 
 ## Modes
 

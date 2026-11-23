@@ -35,10 +35,10 @@
 //!    (`SessionPlan::queue_capacity`, default 16 slots of one 32 ms chunk).
 //!    A full queue, or one `send_audio` call exceeding
 //!    `SessionPlan::send_deadline` (default 500 ms), fails the session.
-//! 3. Stop flush, under one shared deadline (`SessionPlan::finish_timeout`):
-//!    stop accepting chunks -> graceful capture stop -> queue the aligned
-//!    tail frame -> drain the queue FIFO -> exactly one `finish` -> read
-//!    events until the state machine completes.
+//! 3. Stop flush: stop accepting chunks -> graceful capture stop -> queue
+//!    the aligned tail -> drain FIFO -> exactly one `finish`. The shared
+//!    deadline also covers final events except from the owned offline worker.
+//!    Control commands can cancel every step.
 //! 4. Final pipeline: `cleanup`, then `process` unless the mode is `quick`
 //!    (a processing failure keeps the cleaned transcript and emits a
 //!    warning), at most one `inject`, one history row, then `Finalized`.
@@ -57,7 +57,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::time::{timeout, timeout_at};
+use tokio::time::timeout_at;
 
 use crate::realtime::RealtimeEvent;
 use crate::session::{
@@ -70,9 +70,8 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 16;
 /// Default limit for one `BackendTransport::send_audio` call while
 /// recording; a slower send fails the session instead of growing a backlog.
 pub const DEFAULT_SEND_DEADLINE: Duration = Duration::from_millis(500);
-/// Default overall deadline of the stop flush (capture stop, drain, finish
-/// and the final events together). `stream.rs` raises it to 20 s for
-/// `local-offline`, whose final waits for the last segment's decode.
+/// Default deadline for stop and flush. The local offline worker reports
+/// its own completion or failure after the finish request is queued.
 pub const DEFAULT_FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Default wait for `RealtimeEvent::Ready` before any capture starts.
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -154,7 +153,7 @@ pub struct SessionPlan {
     pub queue_capacity: usize,
     /// Per-send limit while recording; see `DEFAULT_SEND_DEADLINE`.
     pub send_deadline: Duration,
-    /// Overall stop-flush deadline; see `DEFAULT_FINISH_TIMEOUT`.
+    /// Stop-flush deadline, including final events for realtime backends.
     pub finish_timeout: Duration,
     /// Wait for the backend's `Ready`; see `DEFAULT_READY_TIMEOUT`.
     pub ready_timeout: Duration,
@@ -446,15 +445,15 @@ where
 
     // FIFO backlog between capture and backend; bounded by the plan.
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut head_deadline = tokio::time::Instant::now();
     // Total PCM bytes accepted (chunks + tail), for the history duration.
     let mut audio_bytes: u64 = 0;
     let mut last_level = tokio::time::Instant::now();
+    let mut prefer_capture = false;
 
     loop {
-        // `biased`: control first, then capture, so Stop/Cancel is seen
-        // before more audio is queued. The send branch is re-created each
-        // iteration with the queue front, so a send dropped by another
-        // branch winning simply retries the same chunk.
+        // Control and pending sends win. After a backend event, give
+        // capture a turn so a burst of events cannot delay audio or EOF.
         tokio::select! {
             biased;
             command = control.receiver.recv(), if !control.closed => {
@@ -474,8 +473,40 @@ where
                     SessionAction::Ignore => {}
                 }
             }
+            send = timeout_at(head_deadline, transport.send_audio(queue.front().map(Vec::as_slice).unwrap_or(&[]))), if !queue.is_empty() => {
+                match send {
+                    Ok(Ok(())) => {
+                        queue.pop_front();
+                        head_deadline = tokio::time::Instant::now() + plan.send_deadline;
+                    }
+                    Ok(Err(error)) => {
+                        return send_failed(&mut capture, &mut transport, sink, &format!("audio send: {error}")).await
+                    }
+                    Err(_) => {
+                        return send_failed(&mut capture, &mut transport, sink, "audio send exceeded the deadline").await
+                    }
+                }
+            }
+            // Backend events while recording: partials and confirmed
+            // segments update the transcript; `Error` fails the session;
+            // a `Finished` before any stop is ignored by the state machine.
+            event = transport.next_event(), if !prefer_capture => match event {
+                Ok(event) => {
+                    prefer_capture = true;
+                    if let Err(code) = dispatch_event(&mut session, sink, event) {
+                        let _ = sink.emit(OutputEvent::Completed);
+                        return code;
+                    }
+                    if session.state() == SessionState::Failed {
+                        let _ = sink.emit(OutputEvent::Completed);
+                        return 1;
+                    }
+                }
+                Err(error) => return fail(sink, &format!("realtime receive: {error}")),
+            },
             chunk = capture.next_chunk() => match chunk {
                 Ok(Some(pcm)) => {
+                    prefer_capture = false;
                     if queue.len() >= plan.queue_capacity {
                         return overrun(&mut capture, &mut transport, sink).await;
                     }
@@ -483,6 +514,9 @@ where
                     if plan.emit_levels && last_level.elapsed() >= LEVEL_INTERVAL {
                         last_level = tokio::time::Instant::now();
                         let _ = sink.emit(OutputEvent::Level(pcm_rms(&pcm)));
+                    }
+                    if queue.is_empty() {
+                        head_deadline = tokio::time::Instant::now() + plan.send_deadline;
                     }
                     queue.push_back(pcm);
                 }
@@ -496,43 +530,14 @@ where
                 }
                 Err(error) => return fail(sink, &format!("capture: {error}")),
             },
-            send = timeout(plan.send_deadline, transport.send_audio(queue.front().map(Vec::as_slice).unwrap_or(&[]))), if !queue.is_empty() => {
-                match send {
-                    Ok(Ok(())) => {
-                        queue.pop_front();
-                    }
-                    Ok(Err(error)) => {
-                        return send_failed(&mut capture, &mut transport, sink, &format!("audio send: {error}")).await
-                    }
-                    Err(_) => {
-                        return send_failed(&mut capture, &mut transport, sink, "audio send exceeded the deadline").await
-                    }
-                }
-            }
-            // Backend events while recording: partials and confirmed
-            // segments update the transcript; `Error` fails the session;
-            // a `Finished` before any stop is ignored by the state machine.
-            event = transport.next_event() => match event {
-                Ok(event) => {
-                    if let Err(code) = dispatch_event(&mut session, sink, event) {
-                        let _ = sink.emit(OutputEvent::Completed);
-                        return code;
-                    }
-                    if session.state() == SessionState::Failed {
-                        let _ = sink.emit(OutputEvent::Completed);
-                        return 1;
-                    }
-                }
-                Err(error) => return fail(sink, &format!("realtime receive: {error}")),
-            },
+            () = std::future::ready(()), if prefer_capture => prefer_capture = false,
         }
     }
 
     // Stop flush: graceful capture stop, then FIFO drain of the queue and
-    // the tail frame, then exactly one finish, then final events. One
-    // deadline covers all steps; any control command aborts the flush.
+    // the tail frame, then exactly one finish. Any control command aborts.
     let stop_deadline = tokio::time::Instant::now() + plan.finish_timeout;
-    let tail = match timed_step(&mut control, stop_deadline, capture.stop_capture()).await {
+    let tail = match timed_step(&mut control, Some(stop_deadline), capture.stop_capture()).await {
         Step::Value(Ok(tail)) => tail,
         Step::Value(Err(error)) => return fail(sink, &format!("capture stop: {error}")),
         Step::TimedOut => return fail(sink, "capture stop timed out"),
@@ -558,7 +563,13 @@ where
         }
     }
     while let Some(pcm) = queue.pop_front() {
-        match timed_step(&mut control, stop_deadline, transport.send_audio(&pcm)).await {
+        match timed_step(
+            &mut control,
+            Some(stop_deadline),
+            transport.send_audio(&pcm),
+        )
+        .await
+        {
             Step::Value(Ok(())) => {}
             Step::Value(Err(error)) => return fail(sink, &format!("flush send: {error}")),
             Step::TimedOut => return fail(sink, "flush send timed out"),
@@ -574,7 +585,7 @@ where
             }
         }
     }
-    match timed_step(&mut control, stop_deadline, transport.finish()).await {
+    match timed_step(&mut control, Some(stop_deadline), transport.finish()).await {
         Step::Value(Ok(())) => {}
         Step::Value(Err(error)) => return fail(sink, &format!("backend finish: {error}")),
         Step::TimedOut => return fail(sink, "backend finish timed out"),
@@ -584,10 +595,11 @@ where
         }
     }
 
-    // Final events: partials may still arrive and are forwarded; the loop
-    // ends when `Finished` completes the state machine.
+    // Local offline finish only queues the request. Wait for the owned
+    // worker's result or channel closure while still accepting cancellation.
+    let final_deadline = (plan.backend != "local-offline").then_some(stop_deadline);
     loop {
-        let step = timed_step(&mut control, stop_deadline, transport.next_event()).await;
+        let step = timed_step(&mut control, final_deadline, transport.next_event()).await;
         let event = match step {
             Step::Value(Ok(event)) => event,
             Step::Value(Err(error)) => return fail(sink, &format!("final receive: {error}")),
@@ -723,18 +735,26 @@ where
     fail(sink, message)
 }
 
-/// Await one flush step while watching the control channel and the shared
-/// stop deadline. A command wins over the step (whose future is dropped);
-/// a closed channel is noted and ignored.
+/// Await a flush step and any applicable deadline. Control commands take
+/// priority, and closing the control channel leaves the step running.
 async fn timed_step<F, T>(
     control: &mut ControlInput,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     future: F,
 ) -> Step<io::Result<T>>
 where
     F: Future<Output = io::Result<T>>,
 {
-    tokio::pin!(future);
+    let wait = async {
+        match deadline {
+            Some(deadline) => match timeout_at(deadline, future).await {
+                Ok(value) => Step::Value(value),
+                Err(_) => Step::TimedOut,
+            },
+            None => Step::Value(future.await),
+        }
+    };
+    tokio::pin!(wait);
     loop {
         tokio::select! {
             biased;
@@ -742,12 +762,7 @@ where
                 Some(command) => return Step::Command(command),
                 None => control.closed = true,
             },
-            result = timeout_at(deadline, &mut future) => {
-                return match result {
-                    Ok(value) => Step::Value(value),
-                    Err(_) => Step::TimedOut,
-                };
-            }
+            step = &mut wait => return step,
         }
     }
 }

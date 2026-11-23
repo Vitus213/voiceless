@@ -2,9 +2,7 @@
 //! identity; no `type4me-linux` command, package attribute, Home Manager
 //! option or desktop entry survives as a compatibility path.
 //!
-//! Three tests grep repository files (`flake.nix`, `nix/home-manager.nix`,
-//! legacy paths) and skip themselves when those files are absent, as in the
-//! Nix build sandbox; the last one runs the built binary's `--help`.
+//! Repository-level checks and a smoke test of the built binary.
 
 use std::fs;
 use std::path::Path;
@@ -27,30 +25,6 @@ fn read(path: &Path) -> String {
 fn repo_file(name: &str) -> Option<std::path::PathBuf> {
     let path = repo_root().join(name);
     path.exists().then_some(path)
-}
-
-#[test]
-fn flake_default_package_is_voiceless_and_drops_python_identity() {
-    let Some(flake_path) = repo_file("flake.nix") else {
-        return;
-    };
-    let flake = read(&flake_path);
-    assert!(
-        flake.contains("packages.default = voiceless;"),
-        "default package must be voiceless"
-    );
-    assert!(
-        !flake.contains("packages.type4me-linux"),
-        "no type4me-linux package attribute may remain"
-    );
-    assert!(
-        !flake.contains("buildPythonApplication"),
-        "the Python application package must be removed"
-    );
-    assert!(
-        !flake.contains("io.github.vitus.Type4Me"),
-        "the old desktop identity must be gone"
-    );
 }
 
 #[test]

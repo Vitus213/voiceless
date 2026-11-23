@@ -35,7 +35,7 @@ nix run github:Vitus213/voiceless -- stream   # 说话，按 Ctrl-C，Voiceless 
 | 音频 | PipeWire | 采集进程为 `pw-record`（16 kHz 单声道 PCM16） |
 | 合成器快捷键 | XDG Desktop Portal `GlobalShortcuts`（尽力而为） | 无门户时 `dev.voiceless.Daemon` D-Bus 总线可用；Home Manager 模块自带 Sway 绑定 |
 | 云端 ASR | DashScope 实时端点（`qwen3-asr-flash-realtime`） | 需要 API key |
-| 本地 ASR | Sherpa-ONNX 流式 Paraformer（`streaming-paraformer-bilingual-zh-en`） | 用 `voiceless model install` 安装，每次会话前校验 |
+| 本地 ASR | Sherpa-ONNX 流式 Paraformer（`streaming-paraformer-bilingual-zh-en`） | 用 `voiceless model install` 安装，常驻进程加载模型时校验 |
 | 批量 ASR | DashScope 多模态或本地 SenseVoice | 供 `transcribe` 与 `record` 使用 |
 
 不支持 X11、macOS、Windows。
@@ -192,11 +192,13 @@ enable_nonstream = false               # 每句二遍识别，确认文本更准
 hotwords = []                          # 例如 ["Voiceless", "NixOS"]
 
 [local]                                # local-offline：离线模型 + VAD 分段
-model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf（GPU，需 CUDA 版软件包）
+model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf（需带 GGUF 引擎的软件包）
                                        # qwen3-asr-0.6b-int8 | sense-voice-int8（CPU，Sherpa-ONNX）
 provider = "cuda"                      # cuda | cpu
 num_threads = 4                        # 仅 Sherpa-ONNX 模型使用
-partial_interval_ms = 500              # 多久重新识别一次当前句，用于实时显示
+partial_interval_ms = 500              # 首次出字后的目标刷新间隔
+fast_preview = false                   # Qwen ONNX 或 GGUF 搭配 SenseVoice CPU 实时预览
+denoise = false                        # 用 GTCRN 降噪和限幅增益后再检测与识别
 max_segment_seconds = 30.0             # 单段最长秒数，超过强制切分（GGUF ≤ 60，Sherpa ≤ 25）
 hotwords = []                          # 仅 Qwen3-ASR 支持
 
@@ -301,8 +303,28 @@ i18n.inputMethod.fcitx5.addons = [ pkgs.voiceless-fcitx5-bridge ];
 | `qwen3-asr-0.6b-int8` | `asr-models-2026-03-25`; `878702423` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2><br>`sha256-OT+KFOL1+5Z0aqqzQpl6QGQQAfvVv5WSoICoMpF47pY=` |
 | `sense-voice-int8` | `asr-models-2025-09-09`; `165783878` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2><br>`sha256-cwX3kFv893+gs5OIoxPz2jXGjZcWYaZUdbVvshYsjmM=` |
 | `silero-vad` | `asr-models`; `643854` | <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx><br>`sha256-niRJ4Qh0ltjUyrqQfyPgvT942R+lUkebucI6wJy7H9Y=` |
+| `gtcrn` | `speech-enhancement-models`，535,638 字节 | [Sherpa-ONNX GTCRN 模型](https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx) `sha256-53YDrAwj2sMifdLXE1s6WFy+4meQSK7PqIZlfTrhtTQ=` |
 
-安装过程经 HTTPS 校验 SRI 哈希与字节数；拒绝白名单外的归档成员；写入按文件哈希的 manifest；用 `versions/<id>/<version>-<digest12>` 目录与 `current` 符号链接原子激活。Voiceless 每次会话前重新校验模型，不使用损坏模型。`voiceless model list --json` 在 `license_status` 字段报告许可证状态；再分发前请独立核验许可证。
+安装时经 HTTPS 校验 SRI 哈希与字节数，按白名单检查归档成员，并写入按文件哈希的 manifest。`current` 符号链接指向 `versions/<id>/<version>-<digest12>`，原子激活模型。托管模型在加载时校验。如果常驻进程已加载模型，激活替换版本后需要重新加载引擎或重启进程。`voiceless model list --json` 在 `license_status` 字段报告许可证状态，再分发前请独立核验许可证。
+
+讲话较轻或离麦克风较远时，可运行 `voiceless model install gtcrn`，再为
+`local-offline` 设置 `[local] denoise = true`。控制台的识别引擎页也有「远讲降噪」开关。
+语音增强在检测和转写之前运行，历史录音保存的是麦克风原声。
+实测条件和数据见[语音链路调研](docs/wechat-voice-research.md)。
+
+Qwen ONNX 和 GGUF 主模型都可启用快速预览。运行 `voiceless model install sense-voice-int8`，
+设置 `[local] fast_preview = true`，再重新加载识别引擎。SenseVoice 在 CPU 上生成实时预览，
+已结束的语音段由所选 Qwen 模型定稿。预览文字可能与最终结果不同。标准 `voiceless-cpu`
+软件包可用 `qwen3-asr-0.6b-int8` 启用此设置。
+
+支持 x86-64-v3 的机器可以用 `nix run .#voiceless-cpu-avx2 -- doctor` 运行带 AVX2 GGUF
+引擎的 CPU 版。用这个包做本地 GGUF 听写时，将 `[local] provider` 设为 `"cpu"`。
+两种 Qwen GGUF 尺寸均支持此配置。想缩短定稿等待，可把 `[local] model` 设为
+`"qwen3-asr-0.6b-gguf"`。真实中文回放中，0.6B 定稿更快，字错率也更高。
+[模型实测对照](docs/wechat-voice-research.md#qwen-final-model-size-on-real-recordings)
+
+Home Manager 可以通过 `programs.voiceless.package` 选择
+`inputs.voiceless.packages.${pkgs.system}.voiceless-cpu-avx2`。标准 CPU 包仍可用 `voiceless-cpu`。
 
 ## 从 type4me-linux 迁移
 
@@ -339,7 +361,7 @@ flowchart TB
 3. **固定停止次序、一次注入。** 停止新块 → 停采集 → 冲刷尾帧 → FIFO drain → 恰好一次 `finish` → 读最终事件 → 至多注入一次。取消路径不注入部分文本。
 4. **录音是装饰器。** `WavRecorder` 包装 `AudioCapture`，把 chunk 镜像进 `.partial` 文件。只有成功会话 finalize WAV。镜像失败只禁用保存，不影响识别、注入、历史。cancel 与 drop 删除临时文件。音频行与文件同生同死。
 5. **控制源参数化。** `stream::run_with_control` 接收命令 channel。CLI 映射 SIGINT/SIGTERM（第一次停止、第二次取消）；daemon 映射热键 Activate/Cancel，gateway 状态机保证同一时刻至多一个会话。
-6. **私有 XDG 持久化。** 配置带 0600 密钥门禁；历史为 WAL SQLite、权限 0600；录音在 `data/audio/`；模型原子激活且每次会话前校验。用户数据不进 Nix store。
+6. **私有 XDG 持久化。** 密钥配置和 WAL SQLite 历史使用 0600 权限。录音在 `data/audio/`。托管模型原子激活，在加载时校验。用户数据保存在 Nix store 之外。
 7. **内嵌控制台。** `console/` 是 daemon 内的 axum 服务：仅监听回环、校验 `Host`、每次启动生成令牌、拒绝跨站写入、密钥只写不读。前端经 `include_str!` 内嵌。音频 URL 只含 record id，文件路径从数据库行读取。
 8. **严格配置契约。** 未知键报错；已移除的旧值被拒绝，Voiceless 不静默改写。
 

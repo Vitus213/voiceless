@@ -31,6 +31,7 @@
 //! count. Decoding itself cannot fail. No retries or fallback inside.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sherpa_onnx::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 use thiserror::Error;
@@ -74,14 +75,11 @@ struct ModelFiles {
     tokens: PathBuf,
 }
 
-/// One streaming Paraformer session: a Sherpa `OnlineRecognizer` plus its
-/// single `OnlineStream`, and the transcript bookkeeping that turns Sherpa's
-/// cumulative result into `Partial`/`Completed`/`Finished` events. Not
-/// thread-safe by itself; `LocalTransport` guards it with a mutex. Owns the
-/// model, so building one loads it (hundreds of MB) and dropping it frees it.
+/// One streaming Paraformer session with a fresh Sherpa stream and its own
+/// transcript state. The daemon can share the loaded model across sessions.
 pub struct LocalStreamingRecognizer {
-    recognizer: OnlineRecognizer,
     stream: OnlineStream,
+    recognizer: Arc<OnlineRecognizer>,
     /// Scratch buffer for the PCM16 -> f32 conversion, reused per chunk.
     samples: Vec<f32>,
     /// Last partial emitted, to suppress identical repeats.
@@ -96,12 +94,11 @@ impl LocalStreamingRecognizer {
     ///
     /// Blocking and slow (model load). Errors: `ModelDirectoryMissing`,
     /// `MissingModelFile`, `InvalidModelPath`, `RecognizerUnavailable`.
-    /// Fixed settings: CPU provider, one thread, greedy search, endpoint
-    /// detection with Sherpa's three rules (2.4 s of trailing silence when
-    /// nothing was decoded yet, 1.2 s once some text was decoded, or an
-    /// utterance of 20 s regardless of silence).
     pub fn new(model_dir: impl AsRef<Path>) -> Result<Self, LocalAsrError> {
-        let model_dir = model_dir.as_ref();
+        Ok(Self::from_model(Self::load_model(model_dir.as_ref())?))
+    }
+
+    pub(crate) fn load_model(model_dir: &Path) -> Result<Arc<OnlineRecognizer>, LocalAsrError> {
         let files = required_model_files(model_dir)?;
         let mut config = OnlineRecognizerConfig::default();
         config.model_config.paraformer.encoder = Some(path_string(&files.encoder)?);
@@ -119,16 +116,20 @@ impl LocalStreamingRecognizer {
         config.rule2_min_trailing_silence = 1.2;
         config.rule3_min_utterance_length = 20.0;
 
-        let recognizer = OnlineRecognizer::create(&config)
-            .ok_or_else(|| LocalAsrError::RecognizerUnavailable(model_dir.to_owned()))?;
+        OnlineRecognizer::create(&config)
+            .map(Arc::new)
+            .ok_or_else(|| LocalAsrError::RecognizerUnavailable(model_dir.to_owned()))
+    }
+
+    pub(crate) fn from_model(recognizer: Arc<OnlineRecognizer>) -> Self {
         let stream = recognizer.create_stream();
-        Ok(Self {
+        Self {
             recognizer,
             stream,
             samples: Vec::new(),
             last_partial: String::new(),
             confirmed_text: String::new(),
-        })
+        }
     }
 
     /// Feed one PCM16 LE 16 kHz mono chunk and decode what is ready.
@@ -162,6 +163,8 @@ impl LocalStreamingRecognizer {
     /// interface symmetry with `accept_pcm`).
     pub fn finish(&mut self) -> Result<Vec<RealtimeEvent>, LocalAsrError> {
         self.stream.input_finished();
+        // Paraformer only decodes a short final chunk with this option set.
+        self.stream.set_option("is_final", "1");
         let mut events = self.decode_ready();
         // Text left in the stream after the last decode never saw an
         // endpoint; it goes straight into the final transcript.

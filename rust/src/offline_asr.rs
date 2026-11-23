@@ -5,10 +5,10 @@
 //! GGUF models on transcribe.cpp (`qwen3-asr-1.7b-gguf`,
 //! `qwen3-asr-0.6b-gguf`; CUDA or CPU, see `gguf_asr.rs`, compiled with the
 //! `transcribe` feature). Silero VAD splits speech at pauses: every closed
-//! segment gets a final decode (`Completed`), and the open segment is
-//! re-decoded every `partial_interval` for the live partial. Decoding runs
-//! on a dedicated worker thread, so a slow decode never stalls audio
-//! capture; queued audio is coalesced before the next partial.
+//! segment gets a final decode. The preview worker re-decodes the open
+//! segment and uses a separate, ordered finalization thread when fast
+//! previews are enabled. Pending segments keep their last preview visible.
+//! Optional GTCRN enhancement runs on the same worker ahead of Silero.
 //!
 //! Config: `[local]` (`model`, `provider`, `num_threads`,
 //! `partial_interval_ms`, `max_segment_seconds`, `hotwords`) merged with
@@ -28,14 +28,12 @@
 //! and does not trigger `fallback_backend`: `stream.rs` only falls back
 //! when the model cannot be resolved before the transport starts. Partial
 //! text is a re-decode of the whole open segment (pre-roll plus everything
-//! since the last pause), so it may rewrite earlier words; confirmed text
-//! is one `Completed` per VAD segment, decoded with the tail of the
-//! confirmed text as context for decoders that support it. `finish` feeds
-//! the remaining samples, flushes the VAD, decodes the segments that closes
-//! and reports `Finished` with the concatenated confirmed text (which is
-//! why `stream.rs` raises the coordinator's finish timeout to 20 s for this
-//! backend). `cancel` stops the worker without decoding; nothing is
-//! injected.
+//! since the last pause), so it may rewrite earlier words. Each VAD segment
+//! is finalized with the tail of the preceding confirmed text as context.
+//! With fast previews, the confirmation also carries the newer tentative
+//! suffix so the UI updates both in one event. `finish` flushes the audio
+//! and VAD and waits for all final decodes before sending `Finished`.
+//! Cancellation discards pending work and joins any active native decode.
 //!
 //! Failure semantics: `create_decoder`, `create_recognizer` and
 //! `create_vad` return `OfflineAsrError`; inside the transport such an
@@ -43,14 +41,16 @@
 //! Decoders never fail a session: a decode error yields an empty string for
 //! that segment (see `gguf_asr.rs`). No retries and no fallback here.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sherpa_onnx::{
-    OfflineQwen3ASRModelConfig, OfflineRecognizer, OfflineRecognizerConfig, VadModelConfig,
-    VoiceActivityDetector,
+    OfflineQwen3ASRModelConfig, OfflineRecognizer, OfflineRecognizerConfig, OnlineSpeechDenoiser,
+    OnlineSpeechDenoiserConfig, SpeechSegment, VadModelConfig, VoiceActivityDetector,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -66,6 +66,12 @@ const VAD_WINDOW: usize = 512;
 const PRE_ROLL_SAMPLES: usize = 10 * VAD_WINDOW;
 /// Confirmed text handed to context-aware decoders, in characters.
 const CONTEXT_CHARS: usize = 120;
+/// Retry an empty first preview after more speech arrives.
+const FIRST_PREVIEW_RETRY: Duration = Duration::from_millis(160);
+/// Retry an unchanged preview while keeping the compute-based lower bound.
+const UNCHANGED_PREVIEW_RETRY: Duration = Duration::from_millis(250);
+/// Bound a worker batch so queued audio cannot starve preview evaluation.
+const WORKER_BATCH_LIMIT: usize = 8;
 
 /// One offline decode of a speech segment. `context` is the tail of the
 /// text confirmed before this segment; decoders that support context
@@ -106,6 +112,9 @@ pub enum OfflineAsrError {
     /// The Silero VAD model could not be loaded from this path.
     #[error("VAD could not be created from {0}")]
     VadUnavailable(PathBuf),
+    /// The GTCRN enhancement model could not be loaded at the capture rate.
+    #[error("16 kHz speech denoiser could not be created from {0}")]
+    DenoiserUnavailable(PathBuf),
     /// The catalog id matches no family (`for_model`).
     #[error("no offline model family for model id: {0}")]
     UnknownFamily(String),
@@ -252,24 +261,37 @@ pub fn decode(recognizer: &OfflineRecognizer, samples: &[f32]) -> String {
         .unwrap_or_default()
 }
 
-/// Load the Silero VAD from `model` (`silero_vad.onnx`) tuned for
-/// dictation: speech probability threshold 0.5, a segment closes after
-/// 0.5 s of silence, speech shorter than 0.25 s is ignored, and a segment
-/// is force-closed at `max_segment_seconds` (`[local] max_segment_seconds`
-/// or the family default) so one segment never exceeds what the decoder
-/// can hold. Always on the CPU with one thread; the VAD's internal buffer
-/// holds the longest segment plus 10 s of slack. One VAD per session (it
-/// is stateful); the decoder behind it may be shared.
+/// Load Silero for offline file decoding with a 250 ms speech onset.
 pub fn create_vad(
     model: &Path,
     max_segment_seconds: f32,
 ) -> Result<VoiceActivityDetector, OfflineAsrError> {
+    configured_vad(model, max_segment_seconds, 0.5, 0.25)
+}
+
+pub(crate) fn create_session_vad(
+    model: &Path,
+    max_segment_seconds: f32,
+    enhanced: bool,
+) -> Result<VoiceActivityDetector, OfflineAsrError> {
+    // Enhanced speech can stay below the raw-input threshold at low SNR.
+    // Require a longer onset on the enhanced path to reject short noise bursts.
+    let (threshold, min_speech_seconds) = if enhanced { (0.25, 0.25) } else { (0.5, 0.16) };
+    configured_vad(model, max_segment_seconds, threshold, min_speech_seconds)
+}
+
+fn configured_vad(
+    model: &Path,
+    max_segment_seconds: f32,
+    threshold: f32,
+    min_speech_seconds: f32,
+) -> Result<VoiceActivityDetector, OfflineAsrError> {
     let mut config = VadModelConfig::default();
     config.silero_vad.model = Some(path_string(model)?);
-    config.silero_vad.threshold = 0.5;
+    config.silero_vad.threshold = threshold;
     // Dictation pauses mid-sentence; only a real pause closes a segment.
     config.silero_vad.min_silence_duration = 0.5;
-    config.silero_vad.min_speech_duration = 0.25;
+    config.silero_vad.min_speech_duration = min_speech_seconds;
     config.silero_vad.max_speech_duration = max_segment_seconds;
     config.silero_vad.window_size = VAD_WINDOW as i32;
     config.sample_rate = SAMPLE_RATE;
@@ -277,6 +299,153 @@ pub fn create_vad(
     config.provider = Some("cpu".to_owned());
     VoiceActivityDetector::create(&config, max_segment_seconds + 10.0)
         .ok_or_else(|| OfflineAsrError::VadUnavailable(model.to_owned()))
+}
+
+struct SpeechEnhancer {
+    denoiser: OnlineSpeechDenoiser,
+    input: VecDeque<f32>,
+    level: f32,
+}
+
+impl SpeechEnhancer {
+    fn new(model: &Path) -> Result<Self, OfflineAsrError> {
+        let mut config = OnlineSpeechDenoiserConfig::default();
+        config.model.gtcrn.model = Some(path_string(model)?);
+        let denoiser = OnlineSpeechDenoiser::create(&config)
+            .filter(|denoiser| denoiser.sample_rate() == SAMPLE_RATE)
+            .ok_or_else(|| OfflineAsrError::DenoiserUnavailable(model.to_owned()))?;
+        Ok(Self {
+            denoiser,
+            input: VecDeque::new(),
+            level: 0.0,
+        })
+    }
+
+    fn accept(&mut self, samples: &[f32]) -> Vec<f32> {
+        self.input.extend(samples);
+        let audio = self.denoiser.run(samples, SAMPLE_RATE).samples;
+        self.mix_and_amplify(audio)
+    }
+
+    fn finish(&mut self) -> Vec<f32> {
+        let audio = self.denoiser.flush().samples;
+        self.mix_and_amplify(audio)
+    }
+
+    fn mix_and_amplify(&mut self, mut samples: Vec<f32>) -> Vec<f32> {
+        // Sherpa aligns its delayed output to the input sample sequence.
+        // Retain a little original signal for weak consonants and onsets.
+        let count = samples.len();
+        for (sample, dry) in samples.iter_mut().zip(self.input.drain(..count)) {
+            *sample = 0.65 * *sample + 0.35 * dry;
+        }
+        self.apply_gain(&mut samples);
+        samples
+    }
+
+    fn apply_gain(&mut self, samples: &mut [f32]) {
+        // Track gain over short frames, with headroom for transients.
+        for frame in samples.chunks_mut(VAD_WINDOW) {
+            let mut sum_squares = 0.0;
+            let mut peak: f32 = 0.0;
+            for &sample in frame.iter() {
+                sum_squares += sample * sample;
+                peak = peak.max(sample.abs());
+            }
+            let rms = (sum_squares / frame.len() as f32).sqrt();
+            // Track louder speech quickly and release slowly between syllables.
+            self.level = rms.max(self.level * 0.93);
+            // Target about -26 dBFS, capped at +18 dB with peak headroom.
+            let gain = (0.05 / self.level).clamp(1.0, 8.0).min(0.98 / peak);
+            for sample in frame {
+                *sample *= gain;
+            }
+        }
+    }
+}
+
+/// When previews use a separate model, a single decoder thread owns the
+/// closed segments and their context. The capture worker owns visible text.
+struct BackgroundDecoder {
+    jobs: Option<std_mpsc::Sender<(SpeechSegment, usize)>>,
+    previews: VecDeque<String>,
+    cancelled: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BackgroundDecoder {
+    fn start(
+        decoder: Arc<dyn Decoder>,
+        cancelled: Arc<AtomicBool>,
+        results: std_mpsc::Sender<Command>,
+    ) -> Self {
+        let (jobs, queue) = std_mpsc::channel::<(SpeechSegment, usize)>();
+        let results = FinalizationResults(results);
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker = std::thread::spawn(move || {
+            let mut context = String::new();
+            for (segment, length) in queue {
+                if worker_cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                let text = decoder.decode(&segment.samples()[..length], &context);
+                context.push_str(&text);
+                let excess = context.len() - context_tail(&context).len();
+                context.drain(..excess);
+                if results.send(text).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            jobs: Some(jobs),
+            previews: VecDeque::new(),
+            cancelled,
+            worker: Some(worker),
+        }
+    }
+
+    fn submit(&mut self, segment: SpeechSegment, length: usize, preview: String) -> bool {
+        if self.jobs.as_ref().unwrap().send((segment, length)).is_err() {
+            return false;
+        }
+        self.previews.push_back(preview);
+        true
+    }
+}
+
+impl Drop for BackgroundDecoder {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.jobs.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// Wake the capture worker if the decoder exits while it still expects results.
+struct FinalizationResults(std_mpsc::Sender<Command>);
+
+impl FinalizationResults {
+    fn send(&self, text: String) -> Result<(), std_mpsc::SendError<Command>> {
+        self.0.send(Command::SegmentDecoded(text))
+    }
+}
+
+impl Drop for FinalizationResults {
+    fn drop(&mut self) {
+        let _ = self.0.send(Command::FinalizerStopped);
+    }
+}
+
+fn context_tail(text: &str) -> &str {
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(CONTEXT_CHARS - 1)
+        .map_or(0, |(start, _)| start);
+    &text[start..]
 }
 
 /// VAD-segmented recognition state; synchronous, owned by the worker.
@@ -288,23 +457,23 @@ pub fn create_vad(
 /// grows by one entry per decoded segment and is what `finish` reports.
 pub struct SegmentedRecognizer {
     decoder: Arc<dyn Decoder>,
+    preview: Option<Arc<dyn Decoder>>,
+    background: Option<BackgroundDecoder>,
     vad: VoiceActivityDetector,
-    /// Minimum time between two partial decodes (`[local]
-    /// partial_interval_ms`; one hour in the console's offline jobs to
-    /// disable partials).
+    /// Target cadence after the first live text (`[local].partial_interval_ms`).
     partial_interval: Duration,
     /// Samples not yet forming a full VAD window.
     pending: Vec<f32>,
     /// Audio since the last closed segment (bounded to the pre-roll until
     /// speech starts); the input of the live partial.
     open_segment: Vec<f32>,
-    /// The VAD has seen speech in the open segment; partials are only
-    /// decoded (and the pre-roll trim stops) once this is set.
-    speech_started: bool,
-    last_partial_at: Option<Instant>,
+    processed_samples: usize,
+    /// Start time, cooldown and audio length of the last preview attempt.
+    last_preview: Option<(Instant, Duration, usize)>,
+    enhancement: Option<SpeechEnhancer>,
     last_partial: String,
-    /// Text of every closed segment, in order.
-    confirmed: Vec<String>,
+    /// Concatenated text of the closed segments in capture order.
+    confirmed: String,
 }
 
 impl SegmentedRecognizer {
@@ -316,43 +485,80 @@ impl SegmentedRecognizer {
     ) -> Self {
         Self {
             decoder,
+            preview: None,
+            background: None,
             vad,
             partial_interval,
             pending: Vec::new(),
             open_segment: Vec::new(),
-            speech_started: false,
-            last_partial_at: None,
+            processed_samples: 0,
+            last_preview: None,
+            enhancement: None,
             last_partial: String::new(),
-            confirmed: Vec::new(),
+            confirmed: String::new(),
         }
+    }
+
+    /// Use a separate decoder for tentative text. Closed segments always
+    /// use the configured primary decoder.
+    pub(crate) fn with_preview(mut self, preview: Option<Arc<dyn Decoder>>) -> Self {
+        self.preview = preview;
+        self
+    }
+
+    /// Enable streaming GTCRN and bounded gain ahead of the VAD and decoder.
+    pub(crate) fn with_denoiser(mut self, model: &Path) -> Result<Self, OfflineAsrError> {
+        self.enhancement = Some(SpeechEnhancer::new(model)?);
+        Ok(self)
     }
 
     /// Feed samples through the VAD; close finished segments.
     ///
-    /// Returns one `Completed` per segment the VAD closed with these
-    /// samples (decoded synchronously, so this blocks for the decode).
+    /// Closed segments are decoded here unless the transport has enabled
+    /// background finalization for a separate preview model.
     /// Samples that do not fill a whole 512-sample window stay in
     /// `pending` for the next call.
     pub fn accept(&mut self, samples: &[f32]) -> Vec<RealtimeEvent> {
-        self.pending.extend_from_slice(samples);
-        let mut offset = 0;
-        while offset + VAD_WINDOW <= self.pending.len() {
-            let window = &self.pending[offset..offset + VAD_WINDOW];
-            self.vad.accept_waveform(window);
-            self.open_segment.extend_from_slice(window);
-            if !self.speech_started && self.vad.detected() {
-                self.speech_started = true;
-            }
-            offset += VAD_WINDOW;
+        if let Some(enhancement) = &mut self.enhancement {
+            let audio = enhancement.accept(samples);
+            self.accept_enhanced(&audio)
+        } else {
+            self.accept_enhanced(samples)
         }
-        self.pending.drain(..offset);
-        // Silence before speech is kept only as a short pre-roll, so the
-        // partial decode never runs over minutes of leading silence.
-        if !self.speech_started && self.open_segment.len() > PRE_ROLL_SAMPLES {
-            let excess = self.open_segment.len() - PRE_ROLL_SAMPLES;
+    }
+
+    fn accept_enhanced(&mut self, mut samples: &[f32]) -> Vec<RealtimeEvent> {
+        let mut events = Vec::new();
+        if !self.pending.is_empty() {
+            let needed = VAD_WINDOW - self.pending.len();
+            let (prefix, remainder) = samples.split_at(needed.min(samples.len()));
+            self.pending.extend_from_slice(prefix);
+            if self.pending.len() < VAD_WINDOW {
+                return events;
+            }
+            let mut pending = std::mem::take(&mut self.pending);
+            self.accept_window(&pending, &mut events);
+            pending.clear();
+            self.pending = pending;
+            samples = remainder;
+        }
+        let mut windows = samples.chunks_exact(VAD_WINDOW);
+        for window in &mut windows {
+            self.accept_window(window, &mut events);
+        }
+        self.pending.extend_from_slice(windows.remainder());
+        events
+    }
+
+    fn accept_window(&mut self, window: &[f32], events: &mut Vec<RealtimeEvent>) {
+        self.vad.accept_waveform(window);
+        self.processed_samples += window.len();
+        self.open_segment.extend_from_slice(window);
+        self.drain_segments(events);
+        if !self.vad.detected() {
+            let excess = self.open_segment.len().saturating_sub(PRE_ROLL_SAMPLES);
             self.open_segment.drain(..excess);
         }
-        self.drain_segments()
     }
 
     /// Re-decode the open segment when the partial interval has elapsed.
@@ -363,83 +569,151 @@ impl SegmentedRecognizer {
     /// unchanged. The decode covers the whole open segment, so the partial
     /// is a full rewrite rather than an append (the UI replaces it).
     pub fn partial(&mut self) -> Vec<RealtimeEvent> {
-        if !self.speech_started {
+        if !self.vad.detected() {
             return Vec::new();
         }
-        if let Some(at) = self.last_partial_at {
-            if at.elapsed() < self.partial_interval {
+        let samples = self.open_segment.len();
+        if let Some((at, delay, previous_samples)) = self.last_preview {
+            if at.elapsed() < delay || samples <= previous_samples {
                 return Vec::new();
             }
         }
-        // Timed from the start of the decode: a slow decoder self-limits
-        // to one partial per interval plus decode time.
-        self.last_partial_at = Some(Instant::now());
-        let text = self.decoder.decode(&self.open_segment, &self.context());
+        let started = Instant::now();
+        let text = match &self.preview {
+            Some(preview) => preview.decode(&self.open_segment, ""),
+            None => self
+                .decoder
+                .decode(&self.open_segment, context_tail(&self.confirmed)),
+        };
+        let interval = if text.is_empty() && self.last_partial.is_empty() {
+            self.partial_interval.min(FIRST_PREVIEW_RETRY)
+        } else if text.is_empty() || text == self.last_partial {
+            self.partial_interval.min(UNCHANGED_PREVIEW_RETRY)
+        } else {
+            self.partial_interval
+        };
+        let delay = interval.max(started.elapsed().saturating_mul(2));
+        self.last_preview = Some((started, delay, samples));
         if text.is_empty() || text == self.last_partial {
             return Vec::new();
         }
-        self.last_partial = text.clone();
+        self.last_partial = text;
         vec![RealtimeEvent::Partial {
-            text,
+            text: self.visible_preview(),
             stash: String::new(),
         }]
     }
 
-    /// Flush the VAD, close the last segment and report the transcript.
-    ///
-    /// The sub-window remainder in `pending` is fed as-is, the VAD is
-    /// flushed so speech without a trailing pause still becomes a segment,
-    /// every closed segment is decoded (`Completed`), and the last event is
-    /// `Finished` with all confirmed text concatenated. The open-segment
-    /// partial plays no part in the final text. Blocking for the decodes.
+    /// Flush and finalize a synchronous recognition run. The streaming
+    /// transport flushes separately when it must wait for background results.
     pub fn finish(&mut self) -> Vec<RealtimeEvent> {
-        let tail = std::mem::take(&mut self.pending);
-        if !tail.is_empty() {
-            self.vad.accept_waveform(&tail);
-            self.open_segment.extend_from_slice(&tail);
-        }
-        self.vad.flush();
-        let mut events = self.drain_segments();
+        let mut events = self.flush_audio();
         events.push(RealtimeEvent::Finished {
-            transcript: self.confirmed.concat(),
+            transcript: self.confirmed.clone(),
         });
         events
     }
 
-    /// The last `CONTEXT_CHARS` characters of the confirmed transcript.
-    fn context(&self) -> String {
-        let confirmed = self.confirmed.concat();
-        let skip = confirmed.chars().count().saturating_sub(CONTEXT_CHARS);
-        confirmed.chars().skip(skip).collect()
+    fn flush_audio(&mut self) -> Vec<RealtimeEvent> {
+        let mut events = if let Some(enhancement) = &mut self.enhancement {
+            let audio = enhancement.finish();
+            self.accept_enhanced(&audio)
+        } else {
+            Vec::new()
+        };
+        if !self.pending.is_empty() {
+            let mut tail = std::mem::take(&mut self.pending);
+            self.processed_samples += tail.len();
+            tail.resize(VAD_WINDOW, 0.0);
+            self.vad.accept_waveform(&tail);
+        }
+        self.vad.flush();
+        self.drain_segments(&mut events);
+        events
     }
 
-    /// Decode every segment the VAD has closed, in order. The segment audio
-    /// comes from the VAD (speech bounds), not from `open_segment`; closing
-    /// a segment resets the open segment and the partial state so the next
-    /// utterance starts clean. Empty decodes confirm nothing.
-    fn drain_segments(&mut self) -> Vec<RealtimeEvent> {
-        let mut events = Vec::new();
+    fn visible_preview(&self) -> String {
+        self.background
+            .iter()
+            .flat_map(|background| background.previews.iter())
+            .chain(std::iter::once(&self.last_partial))
+            .map(String::as_str)
+            .collect()
+    }
+
+    fn finalized_segment(&mut self, transcript: String) -> RealtimeEvent {
+        self.background.as_mut().unwrap().previews.pop_front();
+        self.confirmed.push_str(&transcript);
+        RealtimeEvent::SegmentFinalized {
+            transcript,
+            preview: self.visible_preview(),
+        }
+    }
+
+    fn has_pending_finalizations(&self) -> bool {
+        self.background
+            .as_ref()
+            .is_some_and(|worker| !worker.previews.is_empty())
+    }
+
+    fn start_finalizer(&mut self, cancelled: Arc<AtomicBool>, results: std_mpsc::Sender<Command>) {
+        if self.preview.is_some() {
+            self.background = Some(BackgroundDecoder::start(
+                self.decoder.clone(),
+                cancelled,
+                results,
+            ));
+        }
+    }
+
+    /// Decode closed segments at their window boundary. Keep only trailing
+    /// audio after the segment as pre-roll for the next speech onset.
+    fn drain_segments(&mut self, events: &mut Vec<RealtimeEvent>) {
         while let Some(segment) = self.vad.front() {
             self.vad.pop();
-            let text = self.decoder.decode(segment.samples(), &self.context());
-            self.open_segment.clear();
-            self.speech_started = false;
-            self.last_partial.clear();
-            self.last_partial_at = None;
-            if !text.is_empty() {
-                self.confirmed.push(text.clone());
-                events.push(RealtimeEvent::Completed { transcript: text });
+            let start = segment.start() as usize;
+            let length = segment
+                .samples()
+                .len()
+                .min(self.processed_samples.saturating_sub(start));
+            let end = start + length;
+            let keep = self
+                .processed_samples
+                .saturating_sub(end)
+                .min(PRE_ROLL_SAMPLES)
+                .min(self.open_segment.len());
+            self.open_segment.drain(..self.open_segment.len() - keep);
+            let preview = std::mem::take(&mut self.last_partial);
+            self.last_preview = None;
+            if let Some(background) = &mut self.background {
+                if !background.submit(segment, length, preview) {
+                    events.push(finalizer_stopped());
+                    return;
+                }
+            } else {
+                let text = self
+                    .decoder
+                    .decode(&segment.samples()[..length], context_tail(&self.confirmed));
+                if !text.is_empty() {
+                    self.confirmed.push_str(&text);
+                    events.push(RealtimeEvent::Completed { transcript: text });
+                }
             }
         }
-        events
     }
 }
 
-/// Worker commands: samples to feed, the single finish, or stop at once.
+fn finalizer_stopped() -> RealtimeEvent {
+    RealtimeEvent::Error("offline segment decoder stopped".to_owned())
+}
+
+/// Inputs and ordered decode results handled by the capture worker.
 enum Command {
     Audio(Vec<f32>),
     Finish,
     Cancel,
+    SegmentDecoded(String),
+    FinalizerStopped,
 }
 
 /// Streaming transport over a `SegmentedRecognizer` running on its own
@@ -457,6 +731,7 @@ pub struct OfflineTransport {
     events: tokio::sync::Mutex<mpsc::UnboundedReceiver<RealtimeEvent>>,
     /// `finish` sends `Command::Finish` at most once.
     finished: bool,
+    cancelled: Arc<AtomicBool>,
     /// Joined on drop: the worker must release the decoder (GPU buffers)
     /// before the process exits, or CUDA's own exit teardown races the free
     /// and aborts.
@@ -473,7 +748,10 @@ impl OfflineTransport {
         F: FnOnce() -> Result<SegmentedRecognizer, OfflineAsrError> + Send + 'static,
     {
         let (command_tx, command_rx) = std_mpsc::channel::<Command>();
+        let worker_commands = command_tx.clone();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
         // Ready before load: capture must not wait for the model, and
         // audio sent meanwhile simply queues on the command channel.
         let _ = event_tx.send(RealtimeEvent::Ready);
@@ -487,38 +765,62 @@ impl OfflineTransport {
                     return;
                 }
             };
-            let send = |events: Vec<RealtimeEvent>| {
-                events.into_iter().all(|event| event_tx.send(event).is_ok())
+            recognizer.start_finalizer(Arc::clone(&worker_cancelled), worker_commands);
+            let send = |event: RealtimeEvent| {
+                let failed = matches!(&event, RealtimeEvent::Error(_));
+                !worker_cancelled.load(Ordering::Relaxed) && event_tx.send(event).is_ok() && !failed
             };
-            // Each loop turn: one blocking wait, then everything that
-            // accumulated, then at most one partial. A receiver that went
-            // away (transport dropped) ends the loop through `send`.
+            // A result wakes the same loop as incoming audio. After flushing,
+            // wait for all submitted segments while still accepting cancellation.
+            let mut finishing = false;
             while let Ok(command) = command_rx.recv() {
-                // Coalesce everything queued while the last decode ran.
-                let mut batch = vec![command];
-                batch.extend(command_rx.try_iter());
                 let mut finish = false;
-                for command in batch {
+                for command in std::iter::once(command)
+                    .chain(command_rx.try_iter().take(WORKER_BATCH_LIMIT - 1))
+                {
+                    if worker_cancelled.load(Ordering::Relaxed) {
+                        return;
+                    }
                     match command {
-                        Command::Audio(samples) => {
-                            if !send(recognizer.accept(&samples)) {
+                        Command::Audio(samples) if !finishing => {
+                            if !recognizer.accept(&samples).into_iter().all(&send) {
                                 return;
                             }
                         }
-                        // Audio queued behind Finish in the same batch is
-                        // still fed first: the loop reaches it before the
-                        // flag is acted on.
-                        Command::Finish => finish = true,
+                        Command::Audio(_) => {}
+                        Command::SegmentDecoded(text) => {
+                            if !send(recognizer.finalized_segment(text)) {
+                                return;
+                            }
+                        }
+                        Command::FinalizerStopped => {
+                            send(finalizer_stopped());
+                            return;
+                        }
+                        Command::Finish => {
+                            finish = true;
+                            break;
+                        }
                         Command::Cancel => return,
                     }
                 }
-                if finish {
-                    // The worker exits after Finished; the event channel
-                    // closes once `event_tx` drops with it.
-                    send(recognizer.finish());
+                if worker_cancelled.load(Ordering::Relaxed) {
                     return;
                 }
-                if !send(recognizer.partial()) {
+                if finish && !finishing {
+                    if !recognizer.flush_audio().into_iter().all(&send) {
+                        return;
+                    }
+                    finishing = true;
+                }
+                if finishing {
+                    if !recognizer.has_pending_finalizations() {
+                        send(RealtimeEvent::Finished {
+                            transcript: std::mem::take(&mut recognizer.confirmed),
+                        });
+                        return;
+                    }
+                } else if !recognizer.partial().into_iter().all(&send) {
                     return;
                 }
             }
@@ -527,6 +829,7 @@ impl OfflineTransport {
             commands: command_tx,
             events: tokio::sync::Mutex::new(event_rx),
             finished: false,
+            cancelled,
             worker: Some(worker),
         }
     }
@@ -549,9 +852,9 @@ impl OfflineTransport {
         self.send(Command::Audio(samples))
     }
 
-    /// Next worker event: `Ready` first, then `Completed`/`Partial` in
-    /// decode order, then `Finished` (or one `Error`). `Err(UnexpectedEof)`
-    /// once the worker has exited and the queue is drained.
+    /// Next worker event: `Ready`, then live previews and segment
+    /// confirmations, then `Finished` or `Error`. Returns `UnexpectedEof`
+    /// once the worker has exited and all events have been read.
     pub async fn next_event(&self) -> std::io::Result<RealtimeEvent> {
         self.events.lock().await.recv().await.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "offline worker closed")
@@ -570,9 +873,10 @@ impl OfflineTransport {
         self.send(Command::Finish)
     }
 
-    /// Ask the worker to stop without decoding. Never fails: a worker that
-    /// already exited needs no cancel.
+    /// Cancel pending audio and wake an idle worker. An in-flight native
+    /// decode is allowed to release its resources before the worker exits.
     pub fn cancel(&self) -> std::io::Result<()> {
+        self.cancelled.store(true, Ordering::Relaxed);
         let _ = self.commands.send(Command::Cancel);
         Ok(())
     }
@@ -587,9 +891,8 @@ impl OfflineTransport {
 
 impl Drop for OfflineTransport {
     fn drop(&mut self) {
-        // A finished worker has already returned; otherwise stop it. Either
-        // way wait, bounded by one decode.
-        let _ = self.commands.send(Command::Cancel);
+        // Release the model before process teardown, even on cancellation.
+        let _ = self.cancel();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

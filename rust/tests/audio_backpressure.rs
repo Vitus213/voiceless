@@ -154,8 +154,8 @@ async fn slow_transport_overrunning_the_bounded_queue_fails_the_session() {
     );
 }
 
-/// Capture EOF acts as the stop: three chunks and the tail are appended
-/// once each, in order, then one final transcript.
+/// A capture burst larger than the queue fits through a ready sender. EOF
+/// flushes the aligned tail after each chunk reaches the backend in order.
 #[tokio::test]
 async fn chunks_are_delivered_in_capture_order_exactly_once() {
     let log = new_log();
@@ -164,7 +164,8 @@ async fn chunks_are_delivered_in_capture_order_exactly_once() {
     transport.after_finish(Ok(RealtimeEvent::Finished {
         transcript: "完整".to_owned(),
     }));
-    let chunks: Vec<Vec<u8>> = (0..3).map(|index| vec![index as u8 + 1; 64]).collect();
+    let sizes = (1..=17).map(|index| index * 64);
+    let chunks = sizes.clone().map(|size| vec![1; size]).collect();
     let mut capture = FakeCapture::new(log.clone(), chunks, Some(vec![9; 32]));
     capture.eof_on_empty = true;
     let mut plan = SessionPlan::new("cloud-realtime", false);
@@ -173,19 +174,66 @@ async fn chunks_are_delivered_in_capture_order_exactly_once() {
     let (code, events, log_entries) = run_fixture(plan, capture, transport).await;
 
     assert_eq!(code, 0);
-    let appends: Vec<&String> = log_entries
+    let appends: Vec<usize> = log_entries
         .iter()
-        .filter(|entry| entry.starts_with("transport.append:"))
+        .filter_map(|entry| entry.strip_prefix("transport.append:"))
+        .map(|size| size.parse().unwrap())
         .collect();
     assert_eq!(
         appends,
-        vec![
-            "transport.append:64",
-            "transport.append:64",
-            "transport.append:64",
-            "transport.append:32",
-        ],
+        sizes.chain([32]).collect::<Vec<_>>(),
         "every chunk and the tail must arrive once, in order: {log_entries:?}"
     );
     assert!(event_kinds(&events).contains(&"final"));
+}
+
+#[tokio::test]
+async fn audio_send_deadline_outlives_capture_wakeups() {
+    let log = new_log();
+    let mut transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Ready));
+    transport.append_delay = Duration::from_secs(1);
+    let mut capture = FakeCapture::new(log, vec![vec![0; 64]; 40], None);
+    capture.chunk_interval = Duration::from_millis(5);
+    let mut plan = SessionPlan::new("cloud-realtime", false);
+    plan.queue_capacity = 40;
+    plan.send_deadline = Duration::from_millis(25);
+
+    let (code, events, log_entries) = run_fixture(plan, capture, transport).await;
+
+    assert_eq!(code, 1);
+    assert!(events.iter().any(|event| matches!(event, OutputEvent::Error(message) if message.contains("send exceeded the deadline"))));
+    assert!(
+        log_entries
+            .iter()
+            .filter(|entry| entry.starts_with("capture.chunk:"))
+            .count()
+            < 40
+    );
+}
+
+#[tokio::test]
+async fn ready_backend_events_do_not_block_capture() {
+    let log = new_log();
+    let transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Ready));
+    for index in 0..32 {
+        transport.before_finish(Ok(RealtimeEvent::Partial {
+            text: index.to_string(),
+            stash: String::new(),
+        }));
+    }
+    transport.before_finish(Err(std::io::Error::other("backend burst drained")));
+    transport.trigger(1, ControlCommand::Cancel);
+    let capture = FakeCapture::new(log, vec![vec![0; 1024]], None);
+
+    let (code, events, log) = run_fixture(
+        SessionPlan::new("cloud-realtime", false),
+        capture,
+        transport,
+    )
+    .await;
+
+    assert_eq!(code, 130, "{:?}", event_kinds(&events));
+    assert!(log.iter().any(|entry| entry == "transport.append:1024"));
 }
