@@ -362,6 +362,11 @@ report `unverified`; they never report a pass they did not measure.
   `homeManagerModules.default`. The binary is wrapped with `pipewire`,
   `wtype` and `wl-clipboard` on `PATH` and the Sherpa/ONNX runtime on
   `LD_LIBRARY_PATH`; the CUDA ONNX provider is patched to link NVRTC.
+- **Portable releases** use the same native executable and libraries for the
+  verified standalone archive and the matching Bun platform package. The
+  `update` module identifies the owner of the running executable. It delegates
+  Bun installs to Bun, and activates standalone releases through a versioned
+  user directory and an atomic link. Application updates do not restart the daemon.
 - **Home Manager module** (`nix/home-manager.nix`): `programs.voiceless`
   installs the package, generates `config.toml` from `settings`, and
   optionally enables `voiceless.service` (the daemon),

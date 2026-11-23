@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf '%s\n' "voiceless: $*" >&2
+    exit 1
+}
+
+launcher=$(readlink -f -- "$0") || fail 'cannot resolve the installed launcher'
+root=${launcher%/bin/voiceless}
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64) platform=voiceless-linux-x86_64-gnu ;;
+    Linux:aarch64) platform=voiceless-linux-aarch64-gnu ;;
+    *) fail 'this release requires glibc Linux on x86_64 or aarch64' ;;
+esac
+
+export VOICELESS_BUN_LAUNCHER="$launcher"
+for payload in "$root/node_modules/$platform" "${root%/*}/$platform"; do
+    if [ -x "$payload/bin/voiceless" ]; then
+        exec "$payload/bin/voiceless" "$@"
+    fi
+done
+fail "missing $platform. Reinstall voiceless with optional dependencies enabled."

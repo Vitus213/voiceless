@@ -42,6 +42,19 @@ nix run github:Vitus213/voiceless -- stream   # 说话，按 Ctrl-C，Voiceless 
 
 ## 安装
 
+### Linux 发布包
+
+候选包面向使用 glibc 的 x86-64 和 ARM64 Linux，提供标准 CPU 后端。已测试的系统版本见发布说明。
+包内有原生程序和推理库。录音和桌面工具需在系统里安装，模型通过 `voiceless model install` 下载。
+
+npm 包发布后，用 `bun add -g voiceless` 安装，再用 `voiceless update` 升级。更新器会把选中的确切版本交给当前命令所属的 Bun 全局项目安装。
+
+独立安装从 [GitHub Releases](https://github.com/Vitus213/voiceless/releases) 下载对应的压缩包，从 Release 元数据取得 SHA-256，核对后再解包。
+进入解压目录，带上同一摘要运行 `./bin/voiceless install /path/to/archive.tar.gz --sha256 DIGEST`。
+命令入口为 `~/.local/bin/voiceless`。用 `voiceless update` 升级，用 `voiceless update --rollback` 切回本机保留的上一版。
+
+更新后，等录音结束再重启常驻服务，新程序才会接管。Nix 或 Home Manager 安装继续由对应的 flake 或 profile 升级。 [分发方案](docs/non-nix-distribution.md)
+
 ### 免安装运行（Nix flake，推荐）
 
 ```bash
@@ -157,6 +170,8 @@ voiceless stream --backend local-streaming
 | `voiceless daemon` | 运行常驻 daemon：启动时加载一次本地模型（会话不再等待模型加载），在 D-Bus 导出 `dev.voiceless.Daemon.Controller`，并把每个会话事件作为 `Event` 信号广播。选项：`--mode`（默认 `quick`）、`--no-inject` |
 | `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | 一次 D-Bus 调用控制 daemon（快捷键绑定这些命令）。`toggle`/`start` 接受 `--mode`；`start`/`stop` 对应按住说话的按下/松开；`watch` 把每个事件输出为一行 JSON（`stream --json` 格式，外加 `{"type":"state","state":...,"mode":...}`） |
 | `voiceless doctor` | 检查依赖与数据目录 |
+| `voiceless install ARCHIVE --sha256 DIGEST` | 校验独立发布包并安装到用户目录 |
+| `voiceless update [--rollback]` | 升级当前 Bun 或独立安装。独立安装可回滚到本机保留的上一版。 |
 | `voiceless benchmark asr\|latency` | 运行 CER 与 stop→inject 延迟门禁。缺凭据或 Wayland 注入环境时报告 skip，不报告通过 |
 
 ## 配置

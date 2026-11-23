@@ -298,6 +298,9 @@ cache   ${XDG_CACHE_HOME:-~/.cache}/voiceless/       model-downloads/
   `homeManagerModules.default`。二进制被包装成 `PATH` 上有 `pipewire`、
   `wtype`、`wl-clipboard`，`LD_LIBRARY_PATH` 上有 Sherpa/ONNX 运行时；CUDA
   的 ONNX provider 被 patch 成链接 NVRTC。
+- **便携发布包**复用同一份原生程序和库，分别生成独立压缩包与 Bun 平台包。
+  `update` 模块识别当前安装归属。Bun 安装交给 Bun 更新，独立安装使用用户目录下的
+  版本树并原子切换入口。程序更新独立于常驻服务重启。
 - **Home Manager 模块**（`nix/home-manager.nix`）：`programs.voiceless` 安装
   软件包，从 `settings` 生成 `config.toml`，可选启用 `voiceless.service`
   （daemon）、`voiceless-overlay-eww.service` 加 `voiceless-overlay.service`

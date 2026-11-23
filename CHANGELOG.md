@@ -7,6 +7,9 @@ tagged releases yet; entries are grouped by the day the work landed on
 ## Unreleased
 
 ### Added
+- Build standard CPU Linux release archives and matching Bun packages from
+  the same native payload. `voiceless update` follows the existing installation
+  manager. Standalone installations can roll back to the previous local release.
 - Optional `local-offline` speech enhancement runs GTCRN and bounded gain
   ahead of speech detection and recognition. Install the `gtcrn` model and
   enable `[local] denoise` or use the console's recognition settings.

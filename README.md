@@ -42,6 +42,29 @@ X11, macOS and Windows are not supported.
 
 ## Install
 
+### Linux releases
+
+Release candidates include standard CPU packages for glibc Linux x86-64 and
+ARM64. See the release notes for the tested host versions. The package contains
+the native program and its inference libraries. Install your audio and desktop
+tools separately and download models with `voiceless model install`.
+
+Once the npm packages are published, install with `bun add -g voiceless` and
+update with `voiceless update`. The updater asks Bun to install a specific
+version into the global project that owns your current command.
+
+For a standalone installation, download the matching archive from [GitHub
+Releases](https://github.com/Vitus213/voiceless/releases) and obtain its SHA-256
+from release metadata. Verify the archive before extracting it. From the
+extracted directory, run `./bin/voiceless install /path/to/archive.tar.gz --sha256 DIGEST`
+with that digest. The entry point is `~/.local/bin/voiceless`. Run `voiceless
+update` to install a newer release or `voiceless update --rollback` to restore the
+previous local release.
+
+After an update, restart a running daemon when it is idle to use the new
+binary. A Nix or Home Manager installation is updated through its owning flake
+or profile. [Distribution design](docs/non-nix-distribution.md)
+
 ### Run without installation (Nix flake, recommended)
 
 ```bash
@@ -157,6 +180,8 @@ voiceless stream --backend local-streaming
 | `voiceless daemon` | Run the resident daemon: it loads the local model once at startup (sessions never wait for a model load), exports `dev.voiceless.Daemon.Controller` on D-Bus and broadcasts every session event as an `Event` signal. Options: `--mode` (default `quick`), `--no-inject` |
 | `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | Control the daemon with one D-Bus call (bind hotkeys to these). `toggle`/`start` take `--mode`; `start`/`stop` are hold-to-talk press/release; `watch` prints every event as a JSON line (the `stream --json` schema plus `{"type":"state","state":...,"mode":...}`) |
 | `voiceless doctor` | Check dependencies and the data directory |
+| `voiceless install ARCHIVE --sha256 DIGEST` | Install a verified standalone application release into your user directory |
+| `voiceless update [--rollback]` | Update the current Bun or standalone application installation. Rollback restores the previous standalone release. |
 | `voiceless benchmark asr\|latency` | Run the CER and stop-to-inject latency gates. Without credentials or a Wayland injector they report skip and never report a pass |
 
 ## Configuration

@@ -1,0 +1,72 @@
+name: Native release candidates
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: CPU Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Ubuntu 22.04 build tools and the pinned Rust toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils cmake curl g++-11 make patchelf pkg-config python3
+          rustup toolchain install 1.99.1 --profile minimal
+      - name: Build native and npm candidates
+        run: python3 scripts/release/native.py "$RUNNER_TEMP/candidates"
+      - name: Check payloads, ELF ABI, local recognition and Bun installation
+        run: python3 -B scripts/release/validate.py "$RUNNER_TEMP/candidates"
+      - name: Upload validated architecture artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-build-${{ matrix.arch }}
+          path: ${{ runner.temp }}/candidates/*
+          if-no-files-found: error
+          compression-level: 0
+
+  candidates:
+    name: Assemble candidate artifacts
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-build-*
+          path: builds
+      - name: Collect the two native archives and three npm packages
+        shell: bash
+        run: |
+          shopt -s failglob
+          cmp builds/native-build-x86_64/voiceless-[0-9]*.tgz builds/native-build-aarch64/voiceless-[0-9]*.tgz
+          mkdir -p candidates
+          cp builds/native-build-x86_64/voiceless-[0-9]*.tgz candidates/
+          for arch in x86_64 aarch64; do
+            cp builds/native-build-"$arch"/voiceless-v*-linux-"$arch"-gnu.tar.gz candidates/
+            cp builds/native-build-"$arch"/voiceless-linux-"$arch"-gnu-*.tgz candidates/
+          done
+      - name: Upload the complete release candidate set
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-release-candidates
+          path: candidates/*
+          if-no-files-found: error
+          compression-level: 0

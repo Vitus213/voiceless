@@ -55,6 +55,10 @@ enum Command {
     Record(RecordArgs),
     /// Manage the model catalog: list, install, check, remove.
     Model(ModelArgs),
+    /// Install the verified standalone release archive into your user directory.
+    Install(InstallArgs),
+    /// Update the current installation, or roll back a standalone release.
+    Update(UpdateArgs),
     /// Check dependencies and the data directory.
     Doctor,
     /// Manage text processing modes.
@@ -67,6 +71,22 @@ enum Command {
     Ctl(CtlArgs),
     /// Run the CER and stop-to-inject latency gates.
     Benchmark(BenchmarkArgs),
+}
+
+#[derive(Debug, Args)]
+struct InstallArgs {
+    /// Downloaded release archive for this platform.
+    archive: PathBuf,
+    /// Expected SHA-256 of the archive from GitHub Releases.
+    #[arg(long)]
+    sha256: String,
+}
+
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    /// Switch a standalone installation to its previous local version.
+    #[arg(long)]
+    rollback: bool,
 }
 
 /// Arguments of `voiceless ctl`.
@@ -420,6 +440,10 @@ async fn main() {
                 },
             )
         }
+        Command::Install(args) => {
+            update_exit(voiceless::update::install(&args.archive, &args.sha256))
+        }
+        Command::Update(args) => update_exit(voiceless::update::update(args.rollback)),
         Command::Doctor => {
             println!("Voiceless doctor");
             // The fcitx5 bridge check uses zbus::blocking, whose block_on
@@ -497,6 +521,16 @@ async fn main() {
     };
     // Never returns; the subcommand's code becomes the process status.
     std::process::exit(code);
+}
+
+fn update_exit(result: Result<(), String>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("Voiceless: {error}");
+            1
+        }
+    }
 }
 
 /// Whether `stream` would load the local model that a running daemon already

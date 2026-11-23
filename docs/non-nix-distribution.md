@@ -2,9 +2,9 @@
 
 ## 建议
 
-采用 **同一版原生 Linux 构建，两种安装入口**。Bun 用户执行 `bun add -g <包名>`，独立安装用户从 GitHub Releases 下载并校验相应压缩包，解包后将命令安装到 `~/.local/bin/voiceless`。两种入口都提供 `voiceless update`，由当前安装的管理工具完成更新。独立安装无需 Nix、Rust 工具链、Bun、Node.js 或 `sudo`。首批验证 glibc 标准 CPU 构建，按架构公布实测支持范围。 [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
+同一版原生 Linux 构建生成两种安装包。npm 发布后用 `bun add -g voiceless` 安装，也可从 GitHub Releases 下载对应压缩包，校验后用 `voiceless install` 创建 `~/.local/bin/voiceless`。两种入口都提供 `voiceless update`。独立安装依赖系统 glibc 2.35，不依赖 Nix、Rust 工具链、Bun、Node.js 或 `sudo`。构建流程提供 x86-64 与 ARM64 标准 CPU 候选包。 [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
 
-当前 CLI 有 `model`、`doctor`、`daemon` 和 `ctl`，顶层没有 `update`。现有 CI 在 Ubuntu runner 里用 Nix 运行 Rust 测试和 flake 检查，未生成非 Nix 发布包。本次读取项目的 GitHub Release 列表为空，公有 npm 注册表上 `voiceless` 返回 404。这些查询未确认 npm 名称的可注册性或所有权。本文中的安装和回滚接口是设计建议。 [CLI 源码](../rust/src/main.rs#L32-L70) · [CI 工作流](../.github/workflows/ci.yml) · [项目 Releases](https://github.com/Vitus213/voiceless/releases) · [npm 包元数据](https://registry.npmjs.org/voiceless)
+CLI 已实现 `install`、`update` 和独立安装的 `update --rollback`。候选包工作流只上传构建产物。公开发布还需确认 npm 包名归属、两种架构的验证结果和第三方再分发条件。 [CLI 源码](../rust/src/update.rs) · [候选包工作流](../.github/workflows/native-release.yml) · [项目 Releases](https://github.com/Vitus213/voiceless/releases)
 
 ## Bun 全局安装与 bunx
 
@@ -45,7 +45,7 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 
 ## `voiceless update` 与回滚约定
 
-`voiceless update` 先识别安装归属，再按该渠道查询版本。发布选择使用当前安装的系统、架构、libc 基线和构建变体，保留标准 CPU、AVX2 GGUF 或 CUDA GGUF 的选择。CPU 指令集和 NVIDIA 驱动用于校验该变体是否可运行。
+`voiceless update` 先识别安装归属，再由对应渠道查询版本。当前非 Nix 构建选择 GNU/Linux x86-64 或 ARM64 的标准 CPU 包。AVX2 GGUF 和 CUDA GGUF 继续通过相应的 Nix 构建交付。
 
 | 当前安装来源 | 版本查询与执行 |
 | --- | --- |
@@ -65,13 +65,13 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 
 ## 实现及发布边界
 
-- **应用实现。** 在 Rust CLI 增加 `update` 命令和独立安装入口。Bun 安装由 Bun 写入全局目录，独立安装才维护自己的版本目录和命令链接。独立分支复用现有 HTTP、SHA-256、归档依赖及模型安装中可复用的逻辑。迁移现有 daemon、修改含凭据的配置、安装或搬迁模型、安装 Fcitx5 addon 及启停桌面服务均是独立操作。 [CLI 分发入口](../rust/src/main.rs#L32-L70) · [现有 Rust 依赖](../rust/Cargo.toml#L19-L48) · [模型安装实现](../rust/src/models.rs#L19-L47)
-- **Release 产物。** 独立于现有 Nix CI 增加按架构构建的发布流程。Cargo 应用版本、tag、资产名和安装记录应一致。检查实际携带的第三方库、许可证及再分发声明，模型继续由模型管理器分发。先生成并验证所有声明支持的平台资产，再附到 draft，最后发布为不可变 Release。发布修复时使用新版本和 tag，并在发布说明中记录兼容性。 [现有 CI](../.github/workflows/ci.yml) · [Sherpa-ONNX 许可证](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.3/LICENSE) · [GitHub 不可变发布流程](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases#best-practices-for-publishing-immutable-releases)
+- **应用实现。** Bun 负责写入其全局目录。独立安装维护自己的版本目录和稳定入口。安装及更新只管理程序和推理库。桌面服务迁移、Fcitx5 和用户数据都由各自的入口管理。 [CLI 分发入口](../rust/src/main.rs) · [更新实现](../rust/src/update.rs)
+- **Release 产物。** 在匹配的 Ubuntu 22.04 主机上用 `python3 scripts/release/native.py <输出目录>` 构建，再用 `python3 -B scripts/release/validate.py <输出目录>` 验证。候选包附带推理库和第三方声明。公开发布时应保持 Cargo 版本、tag 和产物版本一致，并在发布说明里列出经实测的系统和架构。 [候选包工作流](../.github/workflows/native-release.yml) · [GitHub 不可变发布流程](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases#best-practices-for-publishing-immutable-releases)
 - **Bun 包。** 先确认维护者控制的包名或 scope。npm 平台包复用同一版本的原生构建，包含相应的共享库和许可证。平台包先发并确认可取，再发布主包并更新 `latest`。用隔离 Bun 全局目录验收首装、更新到确切版本、命令路径及真实本地识别。 [npm 发布](https://docs.npmjs.com/cli/v11/commands/npm-publish/) · [npm dist-tag](https://docs.npmjs.com/cli/v11/commands/npm-dist-tag/) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
 
 ## 本机验证
 
 - **直接复制现有产物。** `readelf -l` 显示 x86-64 Nix ELF 的 `PT_INTERP` 指向 `/nix/store/8kvxvr3pmsypxiypq4g8zy13glnfr7nx-glibc-2.42-67/lib/ld-linux-x86-64.so.2`。将同一 ELF 单独挂载到无 Nix store 的 `docker.io/library/golang:1.27.4` amd64 容器运行 `--version`，启动失败，报告 `No such file or directory`。
 - **补齐运行库后完成识别。** 在临时目录收集同一 ELF 和 90 个运行库文件（含加载器），解包体积 70,355,017 字节。用启动脚本调用随包加载器并指定 `--library-path`，在相同的 Debian 13 amd64 容器中断网运行。`--version` 返回 `voiceless 0.1.0`，`model list --json` 返回七个目录条目。用只读模型挂载、SenseVoice INT8 和临时 `pw-record` 回放运行 `stream --json --no-inject`，退出码为 0，定稿为 `你好世界欢迎使用语音输入`。实验随包带入了原构建的 glibc。正式包仍需在非 Nix 构建环境确定 glibc 基线，并验证发布资产在目标发行版上的实际识别。实测未接入实体麦克风、图形会话或 Fcitx5。
-- **Bun 安装与更新。** Bun `1.4.4+38afee6c8` 从本地 HTTP 注册表安装带 `bin.voiceless` 和 SHA-512 完整性字段的测试 npm 包。用独立的全局目录、命令目录和缓存目录执行 `bun add -g voiceless-local-probe`，再执行 `bun update -g --latest voiceless-local-probe`，两次均使用 `--ignore-scripts`。包从 `0.1.0` 升至 `0.2.0`，两次都经全局命令链接把 `--version` 传给同一份原生 ELF，返回 `voiceless 0.1.0`。把更新后的安装目录只读挂载到同一个无 Nix store 的容器，直接调用 Bun 创建的命令链接，也返回相同版本。实测覆盖 npm 包替换、命令入口和原生启动。Voiceless 的 `update` 命令及回滚仍待实现。
+- **发布候选包。** 在 amd64 Ubuntu 22.04 容器用 Rust 1.99.1 构建两版真实程序 `0.1.0` 与 `0.1.1`。候选包验证了 ELF 依赖、独立安装、真实 SenseVoice 转写和 Bun 全局命令。在断网容器内拒绝错误摘要，之后独立安装 `0.1.0`，用已校验的本地归档升到 `0.1.1`，再运行 `voiceless update --rollback` 离线回到 `0.1.0`。测试历史文件保持原样。独立的 Bun 1.4.5 全局目录从本地注册表安装 `0.1.0`，由 `voiceless update` 请求精确版本并验证 `0.1.1`。GitHub 尚无正式发布资产，在线获取新版的完整路径仍需在发布后验证。ARM64 候选包由单独的原生 CI runner 构建和验收，本机未运行该架构。
 - **现有服务。** 桌面命令来自用户 Nix profile，`systemctl --user show voiceless.service` 确认 `ExecStart` 直接指向 `/nix/store/…/bin/voiceless`。测试期间服务保持运行。服务迁移的验证范围限于当前入口和源码，实际切换须在匹配的发行变体准备好后执行。

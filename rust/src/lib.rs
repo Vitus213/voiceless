@@ -158,3 +158,5 @@ pub mod session;
 pub mod stream;
 /// `[text]` cleanup applied to every final transcript.
 pub mod text;
+/// Versioned application installation and manager-aware updates.
+pub mod update;
