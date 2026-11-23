@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -52,8 +53,11 @@ def npm_ready(name, version, path, metadata):
         if not os.environ.get("NODE_AUTH_TOKEN"):
             raise ValueError(f"first publish of {name} needs the NPM_BOOTSTRAP_TOKEN secret")
         return False
+    # A staged version holds the placeholder tag `0.0.0-stage` until a
+    # maintainer approves it; that is neither an older nor a published release.
     latest = metadata.get("dist-tags", {}).get("latest")
-    if latest is not None and version_number(latest) > version_number(version):
+    if (latest is not None and STABLE.fullmatch(latest)
+            and version_number(latest) > version_number(version)):
         raise ValueError(f"{name}@latest is already {latest}; refusing to release older {version}")
     published = metadata.get("versions", {}).get(version)
     if published is None:
@@ -149,8 +153,14 @@ def publish(candidates, tag):
         print(f"Publishing {name}@{version}", flush=True)
         subprocess.run(["npm", "publish", str(path.resolve()), "--access", "public", "--tag", "latest",
                         "--ignore-scripts", "--registry", REGISTRY], env=env, check=True)
-        if not npm_ready(name, version, path, npm_registry(name)):
-            raise ValueError(f"npm registry has not confirmed {name}@{version}; rerun the publish job")
+        # A brand-new package is listed a few minutes after npm accepts it.
+        for _ in range(30):
+            if npm_ready(name, version, path, npm_registry(name)):
+                break
+            time.sleep(10)
+        else:
+            raise ValueError(f"npm registry has not confirmed {name}@{version} after 5 minutes; "
+                             "approve a staged version on npmjs.com or rerun the publish job")
     if finish_github:
         github("release", "edit", tag, "--repo", REPO, "--draft=false", "--latest")
     print(f"Published {tag} to npm and GitHub Releases.")
