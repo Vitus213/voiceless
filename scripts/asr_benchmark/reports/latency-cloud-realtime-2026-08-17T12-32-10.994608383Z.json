@@ -1,0 +1,54 @@
+{
+  "trials": 1,
+  "failed_trials": 0,
+  "excluded_non_quick": 0,
+  "unverified": true,
+  "passed": false,
+  "first_partial_p95": 0.2523308799999999,
+  "stop_to_final_p50": 0.28483867899999993,
+  "stop_to_inject_p99": null,
+  "thresholds": {
+    "first_partial_p95_seconds": 1.0,
+    "stop_to_final_p50_seconds": 0.6,
+    "stop_to_inject_p99_seconds": 1.0,
+    "min_trials": 100
+  },
+  "samples": [
+    {
+      "id": 0,
+      "mode": "quick",
+      "stages": [
+        [
+          "Start",
+          0.0
+        ],
+        [
+          "ConnectReady",
+          0.170851729
+        ],
+        [
+          "UtteranceStart",
+          1.064584836
+        ],
+        [
+          "FirstPartial",
+          1.316915716
+        ],
+        [
+          "Stop",
+          4.20828825
+        ],
+        [
+          "FinishSent",
+          4.20830414
+        ],
+        [
+          "FinalReceived",
+          4.493126929
+        ]
+      ],
+      "success": true,
+      "error": null
+    }
+  ]
+}
