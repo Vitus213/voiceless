@@ -78,7 +78,9 @@ jobs:
             echo "expected one tarball in dist/" >&2
             exit 1
           fi
-          tarball=${tarballs[0]}
+          # npm reads a relative spec with a slash as a GitHub shorthand;
+          # an absolute path is always a file.
+          tarball=$PWD/${tarballs[0]}
           version=$(basename "$tarball" .tgz)
           version=${version#voiceless-}
 
@@ -135,6 +137,6 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Publish
-        run: npm publish dist/*.tgz
+        run: npm publish ./dist/*.tgz
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
