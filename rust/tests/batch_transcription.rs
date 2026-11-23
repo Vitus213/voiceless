@@ -250,6 +250,10 @@ fn empty_content_array_maps_to_empty_text() {
     assert_eq!(client.transcribe_wav_bytes(b"x").expect("silent"), "");
 }
 
+// A concurrent spawn can inherit the other fixture's writable descriptor
+// until exec closes it, briefly making that script unexecutable on Linux.
+static RECORDER_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Writes an executable shell script and returns its path.
 fn fake_recorder(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -266,6 +270,7 @@ fn fake_recorder(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
 #[test]
 fn record_seconds_interrupts_the_recorder_after_the_requested_time() {
     use voiceless::batch::record_seconds_with;
+    let _fixture = RECORDER_FIXTURE_LOCK.lock();
 
     let dir = tempdir().unwrap();
     let recorder = fake_recorder(
@@ -291,6 +296,7 @@ fn record_seconds_interrupts_the_recorder_after_the_requested_time() {
 #[test]
 fn record_seconds_reports_a_recorder_that_exits_early() {
     use voiceless::batch::record_seconds_with;
+    let _fixture = RECORDER_FIXTURE_LOCK.lock();
 
     let dir = tempdir().unwrap();
     let recorder = fake_recorder(dir.path(), "#!/bin/sh\nexit 3\n");
