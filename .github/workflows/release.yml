@@ -89,11 +89,13 @@ jobs:
           pkg="$prefix/lib/node_modules/voiceless"
 
           # sherpa-onnx-sys writes its download directory into the runpath
-          # ahead of $ORIGIN. Make it unreadable so the loader is left with
-          # $ORIGIN alone, as on a machine that never saw the build tree.
+          # ahead of $ORIGIN. Drop that directory's search bit so the loader
+          # cannot reach anything below it and is left with $ORIGIN alone, as
+          # on a machine that never saw the build tree.
           prebuilt=rust/target/sherpa-onnx-prebuilt
-          chmod -R a-rx "$prebuilt"
-          trap 'chmod -R u+rx "$prebuilt"' EXIT
+          [ -d "$prebuilt" ] || { echo "$prebuilt is missing" >&2; exit 1; }
+          chmod a-x "$prebuilt"
+          trap 'chmod u+x "$prebuilt"' EXIT
 
           unresolved=$(ldd "$pkg"/bin/* 2>/dev/null | grep -E 'not found|/nix/store' || true)
           if [ -n "$unresolved" ]; then
