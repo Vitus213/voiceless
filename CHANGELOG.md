@@ -6,9 +6,15 @@ the day the work landed on `main`; commit hashes refer to
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.1.2 - 2026-11-24
+
 ### Added
 - Linux x86-64 Bun packages and standalone archives include the Vulkan GGUF
   backend, also available through the `voiceless-vulkan` Nix package.
+- `voiceless web` opens a running console or starts a local one for history
+  and settings. `--no-open` prints the URL for manual use.
 
 ### Changed
 - Vulkan builds default to `[local] provider = "auto"` for GGUF so CPU fallback
