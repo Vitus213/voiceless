@@ -151,8 +151,9 @@ def publish(candidates, tag):
     env = {key: value for key, value in os.environ.items() if key != "GH_TOKEN"}
     for name, path in pending:
         print(f"Publishing {name}@{version}", flush=True)
-        # --provenance makes npm use the workflow's OIDC identity, so a
-        # configured trusted publisher needs no token at all.
+        # --provenance is explicit about what trusted publishing relies on: the
+        # workflow's OIDC identity, which needs no token once npmjs.com lists
+        # this workflow as a trusted publisher allowed to run `npm publish`.
         subprocess.run(["npm", "publish", str(path.resolve()), "--access", "public", "--tag", "latest",
                         "--provenance", "--ignore-scripts", "--registry", REGISTRY], env=env, check=True)
         # A brand-new package is listed a few minutes after npm accepts it.
