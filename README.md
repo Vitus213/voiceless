@@ -178,6 +178,7 @@ voiceless stream --backend local-streaming
 | `voiceless model list\|install\|check\|remove` | Manage the model catalog (pinned URLs, byte counts, SRI SHA-256, member allowlist) |
 | `voiceless mode list\|reload\|add\|update\|remove` | Manage text processing modes |
 | `voiceless history list\|delete\|export\|totals\|usage` | Query the recognition history (SQLite) |
+| `voiceless web` | Open the web console. `--no-open` prints its URL. `--port` overrides the configured port. |
 | `voiceless history serve` | Serve the web console without the daemon (no live pages). Options: `--host`, `--port`. Default: `http://127.0.0.1:8790` |
 | `voiceless daemon` | Run the resident daemon: it loads the local model once at startup (sessions never wait for a model load), exports `dev.voiceless.Daemon.Controller` on D-Bus and broadcasts every session event as an `Event` signal. Options: `--mode` (default `quick`), `--no-inject` |
 | `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | Control the daemon with one D-Bus call (bind hotkeys to these). `toggle`/`start` take `--mode`; `start`/`stop` are hold-to-talk press/release; `watch` prints every event as a JSON line (the `stream --json` schema plus `{"type":"state","state":...,"mode":...}`) |
@@ -302,7 +303,10 @@ Each successful streaming session saves its audio. Voiceless writes a 16 kHz mon
 
 Cancelled, failed and empty sessions save no file. `history delete` and `delete --all` remove the recordings together with their rows. `[history] save_audio = false` disables the retention.
 
-Open the console at <http://127.0.0.1:8790/>. `voiceless daemon` serves it (`[console]` `enabled`, `host`, `port`); without the daemon, `voiceless history serve [--port 9000]` serves everything except the live pages.
+Run `voiceless web` to open the console in your browser. The command uses
+`[console] host` and `port`, which default to <http://127.0.0.1:8790/>.
+A running daemon provides live controls. Without one, the command serves
+history and settings until you exit. `voiceless web --no-open` prints the URL.
 
 ![Console history page with demo records grouped by day; the oldest row predates audio retention and shows the no-recording chip](docs/images/history-console.png)
 

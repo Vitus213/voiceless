@@ -145,6 +145,51 @@ fn send(fixture: &Fixture, method: &str, path: &str, body: Value) -> Result<Valu
     }
 }
 
+async fn web_at(port: u16) -> std::process::Output {
+    let root = tempdir().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_voiceless"))
+            .args(["web", "--no-open", "--port"])
+            .arg(port.to_string())
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_DATA_HOME", root.path().join("data"))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("web must exit when the port is already occupied")
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_reuses_an_existing_console() {
+    let fixture = start().await;
+    let port = fixture.base.rsplit_once(':').unwrap().1.parse().unwrap();
+    let output = web_at(port).await;
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("Voiceless console: {}/", fixture.base)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_does_not_open_another_local_service() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = axum::Router::new().route("/", axum::routing::get(|| async { "another service" }));
+    tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+    let output = web_at(port).await;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.contains("did not serve a Voiceless console"),
+        "{error}"
+    );
+}
+
 /// The served page carries the token in its meta tag with the placeholder
 /// gone; `/app.js` needs no token; `/api/*` is 403 without a token or with
 /// a wrong `?token=`, and 200 with the right one in the query string.

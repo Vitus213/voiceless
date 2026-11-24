@@ -1,8 +1,8 @@
 //! Web console (`docs/console-api.md`): live control, settings, models,
 //! modes, history and diagnostics over a loopback HTTP API, served by the
-//! daemon — or, without the live parts, by `voiceless history serve`.
+//! daemon, `voiceless web`, or `voiceless history serve`.
 //!
-//! Two entry points build the same axum router (`router`):
+//! The entry points share one axum router (`router`):
 //!
 //! - `serve_daemon`, spawned by `voiceless daemon` when `[console] enabled`
 //!   is true, binding `[console] host`/`port` (default `127.0.0.1:8790`).
@@ -16,6 +16,8 @@
 //!   `/api/session/*`, `/api/engine/reload`, `/api/logs`, re-transcription
 //!   and the benchmark answer 503 `{"error":"daemon not running"}`
 //!   (`ConsoleState::daemon`).
+//! - `open_web`, `voiceless web`, opens an existing console or serves the
+//!   standalone console on the configured loopback address.
 //!
 //! This file holds the router, the security middleware, the page and the
 //! live/diagnostic handlers; `settings` holds config, text preview, prompt
@@ -42,8 +44,12 @@
 
 mod library;
 mod settings;
+mod web;
+
+pub use web::open_web;
 
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -193,17 +199,18 @@ pub async fn serve_standalone(store_path: PathBuf, host: &str, port: u16) -> Res
 /// name such as `localhost`; the first address it resolves to is bound.
 /// Errors name the address and the OS reason (port in use, name unknown).
 async fn bind(host: &str, port: u16) -> Result<tokio::net::TcpListener, String> {
-    // `host` may be an IP literal or a name (`localhost`); the first
-    // resolved address is bound. The loopback `Host` check in
-    // `require_loopback_host` is independent of what is bound here.
-    let address = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|error| format!("invalid listen address {host}:{port}: {error}"))?
-        .next()
-        .ok_or_else(|| format!("listen address {host}:{port} resolves to nothing"))?;
+    let address = resolve_address(host, port).await?;
     tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| format!("cannot bind {address}: {error}"))
+}
+
+async fn resolve_address(host: &str, port: u16) -> Result<SocketAddr, String> {
+    tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| format!("invalid listen address {host}:{port}: {error}"))?
+        .next()
+        .ok_or_else(|| format!("listen address {host}:{port} resolves to nothing"))
 }
 
 /// Serve on a bound listener; tests bind an ephemeral port and pass their

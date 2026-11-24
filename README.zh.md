@@ -169,6 +169,7 @@ voiceless stream --backend local-streaming
 | `voiceless model list\|install\|check\|remove` | 管理模型目录（固定 URL、字节数、SRI SHA-256、成员白名单） |
 | `voiceless mode list\|reload\|add\|update\|remove` | 管理文本处理模式 |
 | `voiceless history list\|delete\|export\|totals\|usage` | 查询识别历史（SQLite） |
+| `voiceless web` | 打开 Web 控制台。`--no-open` 只打印网址，`--port` 可覆盖配置的端口。 |
 | `voiceless history serve` | 不启动 daemon 时单独提供 Web 控制台（无实时页）。选项：`--host`、`--port`。默认：`http://127.0.0.1:8790` |
 | `voiceless daemon` | 运行常驻 daemon：启动时加载一次本地模型（会话不再等待模型加载），在 D-Bus 导出 `dev.voiceless.Daemon.Controller`，并把每个会话事件作为 `Event` 信号广播。选项：`--mode`（默认 `quick`）、`--no-inject` |
 | `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | 一次 D-Bus 调用控制 daemon（快捷键绑定这些命令）。`toggle`/`start` 接受 `--mode`；`start`/`stop` 对应按住说话的按下/松开；`watch` 把每个事件输出为一行 JSON（`stream --json` 格式，外加 `{"type":"state","state":...,"mode":...}`） |
@@ -293,7 +294,8 @@ i18n.inputMethod.fcitx5.addons = [ pkgs.voiceless-fcitx5-bridge ];
 
 取消、失败、空会话不保存文件。`history delete` 与 `delete --all` 连同录音一起删除。`[history] save_audio = false` 关闭保留。
 
-在 <http://127.0.0.1:8790/> 打开控制台。由 `voiceless daemon` 提供（`[console]` 的 `enabled`、`host`、`port`）；没有 daemon 时，`voiceless history serve [--port 9000]` 提供除实时页以外的全部功能。
+运行 `voiceless web` 在浏览器中打开控制台。地址由 `[console]` 的 `host` 和 `port` 决定，默认为 <http://127.0.0.1:8790/>。
+daemon 运行时可使用实时录音控制。没有 daemon 时，命令会提供历史和设置页面，退出命令即关闭。`voiceless web --no-open` 可只打印网址。
 
 ![控制台历史页（演示数据）：按天分组；最早一条早于录音保留功能，显示无录音标签](docs/images/history-console.png)
 

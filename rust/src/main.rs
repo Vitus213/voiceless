@@ -65,6 +65,8 @@ enum Command {
     Mode(ModeArgs),
     /// Query the recognition history or serve the web console.
     History(HistoryArgs),
+    /// Open the web console, serving it locally when needed.
+    Web(WebArgs),
     /// Run the resident daemon (warm engine, D-Bus control, hotkey, console).
     Daemon(DaemonArgs),
     /// Control the resident daemon (one D-Bus call; for hotkey bindings).
@@ -87,6 +89,16 @@ struct UpdateArgs {
     /// Switch a standalone installation to its previous local version.
     #[arg(long)]
     rollback: bool,
+}
+
+#[derive(Debug, Args)]
+struct WebArgs {
+    /// Override the configured console port. Use 0 for an available port.
+    #[arg(long)]
+    port: Option<u16>,
+    /// Print the URL without launching a browser.
+    #[arg(long)]
+    no_open: bool,
 }
 
 /// Arguments of `voiceless ctl`.
@@ -440,10 +452,11 @@ async fn main() {
                 },
             )
         }
+        Command::Web(args) => exit_with_result(run_web(cli.config, args).await),
         Command::Install(args) => {
-            update_exit(voiceless::update::install(&args.archive, &args.sha256))
+            exit_with_result(voiceless::update::install(&args.archive, &args.sha256))
         }
-        Command::Update(args) => update_exit(voiceless::update::update(args.rollback)),
+        Command::Update(args) => exit_with_result(voiceless::update::update(args.rollback)),
         Command::Doctor => {
             println!("Voiceless doctor");
             // The fcitx5 bridge check uses zbus::blocking, whose block_on
@@ -523,7 +536,7 @@ async fn main() {
     std::process::exit(code);
 }
 
-fn update_exit(result: Result<(), String>) -> i32 {
+fn exit_with_result(result: Result<(), String>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
@@ -531,6 +544,20 @@ fn update_exit(result: Result<(), String>) -> i32 {
             1
         }
     }
+}
+
+async fn run_web(config_path: Option<PathBuf>, args: WebArgs) -> Result<(), String> {
+    use voiceless::config::{default_config_path, AppConfig};
+
+    let config =
+        AppConfig::load_optional(config_path.as_deref()).map_err(|error| error.to_string())?;
+    voiceless::console::open_web(
+        config_path.unwrap_or_else(default_config_path),
+        &config.console.host,
+        args.port.unwrap_or(config.console.port),
+        !args.no_open,
+    )
+    .await
 }
 
 /// Whether `stream` would load the local model that a running daemon already

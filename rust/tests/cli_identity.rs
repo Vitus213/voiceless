@@ -30,6 +30,7 @@ fn help_lists_the_core_cli_commands() {
         "doctor",
         "mode",
         "history",
+        "web",
         "daemon",
     ] {
         assert!(
