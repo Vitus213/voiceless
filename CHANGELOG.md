@@ -1,10 +1,23 @@
 # Changelog
 
-All notable changes to Voiceless are listed here. The project has no
-tagged releases yet; entries are grouped by the day the work landed on
-`main`. Commit hashes refer to <https://github.com/Vitus213/voiceless>.
+Releases are tagged `v<major>.<minor>.<patch>`. Entries up to 0.1.0 are grouped by
+the day the work landed on `main`; commit hashes refer to
+<https://github.com/Vitus213/voiceless>.
 
 ## Unreleased
+
+Nothing yet.
+
+## 0.1.1 - 2026-11-24
+
+### Changed
+- No change to the program. This release validates publishing without an npm
+  token: the workflow's OIDC identity publishes with provenance once each
+  package lists `native-release.yml` as a trusted publisher.
+- The publish step waits up to five minutes for npm to list a package and no
+  longer fails on the placeholder tag of a staged version.
+
+## 0.1.0 - 2026-11-24
 
 ### Added
 - Build standard CPU Linux release archives and matching Bun packages from
