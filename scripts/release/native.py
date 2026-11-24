@@ -205,6 +205,8 @@ def prepare_vulkan(work, payload, env):
     linker_name.symlink_to(VULKAN_LIBRARY)
     env["TRANSCRIBE_CMAKE_ARGS"] = " ".join([
         "-DTRANSCRIBE_X86_CONSERVATIVE=ON",
+        # Keep the decoder from linking to optional libraries on the runner.
+        "-DTRANSCRIBE_USE_SYSTEM_BLAS=OFF",
         f"-DVulkan_INCLUDE_DIR={include}",
         f"-DVulkan_LIBRARY={linker_name}",
         f"-DVulkan_GLSLC_EXECUTABLE={sdk / 'usr/bin/glslc'}",

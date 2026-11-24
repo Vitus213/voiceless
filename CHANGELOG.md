@@ -8,7 +8,7 @@ the day the work landed on `main`; commit hashes refer to
 
 Nothing yet.
 
-## 0.1.2 - 2026-11-24
+## 0.1.3 - 2026-11-24
 
 ### Added
 - Linux x86-64 Bun packages and standalone archives include the Vulkan GGUF
@@ -19,6 +19,10 @@ Nothing yet.
 ### Changed
 - Vulkan builds default to `[local] provider = "auto"` for GGUF so CPU fallback
   works when a GPU cannot initialize. Explicit `vulkan` requires a device.
+
+### Fixed
+- x86-64 release builds disable system BLAS detection to keep the native
+  archive and Bun package portable across the supported glibc baseline.
 
 ## 0.1.1 - 2026-11-24
 
