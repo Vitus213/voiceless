@@ -11,15 +11,14 @@ Everything runs through the Nix flake at the repository root; the Rust
 crate itself lives in `rust/`.
 
 ```bash
-nix develop            # CUDA dev shell (default): cargo, clippy, rustfmt, pipewire, wtype, wl-clipboard, Sherpa-ONNX, CUDA toolchain
+nix develop            # CUDA and Vulkan SDKs on x86-64, including all-features lint
 nix develop .#cpu      # CPU-only shell: what CI uses; no CUDA download
+nix develop .#vulkan   # Vulkan SDK without the CUDA toolchain on x86-64
 ```
 
-Both shells export `SHERPA_ONNX_LIB_DIR` and `LD_LIBRARY_PATH` so the
-`sherpa-onnx` crate links against the nixpkgs build instead of downloading
-binaries. The CUDA shell also exports `TRANSCRIBE_CMAKE_ARGS` and
-`VOICELESS_CUDA_LIB_DIRS` for the transcribe.cpp engine
-(`cargo build --features cuda`).
+Each shell exports `SHERPA_ONNX_LIB_DIR` and `LD_LIBRARY_PATH` to use the
+nixpkgs Sherpa-ONNX build. The GPU shells also set `TRANSCRIBE_CMAKE_ARGS`
+for `cargo build --features cuda` or `cargo build --features vulkan`.
 
 `just` wraps the common commands and always passes
 `--manifest-path rust/Cargo.toml`:
@@ -43,8 +42,9 @@ binaries. The CUDA shell also exports `TRANSCRIBE_CMAKE_ARGS` and
   `cargo doc`).
 - **Use the shell's `cargo`/`clippy`/`rustfmt`.** A clippy from your user
   profile rejects crates built by the shell's rustc (E0514).
-- **GPU tests need the driver.** `nix flake check` builds the CPU package
-  only; run `cargo test --features cuda` locally for the GGUF engine.
+- **GPU inference tests need the host driver.** The Nix Vulkan package runs
+  model-free tests in the sandbox. For a Vulkan replay outside the sandbox,
+  enter `nix develop .#vulkan` and use Cargo with `--features vulkan`.
 - **Real-service tests skip, not pass.** Tests named `real_*` and the
   `benchmark` gates need credentials, installed models or a Wayland session;
   without them they report `skip`/`unverified` and never a pass.

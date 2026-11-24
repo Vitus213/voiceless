@@ -420,6 +420,31 @@ The current CUDA-enabled Voiceless build loaded the catalogued `qwen3-asr-0.6b-g
 
 A separate C++ probe linked the same transcribe.cpp libraries and transcribed the first second of the clean `test-06` fixture, 16 kHz mono PCM16 with SHA-256 `2721c5df5ba531344a1d2c04d89a9e398411ae3870219bbca89308d04aedf795`. The strict CUDA and strict CPU runs both returned `我们计划下。`. The single `transcribe_run` call took 172.03 ms on CUDA and 761.48 ms on the generic CPU backend, excluding model load. Each was its session's first speech run. Available device memory was 1,523 MiB immediately before and after the short CUDA probe. The resident Voiceless process kept its PID and was still active after teardown. The 1.7B model's CUDA timing, full CUDA daemon dictation, and microphone performance remain unmeasured. Scratch artifacts include `voiceless_cuda_voice_probe.cpp` and `voiceless-cuda-test06-start.f32`.
 
+### Vulkan GGUF replay
+
+The x86-64 `voiceless-vulkan` Nix package passed 169 sandbox tests, with two
+opt-in model tests skipped. Its runtime closure contains `libvulkan.so.1` and
+no CUDA libraries.
+
+The same package replayed four 16 kHz mono PCM16 clips through `voiceless
+stream --json --no-inject` on a Core i5-12400F with a GeForce RTX 4060. Each
+run loaded the catalogued Qwen3-ASR 1.7B Q8_0 model and Silero VAD in a fresh
+process. With `[local] provider` unset, all four runs selected `Vulkan0`.
+With `provider = "auto"` and `VK_DRIVER_FILES=/dev/null`, all four fell back
+to CPU and returned the same final text as their Vulkan counterparts.
+
+| PCM SHA-256 prefix | Audio (s) | Vulkan stop to final (s) | CPU fallback stop to final (s) |
+| --- | ---: | ---: | ---: |
+| `237ee4752b8a` | 10.053 | 5.668 | 3.960 |
+| `35d512d4a5d5` | 5.100 | 6.429 | 8.363 |
+| `5f155fce4d26` | 4.690 | 5.760 | 3.985 |
+| `d246a37da5eb` | 8.830 | 1.835 | 5.732 |
+
+The interval runs from the last replayed PCM chunk to the final text event.
+It includes any model loading or warm-up still in progress at the end of capture.
+On the first clip, explicit `auto` also selected Vulkan with the host driver
+visible. Explicit `vulkan` exited 1 when the driver was hidden.
+
 
 ## Android app launch in an isolated emulator
 

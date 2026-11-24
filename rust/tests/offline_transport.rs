@@ -8,16 +8,26 @@ use voiceless::config::AppConfig;
 use voiceless::offline_asr::{OfflineAsrError, OfflineFamily, OfflineTransport};
 use voiceless::realtime::RealtimeEvent;
 
-/// `[local]` defaults and limits: GGUF models default to cuda / 30 s,
-/// Sherpa models to cpu / 15 s; unknown providers and models, a segment
-/// cap above 60 s, a Sherpa cap above 25 s and cuda for a Sherpa model are
-/// rejected; hotwords on SenseVoice are accepted (ignored at runtime).
+/// GGUF uses build-specific device defaults and accepts explicit providers.
+/// Sherpa models are CPU-only and have a lower segment limit.
 #[test]
 fn local_offline_config_is_validated() {
     let config = AppConfig::from_toml("[asr]\nstreaming_backend = \"local-offline\"\n").unwrap();
     assert_eq!(config.local.model, "qwen3-asr-1.7b-gguf");
-    assert_eq!(config.local.device(), "cuda");
+    let gguf_default = if cfg!(feature = "cuda") {
+        "cuda"
+    } else if cfg!(feature = "vulkan") {
+        "vulkan"
+    } else {
+        "cpu"
+    };
+    assert_eq!(config.local.device(), gguf_default);
     assert_eq!(config.local.segment_limit(), 30.0);
+    for provider in ["cpu", "cuda", "vulkan", "auto"] {
+        let explicit =
+            AppConfig::from_toml(&format!("[local]\nprovider = {provider:?}\n")).unwrap();
+        assert_eq!(explicit.local.device(), provider);
+    }
     // Switching to a Sherpa model alone picks its CPU defaults.
     let sherpa = AppConfig::from_toml("[local]\nmodel = \"sense-voice-int8\"\n").unwrap();
     assert_eq!(sherpa.local.device(), "cpu");
@@ -35,11 +45,12 @@ fn local_offline_config_is_validated() {
         "[local]\nmodel = \"sense-voice-int8\"\nprovider = \"cpu\"\nhotwords = [\"豆包\"]\n"
     )
     .is_ok());
-    // Sherpa models are CPU-only; the GPU path is GGUF.
-    assert!(
-        AppConfig::from_toml("[local]\nmodel = \"sense-voice-int8\"\nprovider = \"cuda\"\n")
-            .is_err()
-    );
+    for provider in ["cuda", "vulkan", "auto"] {
+        assert!(AppConfig::from_toml(&format!(
+            "[local]\nmodel = \"sense-voice-int8\"\nprovider = {provider:?}\n"
+        ))
+        .is_err());
+    }
 }
 
 /// Every offline model and the VAD have an https URL, an SRI hash, and

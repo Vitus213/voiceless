@@ -275,13 +275,11 @@ pub fn sense_voice_spec() -> ModelSpec {
 const HF: &str = "https://huggingface.co";
 
 /// Qwen3-ASR 1.7B (GGUF Q8_0) for the transcribe.cpp engine: the most
-/// accurate local model; needs the CUDA build to be fast.
+/// accurate local model; GPU acceleration is available with CUDA or Vulkan.
 ///
-/// Default `[local].model`. `OfflineFamily::Gguf`: decoded by `gguf_asr.rs`
-/// (crate feature `transcribe`), device defaults to `cuda` and the model
-/// holds ~2.5 GB of VRAM; segments up to 30 s by default. Installs as the
-/// single file `model.gguf` (`gguf_asr::MODEL_FILE`), so `allowed_members`
-/// and `required_paths` are that one name.
+/// Default `[local].model`. The `transcribe` feature enables this model,
+/// with a 30 s default segment limit. It installs as one `model.gguf` file
+/// (`gguf_asr::MODEL_FILE`).
 pub fn qwen3_asr_1_7b_gguf_spec() -> ModelSpec {
     ModelSpec {
         id: "qwen3-asr-1.7b-gguf".to_owned(),

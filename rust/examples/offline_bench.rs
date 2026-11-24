@@ -2,16 +2,16 @@
 //! time, and the VAD-segmented path (stop-to-final latency, transcript with
 //! segment context).
 //!
-//! cargo run --release [--features cuda] --example offline_bench -- \
-//!     <model-id> <model-dir> <cpu|cuda> <threads> <silero_vad.onnx> <wav>...
+//! cargo run --release [--features cuda|vulkan] --example offline_bench -- \
+//!     <model-id> <model-dir> <cpu|cuda|vulkan|auto> <threads> <silero_vad.onnx> <wav>...
 //!
 //! `model-id` is a catalog id; `OfflineFamily::for_model` picks the engine
 //! from it (`*-gguf` through transcribe.cpp, other `qwen3-asr*` and
 //! `sense-voice*` through Sherpa-ONNX). `model-dir` is the payload
-//! directory, `cpu|cuda` the execution provider, `threads` the CPU thread
-//! count. WAVs must be 16 kHz mono: the decoders assume that rate and do
-//! not resample. Per file it prints audio seconds, decode seconds and RTF
-//! (decode / audio), then a total. Afterwards the first file is re-run
+//! directory, `cpu|cuda|vulkan|auto` the execution provider, and `threads`
+//! the Sherpa-ONNX CPU thread count. WAVs must be 16 kHz mono because the
+//! decoders do not resample. Per file it prints audio seconds, decode seconds
+//! and RTF (decode / audio), followed by a total. The first file is then re-run
 //! through `SegmentedRecognizer` the way a live session consumes audio
 //! (512-sample VAD windows, 500 ms partial interval, 20 s segment cap) and
 //! the time spent in `finish` is reported as stop-to-final. Exit 2 on a
@@ -31,7 +31,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [model_id, model_dir, provider, threads, vad_model, wavs @ ..] = args.as_slice() else {
         eprintln!(
-            "usage: offline_bench <model-id> <model-dir> <cpu|cuda> <threads> <vad> <wav>..."
+            "usage: offline_bench <model-id> <model-dir> <cpu|cuda|vulkan|auto> <threads> <vad> <wav>..."
         );
         std::process::exit(2);
     };

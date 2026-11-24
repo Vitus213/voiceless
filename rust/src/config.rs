@@ -351,12 +351,13 @@ pub struct TextRule {
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
     /// Catalog ID of the offline model: `qwen3-asr-1.7b-gguf` (default) or
-    /// `qwen3-asr-0.6b-gguf` (CPU or CUDA via transcribe.cpp), `qwen3-asr-0.6b-int8`
-    /// or `sense-voice-int8` (CPU via Sherpa-ONNX). Validation accepts any ID
+    /// `qwen3-asr-0.6b-gguf` (transcribe.cpp), `qwen3-asr-0.6b-int8` or
+    /// `sense-voice-int8` (CPU via Sherpa-ONNX). Validation accepts any ID
     /// `offline_asr::OfflineFamily::for_model` can classify.
     pub model: String,
-    /// Execution device: cuda | cpu. Unset: cuda for GGUF models, cpu for
-    /// Sherpa-ONNX ones (see [`LocalConfig::device`]).
+    /// GGUF execution device: `cpu`, `cuda`, `vulkan` or `auto`. `auto`
+    /// selects an available GPU or falls back to CPU. When unset, see
+    /// [`LocalConfig::device`] for the build's default. Sherpa uses `cpu`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// ONNX Runtime intra-op threads for Sherpa-ONNX models; default 4.
@@ -444,12 +445,23 @@ impl LocalConfig {
         .then_some("sense-voice-int8")
     }
 
-    /// The configured device, or the model family's default (`cuda` for
-    /// GGUF, `cpu` otherwise). Validation guarantees `cpu` or `cuda`.
+    /// The configured device, or the model family's default: for GGUF models
+    /// the GPU backend this build carries (`cuda`, else `vulkan`), `cpu`
+    /// otherwise. Validation guarantees one of cpu, cuda, vulkan, auto.
     pub fn device(&self) -> String {
-        self.provider
-            .clone()
-            .unwrap_or_else(|| if self.is_gguf() { "cuda" } else { "cpu" }.to_owned())
+        if let Some(provider) = &self.provider {
+            return provider.clone();
+        }
+        let default = if !self.is_gguf() {
+            "cpu"
+        } else if cfg!(feature = "cuda") {
+            "cuda"
+        } else if cfg!(feature = "vulkan") {
+            "vulkan"
+        } else {
+            "cpu"
+        };
+        default.to_owned()
     }
 
     /// The configured segment cap in seconds, or the model family's default
@@ -716,9 +728,9 @@ impl AppConfig {
     ///    `sensevoice-vad` are refused, with the replacements named).
     /// 2. `asr.final_backend` absent (removed key).
     /// 3. `inject.prefer` one of `wtype`, `clipboard`, `fcitx5`.
-    /// 4. `local.model` known to `offline_asr::OfflineFamily`; device `cpu`
-    ///    or `cuda`; Sherpa-ONNX families on `cpu` only; effective segment
-    ///    limit within 1..=60 s (GGUF) or 1..=25 s (Sherpa-ONNX).
+    /// 4. `local.model` known to `offline_asr::OfflineFamily`; GGUF accepts
+    ///    `cpu`, `cuda`, `vulkan` or `auto`; Sherpa-ONNX accepts only `cpu`.
+    ///    Effective segment limit within 1..=60 s (GGUF) or 1..=25 s (Sherpa).
     /// 5. `hotkey.key`, when set, a known evdev key name.
     /// 6. `text.hotword_threshold` within 0.5..=1.0 and every `text.rules`
     ///    pattern compiling (by building a `text::TextCleaner`).
@@ -768,9 +780,9 @@ impl AppConfig {
             ))
         })?;
         let device = self.local.device();
-        if !matches!(device.as_str(), "cpu" | "cuda") {
+        if !matches!(device.as_str(), "cpu" | "cuda" | "vulkan" | "auto") {
             return Err(ConfigError::Invalid(format!(
-                "local.provider={device:?}; expected cpu or cuda"
+                "local.provider={device:?}; expected cpu, cuda, vulkan or auto"
             )));
         }
         // The Sherpa int8 exports run slower on CUDA than on CPU and abort

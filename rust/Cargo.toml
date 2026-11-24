@@ -15,6 +15,9 @@ default = []
 # the GPU and needs cmake + nvcc (see flake.nix / build.rs).
 transcribe = ["dep:transcribe-cpp"]
 cuda = ["transcribe", "transcribe-cpp/cuda"]
+# GPU through the system Vulkan driver (NVIDIA, AMD, Intel): needs the
+# Vulkan headers, loader and `glslc` at build time, no CUDA toolkit.
+vulkan = ["transcribe", "transcribe-cpp/vulkan"]
 
 [dependencies]
 axum = "0.8"

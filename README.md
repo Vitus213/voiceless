@@ -219,7 +219,7 @@ hotwords = []                          # e.g. ["Voiceless", "NixOS"]
 [local]                                # local-offline: offline model on VAD segments
 model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf (requires a GGUF-enabled build)
                                        # qwen3-asr-0.6b-int8 | sense-voice-int8 (CPU, Sherpa-ONNX)
-provider = "cuda"                      # cuda | cpu
+# provider = "vulkan"                  # cpu | cuda | vulkan | auto (GGUF models)
 num_threads = 4                        # Sherpa-ONNX models only
 partial_interval_ms = 500              # target update interval after the first live text
 fast_preview = false                   # SenseVoice CPU previews with Qwen ONNX or GGUF
@@ -345,16 +345,23 @@ produces the live preview. The selected Qwen model transcribes closed segments
 for final text. Preview text can differ from the final transcript. The standard
 `voiceless-cpu` package supports `qwen3-asr-0.6b-int8` with this setting.
 
-On an x86-64-v3 CPU, `nix run .#voiceless-cpu-avx2 -- doctor` uses the CPU-only
-package with an AVX2 GGUF engine. For local GGUF dictation with this package, set
-`[local] provider = "cpu"`. Both Qwen GGUF sizes support this configuration.
+On x86-64 Linux, run `nix run .#voiceless-vulkan -- doctor` to check the
+Vulkan package's desktop dependencies. It uses the system Vulkan driver for
+GGUF inference without a CUDA toolkit. Install `silero-vad` and a Qwen GGUF
+model, then set `[asr] streaming_backend = "local-offline"`. Leave `[local]
+provider` unset to use Vulkan, or set it to `"auto"` to use the CPU when no
+GPU initializes.
+
+On an x86-64-v3 CPU, `nix run .#voiceless-cpu-avx2 -- doctor` checks the
+package with an AVX2 GGUF engine. Its default provider is `cpu`.
 Choose `model = "qwen3-asr-0.6b-gguf"` for lower finalization latency if its
 accuracy meets your needs. In the recorded Mandarin comparison, 0.6B finished
 sooner but made more transcription errors. [Model comparison](docs/wechat-voice-research.md#qwen-final-model-size-on-real-recordings)
 
-Home Manager users can select the AVX2 package with
-`programs.voiceless.package = inputs.voiceless.packages.${pkgs.system}.voiceless-cpu-avx2`.
-The standard CPU package is available as `voiceless-cpu`.
+Home Manager users can select Vulkan with
+`programs.voiceless.package = inputs.voiceless.packages.${pkgs.system}.voiceless-vulkan`.
+The same setting accepts `voiceless-cpu-avx2` for CPU GGUF or `voiceless-cpu`
+for the standard CPU build.
 
 ## Migration from type4me-linux
 

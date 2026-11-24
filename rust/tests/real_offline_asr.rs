@@ -1,8 +1,8 @@
 //! Real `local-offline` smoke: streams the Qwen3-ASR sample through the
 //! VAD-segmented transport. Requires `VOICELESS_REAL_OFFLINE_ASR=1`, the
 //! installed `silero-vad` and `qwen3-asr-0.6b-int8` models (the sample wav
-//! ships with the latter) and, for `VOICELESS_OFFLINE_MODEL`, that model
-//! (GGUF ones need `--features cuda` and `VOICELESS_OFFLINE_PROVIDER=cuda`).
+//! ships with the latter). GGUF models require `--features transcribe`,
+//! `cuda` or `vulkan` and a matching `VOICELESS_OFFLINE_PROVIDER`.
 //! Ignored by default so CI without the models never fabricates a pass.
 //! No fakes: the real catalog models from the user's XDG data dir, the
 //! real `OfflineTransport` worker, and Sherpa's own WAV reader and

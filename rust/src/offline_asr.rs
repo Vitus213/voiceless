@@ -3,8 +3,8 @@
 //! the one the daemon keeps warm). Models are Sherpa-ONNX archives
 //! (`qwen3-asr-0.6b-int8`, `sense-voice-int8`; CPU only) or single-file
 //! GGUF models on transcribe.cpp (`qwen3-asr-1.7b-gguf`,
-//! `qwen3-asr-0.6b-gguf`; CUDA or CPU, see `gguf_asr.rs`, compiled with the
-//! `transcribe` feature). Silero VAD splits speech at pauses: every closed
+//! `qwen3-asr-0.6b-gguf`; CPU, CUDA or Vulkan via the `transcribe`
+//! feature, see `gguf_asr.rs`). Silero VAD splits speech at pauses: every closed
 //! segment gets a final decode. The preview worker re-decodes the open
 //! segment and uses a separate, ordered finalization thread when fast
 //! previews are enabled. Pending segments keep their last preview visible.
@@ -160,9 +160,8 @@ impl OfflineFamily {
 /// transcribe.cpp, everything else through Sherpa-ONNX.
 ///
 /// Blocking and slow (loads the model: hundreds of MB to ~2 GB, plus a GPU
-/// warm-up run for GGUF). Without the `transcribe` feature a GGUF model
-/// is an `EngineUnavailable` error telling the user to install the CUDA
-/// package. The returned `Arc` is what the daemon keeps warm.
+/// warm-up run for GGUF). GGUF models need a build with the `transcribe`
+/// feature. The returned `Arc` is what the daemon keeps warm.
 pub fn create_decoder(
     family: OfflineFamily,
     model_dir: &Path,
@@ -176,7 +175,7 @@ pub fn create_decoder(
         )?)),
         #[cfg(not(feature = "transcribe"))]
         OfflineFamily::Gguf => Err(OfflineAsrError::EngineUnavailable(
-            "GGUF models need the transcribe.cpp engine: install the CUDA package (voiceless) instead of voiceless-cpu".to_owned(),
+            "GGUF models need the transcribe.cpp engine. On x86-64 Linux use the Nix package voiceless-vulkan, voiceless-cpu-avx2 or voiceless.".to_owned(),
         )),
         family => Ok(Arc::new(create_recognizer(family, model_dir, options)?)),
     }
@@ -185,7 +184,7 @@ pub fn create_decoder(
 /// Engine options derived from `[local]` by `engine::offline_options`.
 #[derive(Debug, Clone)]
 pub struct OfflineOptions {
-    /// Execution device: `cuda` or `cpu`.
+    /// Execution device (`cpu`, `cuda`, `vulkan` or `auto` for GGUF).
     pub provider: String,
     /// ONNX Runtime threads (Sherpa models only; ignored by GGUF).
     pub num_threads: i32,

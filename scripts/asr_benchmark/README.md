@@ -54,6 +54,7 @@ python3 scripts/asr_benchmark/replay_local.py --binary ./rust/target/debug/voice
 用 `--model qwen3-asr-0.6b-int8 --fast-preview` 可在标准 CPU 构建上验证 SenseVoice 预览与 Qwen ONNX 定稿。
 用 `--model qwen3-asr-1.7b-gguf --fast-preview` 可对照 GGUF 定稿，需使用支持 GGUF 的构建。
 运行前安装所选的定稿模型与 `sense-voice-int8`。
+对照 Vulkan 与 CPU 时，对同一个 Vulkan 构建分别传入 `--provider vulkan` 和 `--provider cpu`。
 
 ## 度量
 

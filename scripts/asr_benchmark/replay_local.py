@@ -174,7 +174,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", default="voiceless", help="path or command for the build under test")
     parser.add_argument("--model", default="sense-voice-int8")
-    parser.add_argument("--provider", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--provider", choices=("cpu", "cuda", "vulkan", "auto"), default="cpu")
     parser.add_argument("--denoise", action="store_true")
     parser.add_argument("--fast-preview", action="store_true", help="use SenseVoice previews with Qwen ONNX or GGUF")
     parser.add_argument("--split", choices=("test", "dev"), default="test")

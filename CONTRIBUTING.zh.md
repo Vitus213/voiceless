@@ -8,14 +8,14 @@
 一切通过仓库根目录的 Nix flake 运行；Rust crate 本身在 `rust/`。
 
 ```bash
-nix develop            # CUDA 开发 shell（默认）：cargo、clippy、rustfmt、pipewire、wtype、wl-clipboard、Sherpa-ONNX、CUDA 工具链
+nix develop            # x86-64 上提供 CUDA 和 Vulkan SDK，供全特性 lint 使用
 nix develop .#cpu      # 纯 CPU shell：CI 用的就是它，不下载 CUDA
+nix develop .#vulkan   # x86-64 上的 Vulkan SDK，无需 CUDA 工具链
 ```
 
-两个 shell 都导出 `SHERPA_ONNX_LIB_DIR` 与 `LD_LIBRARY_PATH`，让 `sherpa-onnx`
-crate 链接 nixpkgs 的构建而不是自行下载二进制。CUDA shell 另外导出
-`TRANSCRIBE_CMAKE_ARGS` 和 `VOICELESS_CUDA_LIB_DIRS` 供 transcribe.cpp 引擎使用
-（`cargo build --features cuda`）。
+各个 shell 都导出 `SHERPA_ONNX_LIB_DIR` 和 `LD_LIBRARY_PATH` 以使用 nixpkgs 的 Sherpa-ONNX。
+GPU 开发 shell 也会为 `cargo build --features cuda` 或 `cargo build --features vulkan`
+设置 `TRANSCRIBE_CMAKE_ARGS`。
 
 `just` 封装了常用命令，并总是带上 `--manifest-path rust/Cargo.toml`：
 
@@ -36,8 +36,8 @@ crate 链接 nixpkgs 的构建而不是自行下载二进制。CUDA shell 另外
   `CARGO_TARGET_DIR`。
 - **用 shell 里的 `cargo`/`clippy`/`rustfmt`。** 用户 profile 里的 clippy 会拒绝
   shell 的 rustc 构建出的 crate（E0514）。
-- **GPU 测试需要驱动。** `nix flake check` 只构建 CPU 包；GGUF 引擎请在本地跑
-  `cargo test --features cuda`。
+- **GPU 推理测试需要主机驱动。** Vulkan Nix 包会在沙箱里运行无需模型的测试。
+  在沙箱外做 Vulkan 回放时，进入 `nix develop .#vulkan` 并给 Cargo 加上 `--features vulkan`。
 - **真实服务测试是 skip 不是 pass。** 名为 `real_*` 的测试与 `benchmark` 门禁
   需要凭据、已安装模型或 Wayland 会话；缺少时报告 `skip`/`unverified`，
   绝不报告通过。

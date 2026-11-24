@@ -5,9 +5,10 @@
 //! This is the GGUF `Decoder` of the `local-offline` backend
 //! (`[asr] streaming_backend = "local-offline"` with a `[local] model`
 //! ending in `-gguf`: `qwen3-asr-1.7b-gguf`, `qwen3-asr-0.6b-gguf`;
-//! `[local] provider = "cuda" | "cpu"`, default cuda). The module is
-//! compiled only with the `transcribe` cargo feature (`cuda` adds the GPU
-//! build of transcribe.cpp); the Nix `voiceless` package enables it and
+//! `[local] provider = "cuda" | "vulkan" | "auto" | "cpu"`; the default is
+//! the GPU backend this build carries, else cpu). The module is compiled
+//! only with the `transcribe` cargo feature (`cuda` and `vulkan` add the GPU
+//! builds of transcribe.cpp); the Nix `voiceless` package enables it and
 //! `voiceless-cpu` does not, in which case `offline_asr::create_decoder`
 //! reports the GGUF family as unavailable. Only `create_decoder` constructs
 //! a `GgufDecoder`; the daemon keeps one warm across sessions
@@ -51,22 +52,24 @@ pub struct GgufDecoder {
 }
 
 impl GgufDecoder {
-    /// Load `path` on the device named by `options.provider` (`"cpu"` is
-    /// the CPU backend; anything else selects CUDA, with the default
-    /// device) and run one second of silence through it so kernel and
-    /// buffer setup is paid here rather than on the first utterance.
-    /// Blocking: seconds for a cold ~2 GB load. Errors: `MissingModelFile`
-    /// when `path` is not a file; `EngineUnavailable` (naming path and
-    /// provider) when the engine cannot load the model, open a session or
-    /// complete the warm-up, e.g. no CUDA device on a `cuda` provider.
+    /// Load `path` with the requested provider, then decode one second of
+    /// silence to warm up kernels and buffers before the first utterance.
+    /// Returns `MissingModelFile` for a missing file or `EngineUnavailable`
+    /// when the provider is invalid or model setup fails.
     pub fn load(path: &Path, options: &OfflineOptions) -> Result<Self, OfflineAsrError> {
         if !path.is_file() {
             return Err(OfflineAsrError::MissingModelFile(path.to_owned()));
         }
-        // `config.rs` only allows cpu | cuda, so the fallthrough is cuda.
         let backend = match options.provider.as_str() {
             "cpu" => Backend::Cpu,
-            _ => Backend::Cuda,
+            "cuda" => Backend::Cuda,
+            "vulkan" => Backend::Vulkan,
+            "auto" => Backend::Auto,
+            provider => {
+                return Err(OfflineAsrError::EngineUnavailable(format!(
+                    "unknown GGUF provider {provider:?}; expected cpu, cuda, vulkan or auto"
+                )))
+            }
         };
         let unavailable = |error: transcribe_cpp::Error| {
             OfflineAsrError::EngineUnavailable(format!(

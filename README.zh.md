@@ -209,7 +209,7 @@ hotwords = []                          # 例如 ["Voiceless", "NixOS"]
 [local]                                # local-offline：离线模型 + VAD 分段
 model = "qwen3-asr-1.7b-gguf"          # qwen3-asr-1.7b-gguf | qwen3-asr-0.6b-gguf（需带 GGUF 引擎的软件包）
                                        # qwen3-asr-0.6b-int8 | sense-voice-int8（CPU，Sherpa-ONNX）
-provider = "cuda"                      # cuda | cpu
+# provider = "vulkan"                  # cpu | cuda | vulkan | auto（GGUF 模型）
 num_threads = 4                        # 仅 Sherpa-ONNX 模型使用
 partial_interval_ms = 500              # 首次出字后的目标刷新间隔
 fast_preview = false                   # Qwen ONNX 或 GGUF 搭配 SenseVoice CPU 实时预览
@@ -332,14 +332,19 @@ Qwen ONNX 和 GGUF 主模型都可启用快速预览。运行 `voiceless model i
 已结束的语音段由所选 Qwen 模型定稿。预览文字可能与最终结果不同。标准 `voiceless-cpu`
 软件包可用 `qwen3-asr-0.6b-int8` 启用此设置。
 
-支持 x86-64-v3 的机器可以用 `nix run .#voiceless-cpu-avx2 -- doctor` 运行带 AVX2 GGUF
-引擎的 CPU 版。用这个包做本地 GGUF 听写时，将 `[local] provider` 设为 `"cpu"`。
-两种 Qwen GGUF 尺寸均支持此配置。想缩短定稿等待，可把 `[local] model` 设为
-`"qwen3-asr-0.6b-gguf"`。真实中文回放中，0.6B 定稿更快，字错率也更高。
+在 x86-64 Linux 上，运行 `nix run .#voiceless-vulkan -- doctor` 检查 Vulkan 包所需的桌面依赖。
+GGUF 推理使用系统 Vulkan 驱动，无需 CUDA 工具链。安装 `silero-vad` 和一个 Qwen GGUF 模型，
+再设置 `[asr] streaming_backend = "local-offline"`。省略 `[local] provider` 时默认用 Vulkan，
+设为 `"auto"` 时会在 GPU 无法初始化的情况下退回 CPU。
+
+支持 x86-64-v3 的机器可用 `nix run .#voiceless-cpu-avx2 -- doctor` 检查带 AVX2 GGUF 引擎的包，
+该包默认使用 CPU。
+想缩短定稿等待，可把 `[local] model` 设为 `"qwen3-asr-0.6b-gguf"`。
+真实中文回放中，0.6B 定稿更快，字错率也更高。
 [模型实测对照](docs/wechat-voice-research.md#qwen-final-model-size-on-real-recordings)
 
-Home Manager 可以通过 `programs.voiceless.package` 选择
-`inputs.voiceless.packages.${pkgs.system}.voiceless-cpu-avx2`。标准 CPU 包仍可用 `voiceless-cpu`。
+Home Manager 可设置 `programs.voiceless.package = inputs.voiceless.packages.${pkgs.system}.voiceless-vulkan`
+启用 Vulkan。也可在同一设置中选择 CPU GGUF 包 `voiceless-cpu-avx2` 或标准 CPU 包 `voiceless-cpu`。
 
 ## 从 type4me-linux 迁移
 

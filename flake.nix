@@ -12,11 +12,11 @@
 #     suite. CI builds and tests this one (`checks.default`,
 #     `devShells.cpu`); on aarch64-linux both stacks are CPU.
 #
-# Per-system outputs: packages.{default,voiceless} (CUDA stack),
-# packages.voiceless-cpu, packages.voiceless-fcitx5-bridge, apps.default,
-# packages.voiceless-cpu-avx2 on x86_64-linux adds the accelerated GGUF engine.
-# checks.default (the CPU package, whose build runs `cargo test`),
-# devShells.{default,cpu} and formatter (nixfmt over the Nix files).
+# packages.{default,voiceless}, packages.voiceless-cpu and
+# packages.voiceless-fcitx5-bridge are available on both architectures.
+# x86_64-linux also has voiceless-cpu-avx2 and voiceless-vulkan for GGUF.
+# checks.default builds and tests the CPU package. devShells.default and
+# devShells.cpu exist on both architectures, devShells.vulkan on x86_64-linux.
 # System-independent: overlays.default (voiceless, voiceless-fcitx5-bridge)
 # and homeManagerModules.default (nix/home-manager.nix).
 #
@@ -123,8 +123,8 @@
           cuda_cudart
           libcublas
         ];
-        cudaEngineEnv = {
-          TRANSCRIBE_CMAKE_ARGS = "-DCMAKE_CUDA_ARCHITECTURES=${cudaArchitectures}";
+        cudaCmakeArgs = [ "-DCMAKE_CUDA_ARCHITECTURES=${cudaArchitectures}" ];
+        cudaLinkEnv = {
           # build.rs: transcribe-cpp-sys omits these from its link line.
           VOICELESS_CUDA_LIB_DIRS = pkgs.lib.concatStringsSep ":" [
             "${pkgs.lib.getLib cuda.cuda_cudart}/lib"
@@ -132,14 +132,29 @@
             "${pkgs.lib.getLib cuda.libcublas}/lib"
           ];
         };
+        vulkanBuildInputs = with pkgs; [
+          vulkan-headers
+          vulkan-loader
+          spirv-headers
+        ];
+        vulkanShaderCompiler = pkgs.lib.getBin pkgs.shaderc;
+        # transcribe-cpp-sys clears CMAKE_PREFIX_PATH. Pass the SDK outputs
+        # directly to FindVulkan and the SPIR-V shader generator.
+        vulkanCmakeArgs = [
+          "-DVulkan_INCLUDE_DIR=${pkgs.lib.getDev pkgs.vulkan-headers}/include"
+          "-DVulkan_LIBRARY=${pkgs.lib.getLib pkgs.vulkan-loader}/lib/libvulkan.so"
+          "-DVulkan_GLSLC_EXECUTABLE=${vulkanShaderCompiler}/bin/glslc"
+          "-DSPIRV-Headers_DIR=${pkgs.lib.getDev pkgs.spirv-headers}/share/cmake/SPIRV-Headers"
+        ];
 
         mkVoiceless =
           {
             stack,
             avx2 ? false,
+            vulkan ? false,
           }:
           let
-            gguf = stack.gpu || avx2;
+            gguf = stack.gpu || avx2 || vulkan;
             buildRustPackage =
               if stack.gpu then
                 pkgs.rustPlatform.buildRustPackage.override { stdenv = cuda.backendStdenv; }
@@ -152,7 +167,13 @@
               version = (builtins.fromTOML (builtins.readFile ./rust/Cargo.toml)).package.version;
               src = ./rust;
               cargoLock.lockFile = ./rust/Cargo.lock;
-              buildFeatures = if stack.gpu then [ "cuda" ] else pkgs.lib.optional gguf "transcribe";
+              buildFeatures =
+                if stack.gpu then
+                  [ "cuda" ]
+                else if vulkan then
+                  [ "vulkan" ]
+                else
+                  pkgs.lib.optional gguf "transcribe";
               # cmake is for transcribe-cpp-sys's build script, not this crate.
               dontUseCmakeConfigure = true;
               nativeBuildInputs = [
@@ -160,6 +181,7 @@
                 pkgs.pkg-config
               ]
               ++ pkgs.lib.optional gguf pkgs.cmake
+              ++ pkgs.lib.optional vulkan vulkanShaderCompiler
               ++ pkgs.lib.optionals stack.gpu [
                 cuda.cuda_nvcc
                 pkgs.autoAddDriverRunpath
@@ -168,9 +190,10 @@
                 stack.sherpaOnnx
                 stack.onnxruntime
               ]
-              ++ pkgs.lib.optionals stack.gpu cudaLibs;
-              # GPU test binaries need the NVIDIA driver, absent in the sandbox;
-              # the CPU package (checks.default) runs the suite.
+              ++ pkgs.lib.optionals stack.gpu cudaLibs
+              ++ pkgs.lib.optionals vulkan vulkanBuildInputs;
+              # CUDA needs the NVIDIA driver. Vulkan's model-free checks
+              # run in the sandbox with the same CPU Sherpa-ONNX stack.
               doCheck = !stack.gpu;
               # The tests spawn pw-record, wtype and wl-copy as subprocesses
               # (doctor and injection paths); they must resolve on PATH.
@@ -206,7 +229,9 @@
                 platforms = pkgs.lib.platforms.linux;
               };
             }
-            // pkgs.lib.optionalAttrs stack.gpu cudaEngineEnv
+            // pkgs.lib.optionalAttrs stack.gpu (
+              cudaLinkEnv // { TRANSCRIBE_CMAKE_ARGS = pkgs.lib.concatStringsSep " " cudaCmakeArgs; }
+            )
             // pkgs.lib.optionalAttrs avx2 {
               TRANSCRIBE_CMAKE_ARGS = pkgs.lib.concatStringsSep " " [
                 "-DTRANSCRIBE_X86_CONSERVATIVE=ON"
@@ -218,21 +243,26 @@
                 "-DGGML_BMI2=ON"
               ];
             }
+            // pkgs.lib.optionalAttrs vulkan {
+              TRANSCRIBE_CMAKE_ARGS = pkgs.lib.concatStringsSep " " vulkanCmakeArgs;
+            }
           );
         voiceless = mkVoiceless { inherit stack; };
         voicelessCpu = mkVoiceless { stack = stackCpu; };
         fcitx5Bridge = pkgs.callPackage ./nix/fcitx5-bridge.nix { };
 
         mkShell =
-          stack:
+          {
+            stack,
+            vulkan ? false,
+          }:
           (if stack.gpu then pkgs.mkShell.override { stdenv = cuda.backendStdenv; } else pkgs.mkShell) (
             {
-              # `cargo build --features cuda` builds the GPU engine here.
-              nativeBuildInputs = pkgs.lib.optionals stack.gpu [
-                pkgs.cmake
-                cuda.cuda_nvcc
-              ];
-              buildInputs = pkgs.lib.optionals stack.gpu cudaLibs;
+              nativeBuildInputs =
+                pkgs.lib.optional (stack.gpu || vulkan) pkgs.cmake
+                ++ pkgs.lib.optional stack.gpu cuda.cuda_nvcc
+                ++ pkgs.lib.optional vulkan vulkanShaderCompiler;
+              buildInputs = pkgs.lib.optionals stack.gpu cudaLibs ++ pkgs.lib.optionals vulkan vulkanBuildInputs;
               packages = [
                 python
                 pkgs.just
@@ -258,7 +288,12 @@
               SHERPA_ONNX_LIB_DIR = "${stack.sherpaRuntimeLib}/lib";
               LD_LIBRARY_PATH = "${stack.sherpaRuntimeLib}/lib:/run/opengl-driver/lib";
             }
-            // pkgs.lib.optionalAttrs stack.gpu cudaEngineEnv
+            // pkgs.lib.optionalAttrs stack.gpu cudaLinkEnv
+            // pkgs.lib.optionalAttrs (stack.gpu || vulkan) {
+              TRANSCRIBE_CMAKE_ARGS = pkgs.lib.concatStringsSep " " (
+                pkgs.lib.optionals stack.gpu cudaCmakeArgs ++ pkgs.lib.optionals vulkan vulkanCmakeArgs
+              );
+            }
           );
       in
       {
@@ -273,6 +308,10 @@
             stack = stackCpu;
             avx2 = true;
           };
+          voiceless-vulkan = mkVoiceless {
+            stack = stackCpu;
+            vulkan = true;
+          };
         };
 
         apps.default = flake-utils.lib.mkApp { drv = voiceless; };
@@ -280,11 +319,20 @@
         # CI-safe check: builds and tests the CPU stack only.
         checks.default = voicelessCpu;
 
-        # `nix develop` gets the GPU toolchain (cmake, nvcc, CUDA libs) so
-        # `cargo build --features cuda` works; `.#cpu` is what CI uses and
-        # what a machine without a GPU or disk for CUDA should pick.
-        devShells.default = mkShell stack;
-        devShells.cpu = mkShell stackCpu;
+        devShells = {
+          # `just lint` enables every Cargo feature, including Vulkan.
+          default = mkShell {
+            inherit stack;
+            vulkan = stack.gpu;
+          };
+          cpu = mkShell { stack = stackCpu; };
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          vulkan = mkShell {
+            stack = stackCpu;
+            vulkan = true;
+          };
+        };
 
         # `nix fmt`: formats only the two Nix files (fcitx5-bridge.nix is
         # not listed; Rust is formatted by `just lint`).
