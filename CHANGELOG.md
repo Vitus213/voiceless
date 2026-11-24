@@ -6,14 +6,13 @@ the day the work landed on `main`; commit hashes refer to
 
 ## Unreleased
 
-Nothing yet.
-
 ### Added
-- `voiceless-vulkan` runs local GGUF models on x86-64 Linux through the system
-  Vulkan driver. Set `[local] provider = "auto"` to use the CPU if no GPU
-  initializes.
-- GGUF defaults to the GPU backend in the build (`cuda` before `vulkan`),
-  or `cpu` on CPU builds. Sherpa-ONNX models use `cpu`.
+- Linux x86-64 Bun packages and standalone archives include the Vulkan GGUF
+  backend, also available through the `voiceless-vulkan` Nix package.
+
+### Changed
+- Vulkan builds default to `[local] provider = "auto"` for GGUF so CPU fallback
+  works when a GPU cannot initialize. Explicit `vulkan` requires a device.
 
 ## 0.1.1 - 2026-11-24
 

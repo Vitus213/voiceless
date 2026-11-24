@@ -17,7 +17,7 @@ fn local_offline_config_is_validated() {
     let gguf_default = if cfg!(feature = "cuda") {
         "cuda"
     } else if cfg!(feature = "vulkan") {
-        "vulkan"
+        "auto"
     } else {
         "cpu"
     };

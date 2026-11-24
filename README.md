@@ -42,16 +42,15 @@ X11, macOS and Windows are not supported.
 
 ## Install
 
-### Linux releases
+### Bun
 
-Release candidates include standard CPU packages for glibc Linux x86-64 and
-ARM64. See the release notes for the tested host versions. The package contains
-the native program and its inference libraries. Install your audio and desktop
-tools separately and download models with `voiceless model install`.
+On glibc Linux, install with `bun add -g voiceless` and update with
+`voiceless update`. The x86-64 platform package includes the Vulkan GGUF
+backend. The ARM64 package uses CPU inference through Sherpa-ONNX.
+Install desktop and audio tools separately. Download models with
+`voiceless model install`.
 
-Once the npm packages are published, install with `bun add -g voiceless` and
-update with `voiceless update`. The updater asks Bun to install a specific
-version into the global project that owns your current command.
+### Standalone Linux archive
 
 For a standalone installation, download the matching archive from [GitHub
 Releases](https://github.com/Vitus213/voiceless/releases) and obtain its SHA-256
@@ -65,11 +64,14 @@ After an update, restart a running daemon when it is idle to use the new
 binary. A Nix or Home Manager installation is updated through its owning flake
 or profile. [Distribution design](docs/non-nix-distribution.md)
 
-### Run without installation (Nix flake, recommended)
+### Run with Nix
 
 ```bash
 nix run github:Vitus213/voiceless -- doctor
 ```
+
+For the Vulkan build on x86-64 Linux, use
+`nix run github:Vitus213/voiceless#voiceless-vulkan -- doctor`.
 
 ### Run from a local checkout
 
@@ -345,12 +347,12 @@ produces the live preview. The selected Qwen model transcribes closed segments
 for final text. Preview text can differ from the final transcript. The standard
 `voiceless-cpu` package supports `qwen3-asr-0.6b-int8` with this setting.
 
-On x86-64 Linux, run `nix run .#voiceless-vulkan -- doctor` to check the
-Vulkan package's desktop dependencies. It uses the system Vulkan driver for
-GGUF inference without a CUDA toolkit. Install `silero-vad` and a Qwen GGUF
-model, then set `[asr] streaming_backend = "local-offline"`. Leave `[local]
-provider` unset to use Vulkan, or set it to `"auto"` to use the CPU when no
-GPU initializes.
+On x86-64 Linux, use the Bun package or `nix run .#voiceless-vulkan -- doctor`
+from a checkout. Both builds can use the system Vulkan driver. Install
+`silero-vad` and a Qwen GGUF model, then set `[asr] streaming_backend =
+"local-offline"`. The default `[local] provider` is `auto` in both builds.
+It picks an available GPU and falls back to CPU. Set `provider = "vulkan"`
+to require a Vulkan device.
 
 On an x86-64-v3 CPU, `nix run .#voiceless-cpu-avx2 -- doctor` checks the
 package with an AVX2 GGUF engine. Its default provider is `cpu`.

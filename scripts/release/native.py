@@ -30,7 +30,28 @@ SHERPA_SOURCE = f"https://codeload.github.com/k2-fsa/sherpa-onnx/tar.gz/refs/tag
 SHERPA_SOURCE_SHA = "01db47e87078d5f8fd0e163f9168436ad1e2ad783d61af51da44f117cae3e554"
 SHERPA_X64 = f"sherpa-onnx-v{SHERPA}-linux-x64-shared-no-tts-lib.tar.bz2"
 SHERPA_X64_SHA = "36e2d6be206b60e352aa3f495c3f37d91081fe3c803630411d7bc99d4d3c8480"
-LIBRARIES = ("libsherpa-onnx-c-api.so", "libonnxruntime.so")
+SHERPA_LIBRARIES = ("libsherpa-onnx-c-api.so", "libonnxruntime.so")
+VULKAN_LIBRARY = "libvulkan.so.1"
+VULKAN_SDK = "https://packages.lunarg.com/vulkan/1.4.313"
+VULKAN_PACKAGES = (
+    (
+        "v/vulkan-loader/libvulkan1_1.4.313.0~rc1-1lunarg22.04-1_amd64.deb",
+        "0fc9b0587059230743433cdbfd5723dd16b2c13b4a05f397ae45047033f4ddd5",
+    ),
+    (
+        "v/vulkan-headers/vulkan-headers_1.4.313.0~rc1-1lunarg22.04-1_all.deb",
+        "587b2d8e79416b394170ab61557c98765570cd153730f819a917866d78f45e1a",
+    ),
+    (
+        "s/spirv-headers/spirv-headers_1.6.1+1.4.313.0~rc1-1lunarg22.04-1_all.deb",
+        "9c72f6ccca5125cfb91bb0161d8841cc54059303cdb6c022d1f464c36029df7a",
+    ),
+    (
+        "s/shaderc/shaderc_2025.2~rc1-1lunarg22.04-1_amd64.deb",
+        "53a024e2939e13e86caa49930450f38fdfbc528e129d8ecffc142d7e5ff27d5c",
+    ),
+)
+VULKAN_LICENSES = ("libvulkan1", "vulkan-headers", "spirv-headers")
 PLATFORMS = {
     "x86_64": {
         "npm_cpu": "x64",
@@ -39,6 +60,7 @@ PLATFORMS = {
         "rust_cpu": "x86-64",
         "c_arch": "x86-64",
         "ort_sha": "2cacf5084737b30f61a5c8a60efa0408b26f3e8ca6cc0dc312fe4d52d07724f9",
+        "libraries": (*SHERPA_LIBRARIES, VULKAN_LIBRARY),
     },
     "aarch64": {
         "npm_cpu": "arm64",
@@ -47,6 +69,7 @@ PLATFORMS = {
         "rust_cpu": "generic",
         "c_arch": "armv8-a",
         "ort_sha": "c6a1971a8bfc8eaa07d48478d796245a747e75f510859574c9253dc7f1e9dc9a",
+        "libraries": SHERPA_LIBRARIES,
     },
 }
 
@@ -155,7 +178,7 @@ def build_environment(work, arch):
                             "CARGO_ENCODED_RUSTFLAGS", "CC_", "CXX_", "AR_", "CFLAGS", "CPPFLAGS",
                             "CXXFLAGS", "LDFLAGS", "PKG_CONFIG", "LD_", "CPATH", "C_INCLUDE_PATH",
                             "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "SHERPA_ONNX", "SHERPA_ONNXRUNTIME",
-                            "DOCS_RS")):
+                            "TRANSCRIBE_", "CMAKE_", "VULKAN_SDK", "DOCS_RS")):
             del env[name]
     abi = PLATFORMS[arch]
     env.update(
@@ -166,6 +189,33 @@ def build_environment(work, arch):
         RUSTFLAGS=f"-C target-cpu={abi['rust_cpu']} -C linker=/usr/bin/gcc-11 -C link-arg=-fuse-ld=bfd",
     )
     return env
+
+
+def prepare_vulkan(work, payload, env):
+    # Jammy omits glslc. Extract the pinned SDK without changing system packages.
+    sdk = work / "vulkan-sdk"
+    for relative, sha in VULKAN_PACKAGES:
+        package = work / Path(relative).name
+        download(f"{VULKAN_SDK}/pool/main/{relative}", package, sha)
+        subprocess.run(["dpkg-deb", "--extract", package, sdk], check=True)
+
+    include = sdk / "usr/include"
+    lib = sdk / "usr/lib/x86_64-linux-gnu"
+    linker_name = lib / "libvulkan.so"
+    linker_name.symlink_to(VULKAN_LIBRARY)
+    env["TRANSCRIBE_CMAKE_ARGS"] = " ".join([
+        "-DTRANSCRIBE_X86_CONSERVATIVE=ON",
+        f"-DVulkan_INCLUDE_DIR={include}",
+        f"-DVulkan_LIBRARY={linker_name}",
+        f"-DVulkan_GLSLC_EXECUTABLE={sdk / 'usr/bin/glslc'}",
+        f"-DSPIRV-Headers_DIR={sdk / 'usr/share/cmake/SPIRV-Headers'}",
+    ])
+    env["CXXFLAGS"] += f" -isystem {include}"
+    env["RUSTFLAGS"] += f" -L native={lib}"
+    shutil.copyfile(lib / VULKAN_LIBRARY, payload / "lib" / VULKAN_LIBRARY)
+    for component in VULKAN_LICENSES:
+        shutil.copyfile(sdk / "usr/share/doc" / component / "copyright",
+                        payload / "licenses" / f"{component}-copyright.txt")
 
 
 def prepare_onnx(work, arch, licenses):
@@ -199,7 +249,7 @@ def prepare_sherpa(work, arch, runtime, env):
         libs = work / package.name.removesuffix(".tar.bz2") / "lib"
         libs.mkdir(parents=True)
         with tarfile.open(package, "r:bz2") as upstream:
-            for name in LIBRARIES:
+            for name in SHERPA_LIBRARIES:
                 member = upstream.getmember(f"{libs.parent.name}/lib/{name}")
                 require(member.isfile(), f"expected a regular upstream member: {member.name}")
                 with upstream.extractfile(member) as source, (libs / name).open("wb") as dest:
@@ -229,7 +279,7 @@ def prepare_sherpa(work, arch, runtime, env):
         libs = build_dir / "lib"
         shutil.copyfile(runtime / "lib/libonnxruntime.so", libs / "libonnxruntime.so")
 
-    for name in LIBRARIES:
+    for name in SHERPA_LIBRARIES:
         check_machine(libs / name, arch)
     return libs
 
@@ -250,6 +300,9 @@ def copy_cargo_licenses(metadata, built_ids, licenses):
         if package["name"] == "ring" and (root / "third_party").is_dir():
             texts.update(item for item in (root / "third_party").rglob("*")
                          if item.is_file() and license_name.match(item.name))
+        if package["name"] == "transcribe-cpp-sys":
+            texts.add(root / "ggml/LICENSE")
+            texts.update(root.glob("src/third_party/*/LICENSE"))
         files = []
         for source in sorted(texts):
             dest = licenses / label / source.relative_to(root)
@@ -263,7 +316,7 @@ def copy_cargo_licenses(metadata, built_ids, licenses):
 
 def write_notices(payload, metadata, built_ids, arch):
     licenses = payload / "licenses"
-    lines = ["Third-party notices for the Voiceless Linux CPU release", "",
+    lines = ["Third-party notices for the Voiceless Linux release", "",
              f"Sherpa-ONNX {SHERPA} (Apache-2.0): {SHERPA_GITHUB}/tree/v{SHERPA}",
              f"ONNX Runtime {ORT} (MIT): {ORT_SOURCE}",
              f"ONNX Runtime binary distribution: {ORT_RELEASE}",
@@ -271,6 +324,9 @@ def write_notices(payload, metadata, built_ids, arch):
              f"C API origin: {SHERPA_RELEASE}/{SHERPA_X64}" if arch == "x86_64"
              else f"C API origin: {SHERPA_SOURCE} (CPU C API build with TTS disabled)",
              "Sherpa-ONNX component and Rust toolchain license texts and sources:", ""]
+    if arch == "x86_64":
+        lines.extend([f"Vulkan SDK packages: {VULKAN_SDK}",
+                      *(f"licenses/{name}-copyright.txt" for name in VULKAN_LICENSES), ""])
     for row in (ROOT / "scripts/release/source-licenses.tsv").read_text().splitlines():
         if not row or row.startswith("#"):
             continue
@@ -292,22 +348,27 @@ def build_native(work, destination, version, arch):
     runtime = prepare_onnx(work, arch, payload / "licenses")
     sherpa_libs = prepare_sherpa(work, arch, runtime, env)
     env["SHERPA_ONNX_LIB_DIR"] = str(sherpa_libs)
-    for name in LIBRARIES:
+    for name in SHERPA_LIBRARIES:
+        shutil.copyfile(sherpa_libs / name, payload / "lib" / name)
+    features = ["--no-default-features"]
+    if arch == "x86_64":
+        prepare_vulkan(work, payload, env)
+        features.extend(["--features", "vulkan"])
+    for name in PLATFORMS[arch]["libraries"]:
         path = payload / "lib" / name
-        shutil.copyfile(sherpa_libs / name, path)
         if output("patchelf", "--print-rpath", path) != "$ORIGIN":
             subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", path], check=True)
 
     with (work / "cargo.jsonl").open("w+") as messages:
         subprocess.run(["rustup", "run", RUST, "cargo", "build", "--release", "--locked",
-                        "--no-default-features", "--bin", "voiceless", "--target", rust_target,
+                        *features, "--bin", "voiceless", "--target", rust_target,
                         "--message-format=json-render-diagnostics"],
                        cwd=ROOT / "rust", env=env, stdout=messages, check=True)
         messages.seek(0)
         built_ids = {item["package_id"] for item in map(json.loads, messages)
                      if item["reason"] == "compiler-artifact"}
     metadata = json.loads(cargo("metadata", "--locked", "--format-version", "1",
-                                "--filter-platform", rust_target, env=env))
+                                "--filter-platform", rust_target, *features, env=env))
     require(app_package(metadata)["id"] in built_ids, "Cargo did not report the Voiceless build")
 
     binary = payload / "bin/voiceless"
@@ -318,6 +379,8 @@ def build_native(work, destination, version, arch):
     check_machine(binary, arch)
     shutil.copyfile(ROOT / "LICENSE", payload / "LICENSE")
     write_notices(payload, metadata, built_ids, arch)
+    # Existing standalone updaters require this manifest variant for the
+    # CPU-compatible release lane, including optional Vulkan acceleration.
     write_json(payload / "release.json", {"schema": 1, "version": version, "target": target(arch),
                                          "variant": "cpu", "files": inventory(payload)})
     archive(payload, destination / f"voiceless-v{version}-{target(arch)}.tar.gz")

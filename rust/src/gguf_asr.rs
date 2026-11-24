@@ -5,12 +5,10 @@
 //! This is the GGUF `Decoder` of the `local-offline` backend
 //! (`[asr] streaming_backend = "local-offline"` with a `[local] model`
 //! ending in `-gguf`: `qwen3-asr-1.7b-gguf`, `qwen3-asr-0.6b-gguf`;
-//! `[local] provider = "cuda" | "vulkan" | "auto" | "cpu"`; the default is
-//! the GPU backend this build carries, else cpu). The module is compiled
-//! only with the `transcribe` cargo feature (`cuda` and `vulkan` add the GPU
-//! builds of transcribe.cpp); the Nix `voiceless` package enables it and
-//! `voiceless-cpu` does not, in which case `offline_asr::create_decoder`
-//! reports the GGUF family as unavailable. Only `create_decoder` constructs
+//! `[local] provider = "cuda" | "vulkan" | "auto" | "cpu"`; see
+//! `LocalConfig::device` for the build's default). The module requires
+//! the `transcribe` feature. `cuda` and `vulkan` enable GPU inference.
+//! Only `create_decoder` constructs
 //! a `GgufDecoder`; the daemon keeps one warm across sessions
 //! (`engine::WarmEngine`), one-shot `voiceless stream` loads it on the
 //! offline worker thread.

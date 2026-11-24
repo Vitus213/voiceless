@@ -42,12 +42,13 @@ nix run github:Vitus213/voiceless -- stream   # 说话，按 Ctrl-C，Voiceless 
 
 ## 安装
 
-### Linux 发布包
+### Bun
 
-候选包面向使用 glibc 的 x86-64 和 ARM64 Linux，提供标准 CPU 后端。已测试的系统版本见发布说明。
-包内有原生程序和推理库。录音和桌面工具需在系统里安装，模型通过 `voiceless model install` 下载。
+在使用 glibc 的 Linux 上，用 `bun add -g voiceless` 安装，用 `voiceless update` 升级。
+x86-64 平台包内置 Vulkan GGUF 后端，ARM64 包用 Sherpa-ONNX 在 CPU 上推理。
+录音和桌面工具由系统提供，模型通过 `voiceless model install` 下载。
 
-npm 包发布后，用 `bun add -g voiceless` 安装，再用 `voiceless update` 升级。更新器会把选中的确切版本交给当前命令所属的 Bun 全局项目安装。
+### Linux 独立压缩包
 
 独立安装从 [GitHub Releases](https://github.com/Vitus213/voiceless/releases) 下载对应的压缩包，从 Release 元数据取得 SHA-256，核对后再解包。
 进入解压目录，带上同一摘要运行 `./bin/voiceless install /path/to/archive.tar.gz --sha256 DIGEST`。
@@ -55,11 +56,13 @@ npm 包发布后，用 `bun add -g voiceless` 安装，再用 `voiceless update`
 
 更新后，等录音结束再重启常驻服务，新程序才会接管。Nix 或 Home Manager 安装继续由对应的 flake 或 profile 升级。 [分发方案](docs/non-nix-distribution.md)
 
-### 免安装运行（Nix flake，推荐）
+### 通过 Nix 运行
 
 ```bash
 nix run github:Vitus213/voiceless -- doctor
 ```
+
+x86-64 Linux 的 Vulkan 版本可用 `nix run github:Vitus213/voiceless#voiceless-vulkan -- doctor` 启动。
 
 ### 本地检出运行
 
@@ -332,10 +335,11 @@ Qwen ONNX 和 GGUF 主模型都可启用快速预览。运行 `voiceless model i
 已结束的语音段由所选 Qwen 模型定稿。预览文字可能与最终结果不同。标准 `voiceless-cpu`
 软件包可用 `qwen3-asr-0.6b-int8` 启用此设置。
 
-在 x86-64 Linux 上，运行 `nix run .#voiceless-vulkan -- doctor` 检查 Vulkan 包所需的桌面依赖。
-GGUF 推理使用系统 Vulkan 驱动，无需 CUDA 工具链。安装 `silero-vad` 和一个 Qwen GGUF 模型，
-再设置 `[asr] streaming_backend = "local-offline"`。省略 `[local] provider` 时默认用 Vulkan，
-设为 `"auto"` 时会在 GPU 无法初始化的情况下退回 CPU。
+在 x86-64 Linux 上，可以用 Bun 安装，也可以在检出的项目目录运行
+`nix run .#voiceless-vulkan -- doctor`。两个构建都能使用系统 Vulkan 驱动。
+安装 `silero-vad` 和一个 Qwen GGUF 模型后，把 `[asr] streaming_backend` 设为 `"local-offline"`。
+两个构建的 `[local] provider` 都默认是 `auto`。它会选用可用 GPU，否则用 CPU。
+设为 `"vulkan"` 可强制要求 Vulkan 设备。
 
 支持 x86-64-v3 的机器可用 `nix run .#voiceless-cpu-avx2 -- doctor` 检查带 AVX2 GGUF 引擎的包，
 该包默认使用 CPU。

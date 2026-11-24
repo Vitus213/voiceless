@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 
 from native import (
-    GLIBC, LIBRARIES, PLATFORMS, SHERPA_GITHUB, check_machine, digest, download,
+    GLIBC, PLATFORMS, SHERPA_GITHUB, VULKAN_LICENSES, check_machine, digest, download,
     inventory, leaf_name, output, package_json, require, target,
 )
 
@@ -61,8 +61,9 @@ def unpack(archive, root, prefix=""):
 def verify_elf(tree, arch, env):
     binary = tree / "bin/voiceless"
     loader = PLATFORMS[arch]["loader"]
+    libraries = set(PLATFORMS[arch]["libraries"])
     paths = {binary: "$ORIGIN/../lib"}
-    paths.update({tree / "lib" / name: "$ORIGIN" for name in LIBRARIES})
+    paths.update({tree / "lib" / name: "$ORIGIN" for name in sorted(libraries)})
     linked = set()
     for path, runpath in paths.items():
         check_machine(path, arch)
@@ -74,9 +75,9 @@ def verify_elf(tree, arch, env):
         require(re.findall(r"\((?:RPATH|RUNPATH)\).*\[([^\]]+)\]", dynamic) == [runpath],
                 f"unexpected runtime library paths in {path}")
         needed = set(re.findall(r"\(NEEDED\).*\[([^\]]+)\]", dynamic))
-        require(needed <= SYSTEM_LIBRARIES | set(LIBRARIES) | {Path(loader).name},
+        require(needed <= SYSTEM_LIBRARIES | libraries | {Path(loader).name},
                 f"unexpected DT_NEEDED in {path}: {sorted(needed)}")
-        linked.update(needed.intersection(LIBRARIES))
+        linked.update(needed & libraries)
         if path != binary:
             require(re.findall(r"\(SONAME\).*\[([^\]]+)\]", dynamic) == [path.name],
                     f"unexpected SONAME in {path}")
@@ -93,10 +94,10 @@ def verify_elf(tree, arch, env):
         notes = output("readelf", "--notes", "--wide", path)
         require(not re.search(r"x86 ISA needed:.*x86-64-v[234]", notes),
                 f"{path.name} declares an x86-64 ISA above the baseline")
-    require(linked == set(LIBRARIES), "not all bundled libraries are required")
+    require(linked == libraries, "not all bundled libraries are required")
     resolved = output(loader, "--list", binary, env=env)
     print(resolved, flush=True)
-    for name in LIBRARIES:
+    for name in sorted(libraries):
         match = re.search(rf"^\s*{re.escape(name)} => (.+) \(0x[0-9a-f]+\)$", resolved, re.M)
         require(match and Path(match.group(1)).resolve() == tree / "lib" / name,
                 f"the system loader did not resolve the bundled {name}")
@@ -227,6 +228,7 @@ def verify_bun(work, version, arch, root_package, leaf_package, env):
     link.symlink_to(root / "bin/voiceless")
     require(output(link, "--version", env=env, timeout=30) == f"voiceless {version}",
             "Bun launcher failed with the nested platform package")
+    return command
 
 
 def validate(work, candidates, arch):
@@ -244,11 +246,14 @@ def validate(work, candidates, arch):
                 "variant": "cpu", "files": inventory(tree)}
     manifest = tree / "release.json"
     require(json.loads(manifest.read_text()) == expected, "release.json does not match the native payload")
-    require({"bin/voiceless", "LICENSE", "THIRD_PARTY_NOTICES.txt",
-             "licenses/Sherpa-ONNX-LICENSE.txt", "licenses/ONNX-Runtime-LICENSE.txt",
-             "licenses/ONNX-Runtime-ThirdPartyNotices.txt", *(f"lib/{name}" for name in LIBRARIES)}
-            <= expected["files"].keys(), "archive is missing native payload files or license texts")
-    require({p.name for p in (tree / "lib").iterdir()} == set(LIBRARIES), "unexpected bundled library")
+    libraries = set(PLATFORMS[arch]["libraries"])
+    required = {"bin/voiceless", "LICENSE", "THIRD_PARTY_NOTICES.txt",
+                "licenses/Sherpa-ONNX-LICENSE.txt", "licenses/ONNX-Runtime-LICENSE.txt",
+                "licenses/ONNX-Runtime-ThirdPartyNotices.txt", *(f"lib/{name}" for name in libraries)}
+    if arch == "x86_64":
+        required.update(f"licenses/{name}-copyright.txt" for name in VULKAN_LICENSES)
+    require(required <= expected["files"].keys(), "archive missing payload files or license texts")
+    require({p.name for p in (tree / "lib").iterdir()} == libraries, "unexpected bundled library")
     require(os.access(tree / "bin/voiceless", os.X_OK), "native binary is not executable")
     require(json.loads((leaf / "package.json").read_text()) == package_json(version, arch),
             "incorrect npm platform package metadata")
@@ -265,8 +270,8 @@ def validate(work, candidates, arch):
     require(output(tree / "bin/voiceless", "--version", env=env, timeout=30) == f"voiceless {version}",
             "native candidate reported an unexpected version")
     verify_standalone(tree / "bin/voiceless", native, version, env)
-    verify_recognition(tree / "bin/voiceless", work, env)
-    verify_bun(work, version, arch, root_package, leaf_package, env)
+    bun_command = verify_bun(work, version, arch, root_package, leaf_package, env)
+    verify_recognition(bun_command, work, env)
 
 
 def main():

@@ -175,7 +175,7 @@ pub fn create_decoder(
         )?)),
         #[cfg(not(feature = "transcribe"))]
         OfflineFamily::Gguf => Err(OfflineAsrError::EngineUnavailable(
-            "GGUF models need the transcribe.cpp engine. On x86-64 Linux use the Nix package voiceless-vulkan, voiceless-cpu-avx2 or voiceless.".to_owned(),
+            "GGUF models need the transcribe.cpp engine. On x86-64 Linux use the Bun package or a GGUF-enabled Nix package such as voiceless-vulkan.".to_owned(),
         )),
         family => Ok(Arc::new(create_recognizer(family, model_dir, options)?)),
     }

@@ -2,9 +2,19 @@
 
 ## 建议
 
-同一版原生 Linux 构建生成两种安装包。npm 发布后用 `bun add -g voiceless` 安装，也可从 GitHub Releases 下载对应压缩包，校验后用 `voiceless install` 创建 `~/.local/bin/voiceless`。两种入口都提供 `voiceless update`。独立安装依赖系统 glibc 2.35，不依赖 Nix、Rust 工具链、Bun、Node.js 或 `sudo`。构建流程提供 x86-64 与 ARM64 标准 CPU 候选包。 [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
+原生 Linux 构建同时提供 Bun 平台包和 GitHub Release 压缩包。用 `bun add -g voiceless` 安装 Bun 版，也可校验压缩包后用 `voiceless install` 创建 `~/.local/bin/voiceless`。两者都要求 glibc 2.35，都提供 `voiceless update`。x86-64 包提供 Vulkan GGUF，ARM64 包提供 Sherpa-ONNX CPU 推理。 [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) · [Bun 全局安装](https://bun.com/docs/pm/cli/add#global)
 
 CLI 已实现 `install`、`update` 和独立安装的 `update --rollback`。版本标签触发自动发布，手动运行用于构建和检查候选包。首次公开发布需确认 npm 包名归属及第三方再分发条件。 [CLI 源码](../rust/src/update.rs) · [发布工作流](../.github/workflows/native-release.yml) · [项目 Releases](https://github.com/Vitus213/voiceless/releases)
+
+### Bun 与 Nix 的 Vulkan 交付
+
+Linux x86-64 的 Bun 平台包和 `voiceless-vulkan` Nix 包使用同一 GGUF 后端。默认 `auto` 选择能初始化的 GPU，否则用 CPU。显式 `vulkan` 要求 Vulkan 设备。Sherpa-ONNX 使用 CPU。
+
+Bun 沿用 `bun add -g voiceless` 和已有的平台包。x86-64 原生包用固定摘要的 Jammy Vulkan SDK 构建，保留 glibc 2.35 和通用 x86-64 基线。随包提供 Vulkan loader，由它发现宿主驱动。独立安装沿用 `cpu` 清单标识，已有安装可以直接升级。 [Jammy SDK 归档](https://packages.lunarg.com/vulkan/1.4.313/) · [Vulkan 驱动发现](https://github.com/KhronosGroup/Vulkan-Loader/blob/v1.4.313/docs/LoaderDriverInterface.md#driver-discovery-on-linux)
+
+Bun 启动器在 NixOS 上把 `/run/opengl-driver/share` 加入 loader 的数据目录搜索路径。系统提供的 Vulkan 驱动继续由 loader 加载，Voiceless 原生 ELF 仍需兼容的 Linux 加载器，例如 `nix-ld`。
+
+发布验收检查 ELF 的版本约束和库解析，并通过 Bun 全局命令完成真实转写。GPU 验收使用两个渠道的产物回放同一段音频，再屏蔽驱动验证 CPU 回退。
 
 ## Bun 全局安装与 bunx
 
@@ -33,19 +43,19 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 
 - **原生 ABI。** 在明确的 glibc 基线构建，产物需检查 ELF 解释器、`DT_NEEDED`、glibc 和 C++ 运行库版本、CPU 指令集与传递依赖。现有 flake 向包装脚本注入 Nix 路径，Cargo 依赖钉住 Sherpa-ONNX `1.13.3` 的 `shared` 特性，构建脚本链接 `sherpa-onnx-c-api` 和 `onnxruntime`。随包携带许可允许且实际需要的共享库，用 `$ORIGIN` 相对查找并验证传递依赖。`DT_RUNPATH` 只适用于该 ELF 的直接依赖，子库需有各自的搜索路径或由系统提供。具体发行版、最低 glibc 和 CPU 基线待实机验证。musl、CUDA、带 AVX2 的 GGUF 和 NixOS 上不借助 Nix 的启动能力都需分别验证后才对外承诺。 [Cargo 依赖与特性](../rust/Cargo.toml#L12-L48) · [现有 flake 包装](../flake.nix#L149-L220) · [Sherpa 构建脚本](https://docs.rs/crate/sherpa-onnx-sys/1.13.3/source/build.rs) · [Linux 动态加载器](https://man7.org/linux/man-pages/man8/ld.so.8.html)
 - **桌面和音频。** 录音要有可用的 PipeWire 会话、麦克风和 `pw-record`。声音提示可用 `pw-play`。文字注入依赖 Wayland 与所选方法所需的 `wtype`、`wl-copy` 或 Fcitx5 bridge，且受 compositor 支持范围制约。常驻 `daemon` 和 `ctl` 需要用户 D-Bus 会话，Portal GlobalShortcuts 取决于对应后端，配置 evdev 快捷键时还需读取目标输入设备的权限。systemd 用户单元是常驻方式之一。 [项目运行要求](../README.zh.md#适配) · [doctor 探测逻辑](../rust/src/doctor.rs#L36-L53) · [声音提示](../rust/src/media.rs#L1-L10) · [daemon 激活来源](../rust/src/daemon.rs#L1-L14) · [Fcitx5 bridge](../rust/src/fcitx5.rs#L1-L23)
-- **识别后端。** 云端识别需要网络、TLS 信任链和所选服务的凭据。本地识别沿用 `voiceless model install` 和现有模型目录。首发 CPU 包应明确列出已验证的 Sherpa 后端，标准 CPU 构建没有 GGUF 引擎。配置为 `local-offline` 的用户若选择了 `qwen3-asr-1.7b-gguf` 等 GGUF 模型，或依赖 CUDA provider，只有提供匹配且验证过的构建才适合迁移。保留配置与模型文件本身无法补齐缺失的引擎。 [项目模型与 CPU 变体](../README.zh.md#模型目录) · [本地模型默认值](../rust/src/config.rs#L352-L397) · [GGUF 特性条件](../rust/src/gguf_asr.rs#L1-L12)
+- **识别后端。** 云端识别需要网络、TLS 信任链和服务凭据。本地识别沿用 `voiceless model install` 和现有模型目录。Bun 和 Nix 的 Vulkan 构建使用相同的 `[local]` 配置。使用 CUDA 的配置迁移到 Vulkan 构建时，改用 `provider = "auto"` 或 `"vulkan"`。 [项目模型与 CPU 变体](../README.zh.md#模型目录)
 - **Bun 安装入口。** 需要 Bun 来安装和更新全局包，`voiceless` 命令由原生可执行文件提供。Bun 官方 Linux glibc 版本要求 glibc 2.17 或更高，x64 要求 SSE4.2，并另发 musl 可执行文件。Voiceless 的 ABI 以自身 ELF 和共享库的实测为准。 [Bun 安装与运行要求](https://bun.com/docs/installation#musl-binaries)
 
 | 交付变体 | 构建和验收条件 |
 | --- | --- |
-| 标准 CPU（x86_64、aarch64） | 锁定 Rust/Cargo、C 工具链和 `pkg-config`。两种架构分别链接匹配的 Sherpa-ONNX 1.13.3 与 CPU ONNX Runtime。上游提供共享库归档，构建可固定归档摘要。逐架构用发布资产在目标基线上完成一次真实识别。 [Sherpa 上游资产](https://github.com/k2-fsa/sherpa-onnx/releases/expanded_assets/v1.13.3) · [Cargo 特性](../rust/Cargo.toml#L12-L48) |
+| 原生 Linux（x86-64、ARM64） | 两种架构使用 CPU 版 Sherpa-ONNX 1.13.3 与 ONNX Runtime。x86-64 还包含通用 CPU 内核和 Vulkan GGUF。发布验收在 Ubuntu 22.04 上核对依赖并通过 Bun 命令完成真实本地转写。 [Sherpa 上游资产](https://github.com/k2-fsa/sherpa-onnx/releases/expanded_assets/v1.13.3) · [发布校验](../scripts/release/validate.py) |
 | CPU GGUF（x86-64-v3） | 需要 CMake 和 C++ 工具链构建 transcribe.cpp。当前 AVX2 变体还启用 FMA、F16C 和 BMI2 等指令，安装器须按完整 CPU 基线选包。GGUF 配置使用 `[local] provider = "cpu"`。 [AVX2 构建](../flake.nix#L204-L220) · [后端配置](../rust/src/config.rs#L429-L452) |
 | CUDA GGUF（x86_64） | 构建需要 CUDA 12 工具链和 cuBLAS。运行需要 `cudart`、`cublas`、`cublasLt` 及宿主驱动提供的 `libcuda.so.1`。当前内核面向 SM 8.6。建议 GGUF 使用 CUDA，Sherpa/ORT 继续用 CPU 处理 Paraformer、Silero、GTCRN 和 Sherpa 离线路径。这样发布包只需验证 GGUF 实际使用的 CUDA 库，并核对其再分发条款。 [CUDA 构建](../flake.nix#L65-L145) · [链接依赖](../rust/build.rs#L18-L49) · [Sherpa CPU 路径](../rust/src/local_asr.rs#L104) |
 | Fcitx5 桥接 | 用 CMake ≥3.16、C++20、ECM 和匹配宿主 Fcitx5 的 Core 与 D-Bus 开发包构建插件，最低 API 为 5.1。按发行版交付 `.so` 和 addon 描述符，重启 Fcitx5 后以有焦点的输入框验收实际提交。 [桥接构建配置](../fcitx5-bridge/CMakeLists.txt) · [桥接验证脚本](../scripts/fcitx5-bridge-test.sh) |
 
 ## `voiceless update` 与回滚约定
 
-`voiceless update` 先识别安装归属，再由对应渠道查询版本。当前非 Nix 构建选择 GNU/Linux x86-64 或 ARM64 的标准 CPU 包。AVX2 GGUF 和 CUDA GGUF 继续通过相应的 Nix 构建交付。
+`voiceless update` 按安装归属查找版本。Linux 原生包按架构沿用原来的发布入口，Nix 和 Home Manager 通过各自的 flake 更新。
 
 | 当前安装来源 | 版本查询与执行 |
 | --- | --- |
@@ -84,4 +94,5 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 - **直接复制现有产物。** `readelf -l` 显示 x86-64 Nix ELF 的 `PT_INTERP` 指向 `/nix/store/8kvxvr3pmsypxiypq4g8zy13glnfr7nx-glibc-2.42-67/lib/ld-linux-x86-64.so.2`。将同一 ELF 单独挂载到无 Nix store 的 `docker.io/library/golang:1.27.4` amd64 容器运行 `--version`，启动失败，报告 `No such file or directory`。
 - **补齐运行库后完成识别。** 在临时目录收集同一 ELF 和 90 个运行库文件（含加载器），解包体积 70,355,017 字节。用启动脚本调用随包加载器并指定 `--library-path`，在相同的 Debian 13 amd64 容器中断网运行。`--version` 返回 `voiceless 0.1.0`，`model list --json` 返回七个目录条目。用只读模型挂载、SenseVoice INT8 和临时 `pw-record` 回放运行 `stream --json --no-inject`，退出码为 0，定稿为 `你好世界欢迎使用语音输入`。实验随包带入了原构建的 glibc。正式包仍需在非 Nix 构建环境确定 glibc 基线，并验证发布资产在目标发行版上的实际识别。实测未接入实体麦克风、图形会话或 Fcitx5。
 - **发布候选包。** 在 amd64 Ubuntu 22.04 容器用 Rust 1.99.1 构建两版真实程序 `0.1.0` 与 `0.1.1`。候选包验证了 ELF 依赖、独立安装、真实 SenseVoice 转写和 Bun 全局命令。在断网容器内拒绝错误摘要，之后独立安装 `0.1.0`，用已校验的本地归档升到 `0.1.1`，再运行 `voiceless update --rollback` 离线回到 `0.1.0`。测试历史文件保持原样。独立的 Bun 1.4.5 全局目录从本地注册表安装 `0.1.0`，由 `voiceless update` 请求精确版本并验证 `0.1.1`。GitHub 尚无正式发布资产，在线获取新版的完整路径仍需在发布后验证。ARM64 候选包由单独的原生 CI runner 构建和验收，本机未运行该架构。
+- **Bun 与 Nix 的 Vulkan 回放。** Ubuntu 22.04 x86-64 候选包通过 ELF ABI、独立安装、Bun 1.4.5 全局安装和 SenseVoice 转写。程序从包内解析 `libvulkan.so.1`。Nix Vulkan 构建通过 169 项沙箱测试。NixOS 上，两种安装产物用同一段 4.69 秒音频回放 Qwen3-ASR 1.7B Q8_0，均默认选中 RTX 4060。屏蔽驱动后均自动回退到 CPU，四次最终文本一致，显式 `vulkan` 均退出 1。PCM SHA-256 为 `5f155fce4d2671593880265f63a0e5604f07ed350ea7a10824846b59740cd54c`。
 - **现有服务。** 桌面命令来自用户 Nix profile，`systemctl --user show voiceless.service` 确认 `ExecStart` 直接指向 `/nix/store/…/bin/voiceless`。测试期间服务保持运行。服务迁移的验证范围限于当前入口和源码，实际切换须在匹配的发行变体准备好后执行。

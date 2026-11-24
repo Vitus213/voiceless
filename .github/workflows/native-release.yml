@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: CPU Linux ${{ matrix.arch }}
+    name: Native Linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -28,7 +28,7 @@ jobs:
       - name: Install Ubuntu 22.04 build tools and the pinned Rust toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y binutils cmake curl g++-11 make patchelf pkg-config python3
+          sudo apt-get install -y binutils cmake curl gcc g++-11 make patchelf pkg-config python3
           rustup toolchain install 1.99.1 --profile minimal
       - name: Build native and npm candidates
         run: python3 scripts/release/native.py "$RUNNER_TEMP/candidates"

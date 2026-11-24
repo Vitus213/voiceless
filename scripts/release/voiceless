@@ -14,6 +14,14 @@ case "$(uname -s):$(uname -m)" in
     *) fail 'this release requires glibc Linux on x86_64 or aarch64' ;;
 esac
 
+# The bundled Vulkan loader discovers ICD manifests under XDG data directories.
+if [ "$platform" = voiceless-linux-x86_64-gnu ] && [ -d /run/opengl-driver/share/vulkan/icd.d ]; then
+    case ":${XDG_DATA_DIRS-}:" in
+        *:/run/opengl-driver/share:*) ;;
+        *) export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/run/opengl-driver/share" ;;
+    esac
+fi
+
 export VOICELESS_BUN_LAUNCHER="$launcher"
 for payload in "$root/node_modules/$platform" "${root%/*}/$platform"; do
     if [ -x "$payload/bin/voiceless" ]; then

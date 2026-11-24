@@ -445,9 +445,9 @@ impl LocalConfig {
         .then_some("sense-voice-int8")
     }
 
-    /// The configured device, or the model family's default: for GGUF models
-    /// the GPU backend this build carries (`cuda`, else `vulkan`), `cpu`
-    /// otherwise. Validation guarantees one of cpu, cuda, vulkan, auto.
+    /// The configured device, or the model family's default. GGUF uses
+    /// `cuda` in CUDA builds, `auto` in Vulkan builds and `cpu` otherwise.
+    /// Sherpa-ONNX defaults to `cpu`.
     pub fn device(&self) -> String {
         if let Some(provider) = &self.provider {
             return provider.clone();
@@ -457,7 +457,7 @@ impl LocalConfig {
         } else if cfg!(feature = "cuda") {
             "cuda"
         } else if cfg!(feature = "vulkan") {
-            "vulkan"
+            "auto"
         } else {
             "cpu"
         };

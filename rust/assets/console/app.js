@@ -1296,12 +1296,12 @@ function EnginePage() {
       card(
         "本地模型",
         "[local]",
-        h("p", { class: "hint" }, "GGUF 模型在 GPU 上运行（需要 CUDA 版软件包）；Sherpa 模型只用 CPU。词库页的热词会自动合并到这里。"),
+        h("p", { class: "hint" }, "GGUF 可用 CPU 或构建提供的 GPU 后端。自动模式会在 GPU 不可用时用 CPU。Sherpa 模型使用 CPU。"),
         h(
           "div",
           { class: "fields" },
           field("模型", selectInput(l, "model", localModelOptions(), changed)),
-          field("设备", selectInput(l, "provider", [[null, "按模型默认"], ["cuda", "GPU（cuda）"], ["cpu", "CPU"]], changed)),
+          field("设备", selectInput(l, "provider", [[null, "按模型默认"], ["auto", "自动"], ["cuda", "CUDA"], ["vulkan", "Vulkan"], ["cpu", "CPU"]], changed)),
           field("实时刷新间隔（毫秒）", numberInput(l, "partial_interval_ms", changed, { min: 100, max: 5000, step: 50 }), { help: "出字后的目标刷新间隔，耗时较长时会自动放缓" }),
           field("单句上限（秒）", numberInput(l, "max_segment_seconds", changed, { min: 1, max: 60, step: 1, nullable: true, placeholder: "按模型默认" }), { help: "GGUF 最多 60，Sherpa 最多 25" }),
           field("CPU 线程数", numberInput(l, "num_threads", changed, { min: 1, max: 32 }), { help: "仅 Sherpa 模型使用" }),
