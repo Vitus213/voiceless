@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/console-live.png" alt="Voiceless console: live page while recording, with the mic level meter and the GPU engine card" width="760">
+  <img src="docs/images/console-live.png" alt="Voiceless console: live page while recording, with the push-to-talk key, the live waveform, the transcript and the engine strip" width="760">
 </p>
 
 <p align="center">
@@ -15,12 +15,12 @@
   <a href="https://pipewire.org"><img src="https://img.shields.io/badge/audio-PipeWire-7EB9D6?style=flat&colorA=222222" alt="PipeWire"></a>
 </p>
 
-Voiceless records audio with PipeWire (`pw-record`) at 16 kHz mono PCM16, transcribes while you speak (DashScope cloud realtime by default, or the local Sherpa-ONNX streaming Paraformer), and types the final text into the focused window with `wtype` or the clipboard method. One binary: no Python runtime, no desktop shell.
+Voiceless records 16 kHz mono PCM16 audio through PipeWire and transcribes while you speak. It uses DashScope cloud realtime by default and also supports the local Sherpa-ONNX streaming Paraformer. When you stop, it types the final text into the focused window with `wtype` or the clipboard method. The CLI runs as a single binary.
 
 **Quick start**
 
 ```bash
-nix run github:Vitus213/voiceless -- doctor   # Check pw-record, wtype and wl-copy
+nix run github:Vitus213/voiceless -- doctor   # Check recording and text injection
 nix run github:Vitus213/voiceless -- stream   # Speak, press Ctrl-C, and Voiceless types the text
 ```
 
@@ -32,13 +32,13 @@ Contents: [Compatibility](#compatibility) · [Install](#install) · [First run](
 | --- | --- | --- |
 | OS | NixOS or Linux, `x86_64` or `aarch64` | The flake declares only these two systems |
 | Display server | Wayland | Injection uses `wtype`; the clipboard method and fallback use `wl-copy` |
-| Audio | PipeWire | Capture spawns `pw-record` (16 kHz mono PCM16) |
+| Audio | PipeWire | 16 kHz mono PCM16 with `pw-record`, or GStreamer `pipewiresrc` on older PipeWire releases such as Ubuntu 22.04's |
 | Compositor shortcuts | XDG Desktop Portal `GlobalShortcuts` (best effort) | Without the portal, the `dev.voiceless.Daemon` D-Bus bus works; the Home Manager module ships a Sway binding |
 | Cloud ASR | DashScope realtime endpoint (`qwen3-asr-flash-realtime`) | Requires an API key |
 | Local ASR | Sherpa-ONNX streaming Paraformer (`streaming-paraformer-bilingual-zh-en`) | Install it with `voiceless model install`. The daemon verifies it when loading the model. |
 | Batch ASR | DashScope multimodal or local SenseVoice | Used by `transcribe` and `record` |
 
-X11, macOS and Windows are not supported.
+The published packages target Wayland on Linux. Apple Silicon macOS and Windows x64 installers are undergoing desktop acceptance testing. [Candidate results](docs/non-nix-distribution.md#020-桌面候选包验收)
 
 ## Install
 
@@ -138,7 +138,7 @@ The development shell provides `cargo`, `pipewire`, `wtype`, `wl-clipboard` and 
 
 ## First run
 
-1. Run `voiceless doctor`. It checks `pw-record`, `wtype`, `wl-copy` and the data directory.
+1. Run `voiceless doctor`. It reports the recording tools selected on this system and checks text injection and the data directory. On Ubuntu 22.04, install `pipewire-bin`, `gstreamer1.0-tools` and `gstreamer1.0-pipewire` for capture.
 2. Run `voiceless stream`.
 3. Speak.
 4. Press Ctrl-C once. Voiceless stops the capture and types the final text.
@@ -175,13 +175,13 @@ voiceless stream --backend local-streaming
 | `voiceless stream` | Record and transcribe in realtime. Options: `--backend`, `--mode`, `--json`, `--no-inject` |
 | `voiceless transcribe <wav>` | Transcribe one WAV file (cloud DashScope or local SenseVoice) |
 | `voiceless record --seconds N` | Record for N seconds, then transcribe |
-| `voiceless model list\|install\|check\|remove` | Manage the model catalog (pinned URLs, byte counts, SRI SHA-256, member allowlist) |
+| `voiceless model list\|install\|import\|check\|remove` | Manage pinned catalog models and import compatible local GGUF files. |
 | `voiceless mode list\|reload\|add\|update\|remove` | Manage text processing modes |
 | `voiceless history list\|delete\|export\|totals\|usage` | Query the recognition history (SQLite) |
 | `voiceless web` | Open the web console. `--no-open` prints its URL. `--port` overrides the configured port. |
 | `voiceless history serve` | Serve the web console without the daemon (no live pages). Options: `--host`, `--port`. Default: `http://127.0.0.1:8790` |
 | `voiceless daemon` | Run the resident daemon: it loads the local model once at startup (sessions never wait for a model load), exports `dev.voiceless.Daemon.Controller` on D-Bus and broadcasts every session event as an `Event` signal. Options: `--mode` (default `quick`), `--no-inject` |
-| `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | Control the daemon with one D-Bus call (bind hotkeys to these). `toggle`/`start` take `--mode`; `start`/`stop` are hold-to-talk press/release; `watch` prints every event as a JSON line (the `stream --json` schema plus `{"type":"state","state":...,"mode":...}`) |
+| `voiceless ctl toggle\|start\|stop\|cancel\|repaste\|status\|watch` | Control the daemon. Use `toggle --mode raw` for verbatim dictation and `repaste` to deliver the last completed result to the focused window. |
 | `voiceless doctor` | Check dependencies and the data directory |
 | `voiceless install ARCHIVE --sha256 DIGEST` | Install a verified standalone application release into your user directory |
 | `voiceless update [--rollback]` | Update the current Bun or standalone application installation. Rollback restores the previous standalone release. |
@@ -243,7 +243,12 @@ hotword_threshold = 0.9                # 1.0 = identical syllables; zh/z, n/l, -
 # replace = "$1:$2"
 
 [hotkey]                               # daemon push-to-talk key read from evdev (user must be in the `input` group)
-# key = "KEY_SCROLLLOCK"               # unset disables; hold ≥ threshold = talk while held, tap = toggle
+# key = "KEY_SCROLLLOCK"               # hold to speak or tap to toggle
+# hold_key = "Ctrl+KEY_F6"
+# toggle_key = "Ctrl+KEY_F7"
+# cancel_key = "Ctrl+KEY_F8"
+# raw_key = "Ctrl+KEY_F9"
+# repaste_key = "Ctrl+KEY_F10"
 mode = ""                              # plain press; empty uses `voiceless daemon --mode`
 ctrl_mode = "prompt-optimize"          # press with Ctrl held
 hold_threshold_ms = 350
@@ -251,9 +256,11 @@ hold_threshold_ms = 350
 [audio]
 pause_media = true                     # pause MPRIS players while recording, resume them after
 cues = false                           # short start/stop tones through pw-play
+# source = "alsa_input.…"             # PipeWire node name, omit for the current system default
+# overlay = false                      # hide the optional Eww overlay installed by the desktop setup
 
 [inject]
-prefer = "wtype"                       # wtype | clipboard | fcitx5
+prefer = "wtype"                       # wtype | clipboard | fcitx5 | copy
 wtype_command = "wtype"
 wl_copy_command = "wl-copy"
 paste_command = "-M ctrl -k v"         # args passed to paste_tool
@@ -263,6 +270,8 @@ x11_clipboard_command = ""             # optional: mirror text to X11 clipboard 
 clipboard_fallback = true
 timeout_seconds = 10.0
 preedit = true                         # with prefer = "fcitx5": live transcript as underlined preedit in the field
+terminal_paste_command = "-M ctrl -M shift -k v"  # paste keystroke for terminals, where text with line breaks is pasted, never typed
+terminal_apps = []                     # more application ids or window classes that are terminals
 
 [processing]
 provider = "none"                      # none | openai-compatible | ollama
@@ -278,9 +287,18 @@ enabled = true
 save_audio = true                      # keep one WAV per successful session
 ```
 
-The old values `cloud-vad`, `sensevoice-vad` and `final_backend` are rejected. Voiceless never rewrites them silently.
+#### ASR migration
 
-`[inject]` selects how the final text reaches the focused window. `prefer = "wtype"` types it through the Wayland virtual keyboard. `prefer = "clipboard"` copies it with `wl-copy` and synthesizes the `paste_command` keypress instead; paste delivers the text verbatim, so apps whose input method (Fcitx5) reinterprets typed keys -- WeChat and other IME-controlled XWayland apps -- receive clean text. Rootless Xwayland (xwayland-satellite) does not forward Wayland selections to X11 clients, so when `x11_clipboard_command` is set (for example `xsel --clipboard --input`) the clipboard method also mirrors the text to the X11 clipboard, best effort. `prefer = "fcitx5"` commits the text through the Voiceless Fcitx5 bridge, the same path as text typed with the input method: no synthesized keys, no clipboard, and it reaches every window where Fcitx5 works (Wayland and XWayland/XIM apps alike). With `clipboard_fallback = true`, a failed wtype or fcitx5 injection retries through the clipboard.
+- For `cloud-vad`, set `asr.streaming_backend = "cloud-realtime"` and configure DashScope realtime credentials.
+- For `sensevoice-vad`, set `asr.streaming_backend = "local-offline"` and `local.model = "sense-voice-int8"`. Install that model before starting.
+- Remove `asr.final_backend`. The selected realtime backend produces the final transcript.
+- Replace retired batch values such as `fake`, `qwen3-sherpa` and `hybrid` with `cloud` or `local`. `sensevoice` remains an alias for `local`, which uses `asr.batch_model_dir`.
+
+`[inject]` selects how the final text reaches the focused window. `prefer = "wtype"` uses the Wayland virtual keyboard. `prefer = "clipboard"` copies it with `wl-copy` and synthesizes the `paste_command` keypress. With rootless Xwayland, set `x11_clipboard_command` (for example `xsel --clipboard --input`) to mirror the choice to the X11 clipboard. `prefer = "fcitx5"` commits through the Voiceless Fcitx5 bridge. With `clipboard_fallback = true`, a paste can follow when the typing tool could not start or the bridge was unavailable before sending. Unconfirmed sends retain the text for explicit repaste.
+
+A session checks the window that had focus when recording began. On Linux, Voiceless reads its identity from Niri (`niri msg --json focused-window`), single-seat Sway (`swaymsg`), or native X11 (`xdotool`). Fcitx5 can also verify the original context for single-line text on other desktops. If focus changes or cannot be verified, the console keeps the result for copying or `voiceless ctl repaste`. Known terminals use `terminal_paste_command` for text with line breaks. `prefer = "copy"` puts the result on the clipboard. Delivery reports `committed`, `unconfirmed`, `copied` or `not-delivered`.
+
+Update the Fcitx5 bridge along with the application to enable sessions bound to the original input context.
 
 ### Fcitx5 bridge
 
@@ -295,13 +313,23 @@ Then restart Fcitx5, set `prefer = "fcitx5"`, and run `voiceless doctor`; the `f
 
 ## Modes and injection
 
-The `quick` mode types the recognized text directly. It makes no external calls. The other modes (polish, prompt optimization, translate to English) send the final text to the `[processing]` provider. `[processing]` is a dedicated "cloud recognition" config: its `base_url`, `model` and `api_key` are specified independently of realtime transcription and batch transcription (`[cloud]`), and its `prompt` field overrides the prompt-optimize organizing template (defaults to the original type4me design, "rewrite the requirement as a clear, executable prompt"; `{text}` is replaced by the transcript before the request is assembled and sent). If the processing fails, Voiceless keeps the raw text and prints a warning. Voiceless types the final text at most once. The history stores only successful texts.
+Manual mode selection takes precedence over the first matching enabled application or site rule. With no match, Voiceless uses the selected default. `quick` runs local cleanup. `raw` delivers the recognized text directly. Enable a mode's model step to send its text to `[processing]`, which has its own `base_url`, `model`, and credentials. A failed output step keeps the recognized text available and reports the error.
+
+In **Modes**, order the steps and see their effect with sample text. A local Rhai script receives `text` and returns a string. Approve the script after editing or importing it. It runs in a separate process with a deadline and text-only access.
+
+```sh
+voiceless mode preview --app-id kitty --project docs --json --text 'SDK /tmp/v1'
+```
+
+For OpenCode, enable local preview in **Modes** and configure the MCP command `["voiceless", "mode", "mcp"]` as a local server. Use `--site docs.example.com` with `voiceless stream` to supply a hostname after allowing site context. The receipt identifies the application or site source.
 
 ## History, recordings and web console
 
-Each successful streaming session saves its audio. Voiceless writes a 16 kHz mono WAV file to `~/.local/share/voiceless/audio/` (about 115 KB per minute). The history database stores `audio_path` and `duration_seconds` (schema v2; Voiceless migrates v1 databases when it opens them).
+Successful dictation saves a 16 kHz mono PCM16 WAV in `~/.local/share/voiceless/audio/` (1.92 MB per minute). Set `[history] save_audio = false` to keep text alone. Voiceless migrates older history databases in place and keeps their text searchable, including records whose audio is missing. On Unix the database stays private to its owner (`0600`).
 
-Cancelled, failed and empty sessions save no file. `history delete` and `delete --all` remove the recordings together with their rows. `[history] save_audio = false` disables the retention.
+`audio_days` and `text_days` set independent retention periods in `[history]`. Both default to `0`, which keeps existing data until you delete it. The History page previews the affected items. You can export selected or filtered records as text, Markdown, CSV or JSON and choose whether to include recordings in a ZIP. Deleting a record also removes its owned recording.
+
+Set `save_failed_audio = true` to recover audio from a failed session. The separate recovery area defaults to seven days and 512 MB (`failed_audio_days`, `failed_audio_mb`). Its files have mode `0600` in a `0700` directory on Unix. You can replay, discard or submit them for local transcription. Cancelling a session discards the recording.
 
 Run `voiceless web` to open the console in your browser. The command uses
 `[console] host` and `port`, which default to <http://127.0.0.1:8790/>.
@@ -312,12 +340,12 @@ history and settings until you exit. `voiceless web --no-open` prints the URL.
 
 ![An expanded demo record: waveform, progress bar, final text, and the re-transcribe / fix / delete actions](docs/images/history-console-playing.png)
 
-Seven pages, one embedded app (no CDN, works offline):
+Seven pages behind an icon rail, one embedded app (no CDN, works offline). A session strip with the push-to-talk key, the mode picker, the live waveform and the last session's numbers stays above every page; the theme follows the OS unless pinned from the rail:
 
-- **实时 / Live**: session state, start/stop/cancel with a mode picker, the transcript as it forms, a mic level meter, the last session's stop-to-text latency, the loaded engine and GPU memory, live daemon logs.
-- **识别引擎 / Engine**: primary and fallback backend, the local model and device, Doubao/cloud credentials (write-only), model installs with progress.
-- **词库 / Vocabulary**: hotwords, replacements and regex rules with a live "try it" preview of the cleanup.
-- **模式与提示词 / Modes**: custom modes and the organize prompt.
+- **实时 / Live**: the transcript as it forms, start/stop/cancel, the loaded engine and GPU memory, live daemon logs.
+- **识别引擎 / Engine**: primary and fallback backend, the batch backend, the local model and device, fast preview, Doubao/cloud credentials (write-only), model installs with progress.
+- **词库 / Vocabulary**. Global, mode, and project hotwords, replacements and regex rules. Review duplicates and conflicts before importing JSON, export the selected scope, and choose a scope when adding a history correction.
+- **模式与提示词 / Modes**. Custom modes, ordered steps, target rules, sample previews, and the organize prompt.
 - **快捷键与上屏 / Hotkey & typing**: record the push-to-talk key, hold threshold, injection method, preedit, media pause and cues, and a test-injection button.
 - **历史 / History**: records by day with waveform playback; delete; re-transcribe a recording with the current engine; fix a transcript and turn the fix into a replacement or hotword in one click.
 - **诊断 / Diagnostics**: `doctor` checks, GPU, logs, and a replay benchmark of the current engine over your saved recordings (RTF and CER against the original transcripts).
@@ -337,6 +365,11 @@ Security: the console listens on loopback, rejects any non-loopback `Host` (DNS 
 | `gtcrn` | `speech-enhancement-models`, 535,638 bytes | [Sherpa-ONNX GTCRN export](https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx) `sha256-53YDrAwj2sMifdLXE1s6WFy+4meQSK7PqIZlfTrhtTQ=` |
 
 The install process verifies the SRI hash and byte count over HTTPS and checks archive members against the allowlist. It writes a manifest with per-file hashes and activates the model atomically through a `current` symlink to `versions/<id>/<version>-<digest12>`. Managed models are verified when loaded. If the daemon already holds a model, reload the engine or restart the daemon after activating a replacement. `voiceless model list --json` reports `license_status`. Verify the license independently before redistributing.
+
+In a build with the GGUF engine, `voiceless model import ./model.gguf` validates
+the file with the CPU decoder and prints its model ID. Select it on the
+console's engine page or set `[local] model` to that ID. Running engines
+hold a lease on their models until they switch or stop.
 
 For a quiet or distant microphone, run `voiceless model install gtcrn` and set
 `[local] denoise = true` with the `local-offline` backend. The console also

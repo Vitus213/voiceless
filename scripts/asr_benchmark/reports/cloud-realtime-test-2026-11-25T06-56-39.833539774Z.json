@@ -1,0 +1,107 @@
+{
+  "backend": "cloud-realtime",
+  "model": "qwen3-asr-flash-realtime",
+  "corpus_version": "corpus-d2a9e20453ce7074",
+  "split": "test",
+  "samples": [
+    {
+      "id": "test-01",
+      "reference": "你好世界，欢迎使用语音输入。",
+      "transcript": "你好，世界，欢迎使用语音输入。",
+      "cer": 0.0,
+      "latency_seconds": 4.659705836,
+      "error": null
+    },
+    {
+      "id": "test-02",
+      "reference": "请把文件保存到用户目录下的download文件夹里。",
+      "transcript": "请把文件保存到用户目录下的download文件夹里。",
+      "cer": 0.0,
+      "latency_seconds": 4.70282243,
+      "error": null
+    },
+    {
+      "id": "test-03",
+      "reference": "这次的训练一共用了两千张图片，准确率达到了百分之九十八。",
+      "transcript": "这次的训练一共用了两千张图片。准确率达到了百分之九十八。",
+      "cer": 0.0,
+      "latency_seconds": 6.659013631,
+      "error": null
+    },
+    {
+      "id": "test-04",
+      "reference": "他一边吃饭一边看手机，结果把汤洒在键盘上了。",
+      "transcript": "他一边吃饭一边看手机，结果把汤撒在键盘上了。",
+      "cer": 0.05,
+      "latency_seconds": 5.838878397,
+      "error": null
+    },
+    {
+      "id": "test-05",
+      "reference": "系统提示：磁盘空间不足，请清理缓存后重试。",
+      "transcript": "系统提示，磁盘空间不足，请清理缓存后重试。",
+      "cer": 0.0,
+      "latency_seconds": 5.5253775659999995,
+      "error": null
+    },
+    {
+      "id": "test-06",
+      "reference": "我们计划下周三下午两点召开项目评审会议。",
+      "transcript": "我们计划下周三下午两点召开项目评审会议。",
+      "cer": 0.0,
+      "latency_seconds": 5.282477354,
+      "error": null
+    },
+    {
+      "id": "test-07",
+      "reference": "这是一段比较长的语音转写测试文本，用来检验模型在长句子上的稳定表现以及标点符号的准确程度。",
+      "transcript": "这是一段比较长的语音转写测试文本。用来检验模型在长句子上的稳定表现，以及标点符号的准确程度。",
+      "cer": 0.0,
+      "latency_seconds": 10.969032212,
+      "error": null
+    },
+    {
+      "id": "test-08",
+      "reference": "关键词：机器学习、深度学习、自然语言处理和大语言模型。",
+      "transcript": "关键词机器学习深度学习自然语言处理和大语言模型。",
+      "cer": 0.0,
+      "latency_seconds": 7.651813484,
+      "error": null
+    },
+    {
+      "id": "test-09",
+      "reference": "我的邮箱是vitus艾特example点com，欢迎随时联系。",
+      "transcript": "我的邮箱是Vitas。艾特example点com。欢迎随时联系。",
+      "cer": 0.034482758620689655,
+      "latency_seconds": 6.751781903,
+      "error": null
+    },
+    {
+      "id": "test-10",
+      "reference": "该接口支持GET和POST两种请求方法，返回JSON格式的数据。",
+      "transcript": "该接口支持GET和POST两种请求方法，返回JSON格式的数据。",
+      "cer": 0.0,
+      "latency_seconds": 7.093330166,
+      "error": null
+    },
+    {
+      "id": "test-11",
+      "reference": "天气预报说明天降温十度，记得多穿点衣服小心着凉。",
+      "transcript": "天气预报说明天降温十度。记得多穿点衣服，小心着凉。",
+      "cer": 0.0,
+      "latency_seconds": 5.546572063,
+      "error": null
+    },
+    {
+      "id": "test-12",
+      "reference": "年度总结：总营收突破一亿元，新增用户八十五万，续费率百分之九十三。",
+      "transcript": "年度总结，总营收突破一亿元，新增用户八十五万，续费率百分之九十三。",
+      "cer": 0.0,
+      "latency_seconds": 7.988596847,
+      "error": null
+    }
+  ],
+  "failures": 0,
+  "content_cer": 0.007040229885057471,
+  "generated_at": "2026-11-25T06:56:39.833446185Z"
+}

@@ -45,14 +45,12 @@ Voiceless runs in three shapes that share one session implementation:
 | Resident daemon | `voiceless daemon` (systemd user unit from the Home Manager module) | D-Bus `dev.voiceless.Daemon`, evdev push-to-talk key, portal `GlobalShortcuts`, web console | `Event` D-Bus signals (same JSON lines), console SSE, overlay |
 | Batch | `voiceless transcribe <wav>`, `voiceless record --seconds N` | none | text, optional injection, history row |
 
-When a daemon is running and `stream` is asked for a local backend, the
-CLI does not load a second copy of the model. `ctl::stream_via_daemon`
-checks that the daemon owns the bus name and is idle, subscribes to its
-`Event` signal, calls `StartSession(mode, inject)`, relays SIGINT/SIGTERM
-as `Stop`/`Cancel`, prints the session events exactly like the standalone
-sink would, and derives the exit code from the daemon's state transitions.
-`--config` or `--backend` disables delegation because the daemon would not
-honour them.
+The daemon holds an exclusive lock on its data directory. `voiceless stream`
+uses that daemon when it shares the directory and has no explicit `--config`
+or `--backend`. The CLI subscribes to events before starting, follows the
+ID the daemon returns, and sends stop or cancel for that ID. An explicit
+standalone session can start when it can acquire the directory lock.
+Realtime and batch recording also share a capture lock.
 
 ## 3. Module map (`rust/src`)
 
@@ -64,7 +62,7 @@ honour them.
 | Batch | `batch.rs`, `batch_cmd.rs` | WAV parsing, DashScope multimodal batch, Sherpa SenseVoice |
 | Text | `text.rs`, `processing.rs`, `modes.rs` | `[text]` cleanup, LLM modes over OpenAI-compatible or Ollama APIs, mode repository |
 | Daemon and desktop | `daemon.rs`, `ctl.rs`, `hotkey.rs`, `media.rs`, `fcitx5.rs`, `doctor.rs` | gateway state machine, D-Bus interface, hotkey gesture machine, portal shortcut, MPRIS pause and cues, Fcitx5 bridge client with ordered preedit, dependency checks |
-| Console | `console/mod.rs`, `console/library.rs`, `console/settings.rs`, `assets/console/` | axum router with loopback/token/origin guards, live SSE, history and audio, config read/write, models, modes, diagnostics; embedded single-page app |
+| Console | `console/mod.rs`, `console/library.rs`, `console/settings.rs`, `frontend/` | axum router with loopback/token/origin guards, live SSE, history and audio, config read/write, models, modes, diagnostics, and the embedded Vite app |
 | Persistence | `config.rs`, `history.rs`, `models.rs` | strict TOML schema with the 0600 secret gate, SQLite history (schema v2), pinned model catalog with verified installs |
 | Quality gates | `benchmark.rs`, `benchmark_cmd.rs`, `latency.rs`, `latency_cmd.rs` | CER replay against the corpus, stage-timestamped latency trials, thresholds and versioned reports |
 | CLI adapters | `model_cmd.rs`, `mode_cmd.rs`, `history_cmd.rs` | thin wrappers that print tables or `--json` |
@@ -212,9 +210,9 @@ VRAM is free for the new one.
 
 ## 7. Injection
 
-`[inject] prefer` selects the method; `clipboard_fallback = true` retries
-with the clipboard when `wtype` or `fcitx5` fails. `timeout_seconds`
-bounds every external command.
+`[inject] prefer` selects the method (`wtype`, `clipboard`, `fcitx5` or
+`copy`); `clipboard_fallback = true` retries with the clipboard when
+`wtype` or `fcitx5` fails. `timeout_seconds` bounds every external command.
 
 - **`wtype`**: Wayland virtual keyboard, text split into `wtype`
   invocations (`stream::wtype_invocations`).
@@ -234,6 +232,20 @@ bounds every external command.
   replaces it with the final text. The bridge (`fcitx5-bridge/`) is a
   small Fcitx5 addon that commits into the most recent focused input
   context and reports the target program.
+- **`copy`**: `wl-copy` the text and leave it for the user to paste.
+
+`ConfiguredInjector` reads the focused window when recording starts and again
+when text is ready. Niri supplies its window ID, single-seat Sway supplies
+the focused client ID through `swaymsg`, and native X11 uses `xdotool`.
+Fcitx5 can also confirm the original input context through the bridge. If
+the target changes or cannot be confirmed, guarded delivery returns
+`Delivery::NotDelivered` and keeps the text available to the user.
+Into a terminal (`desktop::focus::is_terminal`: the application id, or
+one of `terminal_apps`), text with line breaks is pasted with
+`terminal_paste_command` instead of typed, since a terminal runs each
+typed line. Every `InjectionResult` carries a `Delivery`: `committed`
+(an Fcitx5 commit), `unconfirmed` (keystrokes or a paste were sent),
+`copied` or `not-delivered`.
 
 ## 8. The daemon
 
@@ -256,7 +268,7 @@ retranscription and replay benchmark require a loaded `local-offline` engine.
   `Toggle(mode)`, `Start(mode)`, `StartSession(mode, inject)`, `Stop`,
   `Cancel`, `Status`), the evdev listener, the portal shortcut and the
   console's `/api/session/*` endpoints.
-- **Hotkey gestures.** `hotkey::listen` watches every keyboard that has
+- **Hotkey gestures.** The evdev listener watches every keyboard that has
   `[hotkey] key` (read-only, never grabbed; needs the `input` group),
   follows hotplug through an inotify watch on `/dev/input` (a replugged or
   re-enumerated keyboard is picked up again) and reports presses with Ctrl
@@ -277,8 +289,12 @@ retranscription and replay benchmark require a loaded `local-offline` engine.
 - **Session side effects.** With `[audio] pause_media` the session pauses
   every playing MPRIS player and resumes exactly those afterwards;
   `[audio] cues` plays start/stop sounds through `pw-play`.
-- **Reload.** `POST /api/engine/reload` re-reads config, reloads the engine
-  and restarts the hotkey listener without restarting the process.
+- **Settings.** Each session pins the active configuration. The daemon
+  queues resource changes, validates the candidate after the session ends,
+  and switches only if that revision is still current and valid.
+- **Audio routing.** PipeWire owns the default source. An explicit source
+  resolves to a PipeWire node serial at start. The desktop audio API reports
+  the real connection to the recorder once it is linked.
 
 ## 9. Web console
 

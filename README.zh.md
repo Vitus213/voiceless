@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/console-live.png" alt="Voiceless 控制台实时页：录音中，带麦克风音量条和 GPU 引擎卡片" width="760">
+  <img src="docs/images/console-live.png" alt="Voiceless 控制台实时页：录音中，带按键、实时波形、转写文本和引擎状态条" width="760">
 </p>
 
 <p align="center">
@@ -15,12 +15,12 @@
   <a href="https://pipewire.org"><img src="https://img.shields.io/badge/audio-PipeWire-7EB9D6?style=flat&colorA=222222" alt="PipeWire"></a>
 </p>
 
-Voiceless 用 PipeWire（`pw-record`）以 16 kHz 单声道 PCM16 录音，说话期间持续转写（默认 DashScope 云端实时，或本地 Sherpa-ONNX 流式 Paraformer），结束后用 `wtype` 或剪贴板方式把最终文本打进焦点窗口。单个二进制：无 Python 运行时、无桌面外壳。
+Voiceless 通过 PipeWire 以 16 kHz 单声道 PCM16 录音，边说边转写。默认使用 DashScope 云端实时识别，也支持本地 Sherpa-ONNX 流式 Paraformer。停录后，通过 `wtype` 或剪贴板把最终文本输入焦点窗口。CLI 可作为单个二进制运行。
 
 **快速开始**
 
 ```bash
-nix run github:Vitus213/voiceless -- doctor   # 检查 pw-record、wtype、wl-copy
+nix run github:Vitus213/voiceless -- doctor   # 检查录音和文字输入工具
 nix run github:Vitus213/voiceless -- stream   # 说话，按 Ctrl-C，Voiceless 注入文本
 ```
 
@@ -32,13 +32,13 @@ nix run github:Vitus213/voiceless -- stream   # 说话，按 Ctrl-C，Voiceless 
 | --- | --- | --- |
 | 系统 | NixOS 或 Linux，`x86_64` 或 `aarch64` | flake 仅声明这两个 system |
 | 显示服务器 | Wayland | 注入用 `wtype`，剪贴板方式与兜底用 `wl-copy` |
-| 音频 | PipeWire | 采集进程为 `pw-record`（16 kHz 单声道 PCM16） |
+| 音频 | PipeWire | 以 16 kHz 单声道 PCM16 采集。使用 `pw-record`，Ubuntu 22.04 等旧版 PipeWire 通过 GStreamer 的 `pipewiresrc` 采集 |
 | 合成器快捷键 | XDG Desktop Portal `GlobalShortcuts`（尽力而为） | 无门户时 `dev.voiceless.Daemon` D-Bus 总线可用；Home Manager 模块自带 Sway 绑定 |
 | 云端 ASR | DashScope 实时端点（`qwen3-asr-flash-realtime`） | 需要 API key |
 | 本地 ASR | Sherpa-ONNX 流式 Paraformer（`streaming-paraformer-bilingual-zh-en`） | 用 `voiceless model install` 安装，常驻进程加载模型时校验 |
 | 批量 ASR | DashScope 多模态或本地 SenseVoice | 供 `transcribe` 与 `record` 使用 |
 
-不支持 X11、macOS、Windows。
+公开发行包面向 Linux Wayland。Apple Silicon macOS 和 Windows x64 安装包正在进行桌面验收。 [候选包实测](docs/non-nix-distribution.md#020-桌面候选包验收)
 
 ## 安装
 
@@ -129,7 +129,7 @@ nix flake check -L
 
 ## 首次运行
 
-1. 运行 `voiceless doctor`。它检查 `pw-record`、`wtype`、`wl-copy` 与数据目录。
+1. 运行 `voiceless doctor` 查看本机选用的录音工具、文字注入和数据目录检查结果。Ubuntu 22.04 录音需要 `pipewire-bin`、`gstreamer1.0-tools` 和 `gstreamer1.0-pipewire`。
 2. 运行 `voiceless stream`。
 3. 说话。
 4. 按一次 Ctrl-C。Voiceless 停止采集并注入最终文本。
@@ -166,13 +166,13 @@ voiceless stream --backend local-streaming
 | `voiceless stream` | 实时录音转写。选项：`--backend`、`--mode`、`--json`、`--no-inject` |
 | `voiceless transcribe <wav>` | 转写一个 WAV 文件（云端 DashScope 或本地 SenseVoice） |
 | `voiceless record --seconds N` | 录音 N 秒后转写 |
-| `voiceless model list\|install\|check\|remove` | 管理模型目录（固定 URL、字节数、SRI SHA-256、成员白名单） |
+| `voiceless model list\|install\|import\|check\|remove` | 管理目录模型，导入兼容的本地 GGUF 文件。 |
 | `voiceless mode list\|reload\|add\|update\|remove` | 管理文本处理模式 |
 | `voiceless history list\|delete\|export\|totals\|usage` | 查询识别历史（SQLite） |
 | `voiceless web` | 打开 Web 控制台。`--no-open` 只打印网址，`--port` 可覆盖配置的端口。 |
 | `voiceless history serve` | 不启动 daemon 时单独提供 Web 控制台（无实时页）。选项：`--host`、`--port`。默认：`http://127.0.0.1:8790` |
 | `voiceless daemon` | 运行常驻 daemon：启动时加载一次本地模型（会话不再等待模型加载），在 D-Bus 导出 `dev.voiceless.Daemon.Controller`，并把每个会话事件作为 `Event` 信号广播。选项：`--mode`（默认 `quick`）、`--no-inject` |
-| `voiceless ctl toggle\|start\|stop\|cancel\|status\|watch` | 一次 D-Bus 调用控制 daemon（快捷键绑定这些命令）。`toggle`/`start` 接受 `--mode`；`start`/`stop` 对应按住说话的按下/松开；`watch` 把每个事件输出为一行 JSON（`stream --json` 格式，外加 `{"type":"state","state":...,"mode":...}`） |
+| `voiceless ctl toggle\|start\|stop\|cancel\|repaste\|status\|watch` | 控制 daemon。`toggle --mode raw` 直出识别原文，`repaste` 将最近一次完成的结果重贴到当前窗口。 |
 | `voiceless doctor` | 检查依赖与数据目录 |
 | `voiceless install ARCHIVE --sha256 DIGEST` | 校验独立发布包并安装到用户目录 |
 | `voiceless update [--rollback]` | 升级当前 Bun 或独立安装。独立安装可回滚到本机保留的上一版。 |
@@ -234,7 +234,12 @@ hotword_threshold = 0.9                # 1.0 = 音节完全相同；zh/z、n/l�
 # replace = "$1:$2"
 
 [hotkey]                               # daemon 通过 evdev 读取的按键（用户需在 `input` 组）
-# key = "KEY_SCROLLLOCK"               # 不设置则关闭；按住超过阈值 = 按住说话，短按 = 开始/停止切换
+# key = "KEY_SCROLLLOCK"               # 按住说话，点按开始或停止
+# hold_key = "Ctrl+KEY_F6"
+# toggle_key = "Ctrl+KEY_F7"
+# cancel_key = "Ctrl+KEY_F8"
+# raw_key = "Ctrl+KEY_F9"
+# repaste_key = "Ctrl+KEY_F10"
 mode = ""                              # 直接按下时的模式；为空则用 `voiceless daemon --mode`
 ctrl_mode = "prompt-optimize"          # 按住 Ctrl 再按时的模式
 hold_threshold_ms = 350
@@ -242,9 +247,11 @@ hold_threshold_ms = 350
 [audio]
 pause_media = true                     # 录音时暂停正在播放的 MPRIS 播放器，结束后恢复
 cues = false                           # 用 pw-play 播放开始/结束的提示音
+# source = "alsa_input.…"             # PipeWire 麦克风节点名，省略时跟随系统默认
+# overlay = false                      # 隐藏桌面已启用的 Eww 录音浮层
 
 [inject]
-prefer = "wtype"                       # wtype | clipboard | fcitx5
+prefer = "wtype"                       # wtype | clipboard | fcitx5 | copy
 wtype_command = "wtype"
 wl_copy_command = "wl-copy"
 paste_command = "-M ctrl -k v"         # 传给 paste_tool 的粘贴按键参数
@@ -254,6 +261,8 @@ x11_clipboard_command = ""             # 可选：把文本镜像到 X11 剪贴�
 clipboard_fallback = true
 timeout_seconds = 10.0
 preedit = true                         # prefer = "fcitx5" 时：识别中的文字以带下划线的预编辑显示在输入框里
+terminal_paste_command = "-M ctrl -M shift -k v"  # 终端的粘贴按键：带换行的文本在终端里只粘贴，不逐键输入
+terminal_apps = []                     # 额外视为终端的应用标识或窗口类
 
 [processing]
 provider = "none"                      # none | openai-compatible | ollama
@@ -269,9 +278,18 @@ enabled = true
 save_audio = true                      # 每次成功会话保留一份 WAV
 ```
 
-旧值 `cloud-vad`、`sensevoice-vad`、`final_backend` 会被拒绝。Voiceless 不静默改写。
+#### ASR 迁移
 
-`[inject]` 决定最终文本如何进入焦点窗口。`prefer = "wtype"` 通过 Wayland 虚拟键盘逐键输入；`prefer = "clipboard"` 先用 `wl-copy` 复制文本，再合成 `paste_command` 按键粘贴——粘贴按原样投递文本，因此输入法（Fcitx5）会重解释按键的应用（微信等 XWayland IME 应用）也能收到干净文本。无根 Xwayland（xwayland-satellite）不会把 Wayland 选区转发给 X11 客户端，因此设置 `x11_clipboard_command`（例如 `xsel --clipboard --input`）后，剪贴板方式会尽力把文本镜像到 X11 剪贴板。`prefer = "fcitx5"` 通过 Voiceless 的 Fcitx5 桥接模块提交文本，和用输入法打字上屏走同一条路：不模拟按键、不动剪贴板，凡是 Fcitx5 能输入的窗口（Wayland 与 XWayland/XIM 应用）都能收到。`clipboard_fallback = true` 时，wtype 或 fcitx5 注入失败会自动改用剪贴板重试。
+- `cloud-vad` 改为 `asr.streaming_backend = "cloud-realtime"`，并配置 DashScope 实时识别凭据。
+- `sensevoice-vad` 改为 `asr.streaming_backend = "local-offline"` 和 `local.model = "sense-voice-int8"`，启动前安装对应模型。
+- 删除 `asr.final_backend`。最终文字由选定的实时后端生成。
+- `fake`、`qwen3-sherpa` 和 `hybrid` 等已停用的批量值改为 `cloud` 或 `local`。`sensevoice` 仍可作为 `local` 的别名，使用 `asr.batch_model_dir`。
+
+`[inject]` 决定最终文本如何到达焦点窗口。`prefer = "wtype"` 使用 Wayland 虚拟键盘。`prefer = "clipboard"` 先用 `wl-copy` 复制文本，再合成 `paste_command` 按键。无根 Xwayland 可用 `x11_clipboard_command`（例如 `xsel --clipboard --input`）镜像选区。`prefer = "fcitx5"` 通过 Voiceless 桥接模块提交。`clipboard_fallback = true` 时，输入工具未能启动或桥接模块发出请求前不可用，才会尝试剪贴板。上屏结果无法确认时保留文本，供用户主动重贴。
+
+听写会核对录音开始时的窗口。在 Linux 上，Voiceless 通过 Niri（`niri msg --json focused-window`）、单席位 Sway（`swaymsg`）或原生 X11（`xdotool`）读取窗口标识。其他桌面上的单行文本也可用 Fcitx5 核对原输入框。焦点变化或目标无法确认时，控制台保留文字，用户可复制或运行 `voiceless ctl repaste`。已识别的终端用 `terminal_paste_command` 粘贴带换行的文本。`prefer = "copy"` 将结果放到剪贴板。交付状态为 `committed`、`unconfirmed`、`copied` 或 `not-delivered`。
+
+更新 Voiceless 时一起更新 Fcitx5 桥接模块，即可将听写绑定到录音开始时的输入上下文。
 
 ### Fcitx5 桥接模块
 
@@ -286,13 +304,23 @@ i18n.inputMethod.fcitx5.addons = [ pkgs.voiceless-fcitx5-bridge ];
 
 ## 模式与注入
 
-`quick` 模式直接注入识别文本，无外部调用。其他模式（润色、提示词优化、翻译为英文）把最终文本发给 `[processing]` 提供者：`[processing]` 是独立的「云端识别」配置，`base_url`、`model`、`api_key` 与实时转写、批量转写（`[cloud]`）分开指定；`prompt` 字段可自定义「提示词优化」用的整理提示词模板，默认为 type4me 原设计「将以下需求改写为清晰、可执行的提示词」，模板中的 `{text}` 会被替换为转写正文后再拼装发送。处理失败时 Voiceless 保留原文并输出 warning。Voiceless 至多注入一次最终文本；历史只记录成功的文本。
+手动选择优先，其次用按顺序匹配的第一条应用或网站规则，最后用默认模式。`quick` 运行本地清理，`raw` 直接交付识别原文。启用模式的模型步骤后，文字会发给 `[processing]` 的 `base_url` 和 `model`。步骤失败时保留识别原文并显示原因。
+
+在**模式与提示词**页排序步骤，用样本文字查看每步结果。Rhai 脚本接收 `text` 并返回字符串。编辑或导入脚本后由用户授权，在独立进程内限时执行。
+
+```sh
+voiceless mode preview --app-id kitty --project docs --json --text 'SDK /tmp/v1'
+```
+
+使用 OpenCode 时，在模式页允许本机预览，然后将 `["voiceless", "mode", "mcp"]` 配成 OpenCode 的本机 MCP 命令。允许网站上下文后，可用 `voiceless stream --site docs.example.com` 指定主机名。回执会显示应用或网站上下文的来源。
 
 ## 历史、录音与 Web 控制台
 
-每次成功的流式会话保存音频。Voiceless 把 16 kHz 单声道 WAV 写入 `~/.local/share/voiceless/audio/`（约 115 KB/分钟）。历史库记录 `audio_path` 与 `duration_seconds`（schema v2；打开 v1 库时自动迁移）。
+听写成功后，Voiceless 把 16 kHz 单声道 PCM16 WAV 写入 `~/.local/share/voiceless/audio/`，每分钟约 1.92 MB。在 `[history]` 设置 `save_audio = false` 可只保存文字。旧历史库会原地迁移，缺少录音的旧条目仍可搜索。Unix 上的数据库权限为 `0600`。
 
-取消、失败、空会话不保存文件。`history delete` 与 `delete --all` 连同录音一起删除。`[history] save_audio = false` 关闭保留。
+`[history]` 的 `audio_days` 和 `text_days` 分别控制录音与文字的保留天数，默认值 `0` 表示一直保留到手动删除。历史页可预览清理范围，也可按勾选条目或当前筛选导出文本、Markdown、CSV 和 JSON。需要录音时可一并导出 ZIP。删除条目时会删除对应的自有录音。
+
+开启 `save_failed_audio = true` 可从独立恢复区取回失败会话的录音，默认保留 7 天、最多 512 MB，由 `failed_audio_days` 和 `failed_audio_mb` 控制。Unix 上目录权限为 `0700`，文件为 `0600`。可回放、丢弃或提交本地转写。主动取消会丢弃录音。
 
 运行 `voiceless web` 在浏览器中打开控制台。地址由 `[console]` 的 `host` 和 `port` 决定，默认为 <http://127.0.0.1:8790/>。
 daemon 运行时可使用实时录音控制。没有 daemon 时，命令会提供历史和设置页面，退出命令即关闭。`voiceless web --no-open` 可只打印网址。
@@ -301,12 +329,12 @@ daemon 运行时可使用实时录音控制。没有 daemon 时，命令会提�
 
 ![展开的演示记录：波形、进度条、最终文本，以及重新识别 / 纠错 / 删除操作](docs/images/history-console-playing.png)
 
-七个页面，一个内嵌应用（不依赖 CDN，离线可用）：
+七个页面挂在图标侧栏后，一个内嵌应用（不依赖 CDN，离线可用）。按键、模式选择、实时波形和上一次会话的数据组成常驻顶栏；主题跟随系统，也可以在侧栏固定：
 
-- **实时**：会话状态、开始/停止/取消与模式选择、识别中的文字实时滚动、麦克风音量条、上一次松手到出字的延迟、已加载的引擎与显存、实时日志。
-- **识别引擎**：主引擎与备用引擎、本地模型与设备、豆包/云端密钥（只写不读）、模型安装与进度。
-- **词库**：热词、精确替换、正则规则，带“试一试”实时预览清理效果。
-- **模式与提示词**：自定义模式与整理提示词。
+- **实时**：识别中的文字实时滚动、开始/停止/取消、已加载的引擎与显存、实时日志。
+- **识别引擎**：主引擎与备用引擎、整段转写引擎、本地模型与设备、快速预览、豆包/云端密钥（只写不读）、模型安装与进度。
+- **词库**。全局、模式和项目范围的热词、替换与正则。导入 JSON 前查看重复和冲突，也可导出当前范围，或从历史纠错时选定范围。
+- **模式与提示词**。管理自定义模式、步骤顺序、目标规则、样本预览和整理提示词。
 - **快捷键与上屏**：录制按住说话的按键、按住阈值、上屏方式、预编辑、暂停媒体与提示音，以及“测试上屏”。
 - **历史**：按天分组、波形回放；删除；用当前引擎重新识别某条录音；改正识别结果并一键加入替换规则或热词。
 - **诊断**：`doctor` 检查、GPU、日志，以及用当前引擎回放你保存的录音做基准测试（实时率与相对原转写的字差异率）。

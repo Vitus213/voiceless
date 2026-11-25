@@ -1,0 +1,153 @@
+{
+  "date": "2026-11-25",
+  "replay": {
+    "pcm_sha256": "a29462b8ebd467318000e683b9117ade46230d3255ed2024e7db894abd9b38c9",
+    "format": "mono 16 kHz signed 16-bit little-endian",
+    "input": "paced public JFK recording"
+  },
+  "apollo": {
+    "os": "NixOS 26.11 x86_64",
+    "model": "Qwen3-ASR 1.7B GGUF Q8_0",
+    "model_sha256": "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+    "archives_sha256": {
+      "0.1.3": "7cd6a7b57eab5787423f45b6e860f3284fe626cd2589a07b85504a49c12bc428",
+      "0.2.0": "093e55b15656930c176cdca9004165eacc19a6f4c5468eceb4cc33192fc0fead"
+    },
+    "elf_sha256": {
+      "0.1.3": "940a3df4cc69157db441a71267f97d1c74a232b15c20938359f738004b380661",
+      "0.2.0": "c56e81f26182d56261fd24af352058f0db2f344430ea080b8fe17ddaf8ddeb2f"
+    },
+    "candidate_devices": [
+      {
+        "api": "vulkan",
+        "backend": "Vulkan0",
+        "cpu_fallback": null,
+        "description": "NVIDIA GeForce RTX 3070",
+        "device_id": "0000:2b:00.0",
+        "engine": "transcribe-cpp",
+        "memory_bytes": 8589934592,
+        "name": "Vulkan0",
+        "requested": "auto"
+      },
+      {
+        "api": "cpu",
+        "backend": "CPU",
+        "cpu_fallback": "no_gpu_device",
+        "description": "AMD Ryzen 5 5600 6-Core Processor",
+        "device_id": null,
+        "engine": "transcribe-cpp",
+        "memory_bytes": 67346374656,
+        "name": "CPU",
+        "requested": "auto"
+      }
+    ],
+    "method": "A fresh CLI for each trial. Two trials per version and device on a shared workstation with warm filesystem cache. Baseline trials preceded the candidate trials by approximately 50 minutes. Injection was measured separately in a focused terminal.",
+    "seconds": [
+      {
+        "driver": "nvidia",
+        "0.1.3": {
+          "launch_ready_s": [
+            1.1909806079929695,
+            1.1938003939867485
+          ],
+          "ready_first_text_s": [
+            8.8,
+            9.0537
+          ],
+          "stop_final_s": [
+            3.077,
+            3.4737
+          ]
+        },
+        "0.2.0": {
+          "launch_ready_s": [
+            1.2189225920010358,
+            1.2332541350042447
+          ],
+          "ready_first_text_s": [
+            8.8951,
+            8.5568
+          ],
+          "stop_final_s": [
+            3.5361,
+            2.8331
+          ]
+        }
+      },
+      {
+        "driver": "without-driver",
+        "0.1.3": {
+          "launch_ready_s": [
+            1.2036654659896158,
+            1.1913727869978175
+          ],
+          "ready_first_text_s": [
+            7.0306,
+            6.3061
+          ],
+          "stop_final_s": [
+            27.1672,
+            23.9272
+          ]
+        },
+        "0.2.0": {
+          "launch_ready_s": [
+            1.2143059050140437,
+            1.3021033820114098
+          ],
+          "ready_first_text_s": [
+            6.8873,
+            7.7495
+          ],
+          "stop_final_s": [
+            29.0192,
+            29.6243
+          ]
+        }
+      }
+    ],
+    "final_text": "And so, my fellow Americans.Ask not.What your country can do for you.Ask what you can do for your country.",
+    "delivery": {
+      "input_wav_sha256": "86c240d961cc1bd273bb71c675b1111d0e10c2db3e03db6a2030f951d5e8b9fa",
+      "practice_bytes": 0,
+      "quick_utf8_bytes_read_back": 45,
+      "matched_final_text": true,
+      "old_configuration_and_record_readable": true,
+      "history_retranscribed": true
+    }
+  },
+  "arm64": {
+    "environment": "M1 Linux aarch64 guest, glibc 2.39. Binaries packaged on the glibc 2.35 Jammy baseline.",
+    "model": "SenseVoice INT8",
+    "model_sha256": "12ca1a2ae7ecf3e0019ef2822307ee0b5cadc9196569e379b4c4026f8205276d",
+    "method": "One fresh-CLI stream per version. Times from guest uptime sampled to 10 ms. No window injection in this replay.",
+    "versions": {
+      "0.2.0": {
+        "archive_sha256": "290c07187e306884a660bccdf72f4d6375d8a1ac49181c1521051f8a0d29f6c5",
+        "elf_sha256": "3d68507f1969837a59c9ee70a81e4cc861a1928f5cd65513be612cfc4599bde4",
+        "ready_to_first_text_seconds": 0.7,
+        "stop_to_final_seconds": 0.2,
+        "actual_device_event": {
+          "requested": "cpu",
+          "engine": "sherpa-onnx",
+          "api": "cpu",
+          "backend": "cpu",
+          "name": null,
+          "description": null,
+          "device_id": null,
+          "memory_bytes": 0,
+          "cpu_fallback": null
+        },
+        "final_text": "AND SO MY FELLOW AMERICAN A NOT WHAT YOUR COUNTRY CAN DO FOR YOU ASK WHAT YOU CAN DO FOR YOUR COUNTRY"
+      },
+      "0.1.3": {
+        "archive_sha256": "13785668746c9ea261f21af3b19dd2b83eec00322a66d3cce6dc2607b9f351a6",
+        "elf_sha256": "09c4a2b75c03b821b1da52693192dfb89a93e7b4b0a9ce91989b0406f2b3ea3e",
+        "ready_to_first_text_seconds": 0.68,
+        "stop_to_final_seconds": 0.17,
+        "actual_device_event": null,
+        "final_text": "AND SO MY FELLOW AMERICANA NOTWHAT YOUR COUNTRY CAN DO FOR YOUASK WHAT YOU CAN DO FOR YOUR COUNTRY"
+      }
+    }
+  }
+}

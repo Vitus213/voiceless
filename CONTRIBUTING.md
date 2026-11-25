@@ -20,6 +20,21 @@ Each shell exports `SHERPA_ONNX_LIB_DIR` and `LD_LIBRARY_PATH` to use the
 nixpkgs Sherpa-ONNX build. The GPU shells also set `TRANSCRIBE_CMAKE_ARGS`
 for `cargo build --features cuda` or `cargo build --features vulkan`.
 
+The Nix shells and packages embed the HTML, JavaScript and CSS built by
+Vite from `frontend/`. To test local frontend edits against the Rust server,
+run these commands from the repository root inside `nix develop .#cpu`.
+
+```bash
+npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+npm --prefix frontend run build
+VOICELESS_CONSOLE_DIST="$PWD/frontend/dist" cargo test --manifest-path rust/Cargo.toml --test console
+npm --prefix frontend exec -- playwright install chromium
+npm --prefix frontend run test:e2e -- --grep navigation
+```
+
+Set `VOICELESS_BIN` for browser tests against an installed binary. Cargo
+outside the Nix shell uses `frontend/dist/` by default.
+
 `just` wraps the common commands and always passes
 `--manifest-path rust/Cargo.toml`:
 
@@ -33,13 +48,10 @@ for `cargo build --features cuda` or `cargo build --features vulkan`.
 
 ### Quirks worth knowing
 
-- **Clippy uses its own target dir** (`rust/target/clippy`). The
-  `sherpa-onnx-sys` build script copies the read-only Nix store libraries
-  into the profile directory and cannot overwrite them on a second run, so
-  sharing a target dir between `cargo test` and `cargo clippy` fails with
-  `Permission denied`. Use a separate `CARGO_TARGET_DIR` for any other
-  cargo invocation that rebuilds the build script (for example
-  `cargo doc`).
+- **Reusing a Cargo target directory.** The Nix shell exports a native link
+  configuration for the pinned Sherpa-ONNX and ONNX Runtime libraries.
+  `just test` and `just lint` use it automatically. For a manual build, run
+  `cargo build --config "$VOICELESS_CARGO_CONFIG"` from `rust/` inside the shell.
 - **Use the shell's `cargo`/`clippy`/`rustfmt`.** A clippy from your user
   profile rejects crates built by the shell's rustc (E0514).
 - **GPU inference tests need the host driver.** The Nix Vulkan package runs
@@ -78,9 +90,10 @@ rust/src/
   modes.rs           mode repository (modes.json)         history.rs        SQLite history, schema v2
   models.rs          pinned model catalog + installer     config.rs         strict TOML schema, 0600 gate
   batch.rs / batch_cmd.rs       `transcribe`, `record`    doctor.rs         dependency checks
-  benchmark*.rs / latency*.rs   CER and latency gates     console/          axum web console (+ assets/console)
+  benchmark*.rs / latency*.rs   CER and latency gates     console/          axum web console
   *_cmd.rs           thin CLI adapters for model / mode / history
 rust/tests/          integration tests; `common/mod.rs` holds the fakes (capture, transport, injector, history)
+frontend/            Vite console sources and Chromium end-to-end tests
 fcitx5-bridge/       C++ Fcitx5 addon exposing dev.voiceless.Fcitx5Bridge1
 contrib/eww-overlay/ eww overlay driven by `voiceless ctl watch`
 nix/                 Home Manager module, Fcitx5 bridge package
@@ -145,7 +158,7 @@ unless the README uses them.
   committing.
 - **A console endpoint**: handler in `console/`, a row in
   `docs/console-api.md`, a test in `tests/console.rs` covering the token
-  and `Host` checks, and the page code in `rust/assets/console/app.js`.
+  and `Host` checks, and the page code in `frontend/src/`.
 - **A config key**: field with a default in `config.rs`, validation, the
   README key reference in both languages, and the console settings page if
   users should edit it.

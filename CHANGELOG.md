@@ -6,7 +6,80 @@ the day the work landed on `main`; commit hashes refer to
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- The console detects PipeWire microphones, reports the active source and
+  shows recording through a Wayland overlay that preserves input focus.
+- Dictation and explicit typing tests on single-seat Sway verify the focused
+  window before sending text. A change of focus keeps the result available to copy.
+- Import compatible GGUF models with `voiceless model import` or in the
+  console. The model list includes languages and supported devices.
+- Set separate keyboard shortcuts for hold, toggle, cancel, raw dictation
+  and repaste. The console displays the active bindings and permission errors.
+- `voiceless-desktop` opens one window over the console of the running
+  daemon and, on a desktop with a tray, offers opening the window, pausing,
+  repasting, starting at login and quitting. Closing the window leaves the
+  daemon running and the launcher opens the window again.
+- Output modes can match an application or an opted-in site hostname. Preview
+  the ordered steps in the console, on the CLI or through local OpenCode MCP.
+- Import and export scoped vocabularies and add selected history corrections
+  to a mode or project. Output steps can run an authorized text-only Rhai script.
+
+### Changed
+- The web console is redesigned: an icon rail, a session strip above every
+  page (push-to-talk key, live waveform, mode picker, last session's numbers),
+  and forms that lead with icons and tooltips instead of helper text. Dark by
+  default, following the OS light/dark setting unless pinned from the rail.
+- The console's engine page exposes `[asr] batch_backend`, `local_model_dir`
+  and `batch_model_dir`, `[local] fast_preview` and the `auto` and `vulkan`
+  devices; secret fields can reveal what was typed; the live page shows a
+  recording clock.
+- `voiceless web` keeps the existing page links and supports keyboard
+  navigation at narrow window widths. The Vite bundle is embedded in the binary.
+- The console restores the current session after a disconnect and refreshes
+  its session token after a daemon restart. Old controls cannot affect a new
+  daemon instance.
+- Concurrent settings edits merge by field. The console previews conflicts,
+  exports a credential-free TOML template and can restore the active config.
+- Model and shortcut changes are validated after the session ends. Failed
+  changes keep the last working settings active.
+
+### Fixed
+- Stopping `pw-record` on PipeWire 1.6 preserves the final transcript and WAV.
+  A disconnected recorder still fails the session.
+- On Linux, `voiceless doctor` checks the same PipeWire or GStreamer tools
+  used for recording. Ubuntu 22.04 needs GStreamer's PipeWire plugin.
+- On Ubuntu 22.04, dictation can keep using the system default microphone
+  across link checks. If a selected device disappears, dictation and meeting
+  recording detect the loss on the next check and preserve recoverable audio.
+- Linux capture identifies when PipeWire rejects its recorder and reports
+  microphone access settings even when the recorder is silent.
+- The CLI, daemon and web console can open a new history database concurrently.
+  The console publishes its address after the history database is ready.
+- File transcription accepts streamed DashScope WAVs and measures their
+  duration from complete PCM frames when the encoder leaves placeholder lengths.
+- On Windows, model verification recognizes nested files in the catalog, so
+  correctly installed SenseVoice and bilingual Paraformer models load again.
+- Windows reports the selected audio source when WASAPI denies recording
+  permission, including when the privacy settings allowed the initial check.
+- Windows checkouts with CRLF line endings can build the web console. The
+  build still rejects a settings index that differs from the source.
+- A second `voiceless daemon` on the same session bus is refused instead of
+  taking the bus name from the running one, which left `voiceless ctl`, the
+  overlay and the console without a daemon.
+- The desktop host opens its window on the console's address directly and
+  says when the running daemon is older than the desktop app.
+- A setting found through the console's search while another page was still
+  loading receives the keyboard focus once its own page is mounted.
+- Orca announces each session phase and the result. The announcements go
+  through one live region without a role, which a screen reader presents
+  every time; the connection lamp and the first-run page's status line no
+  longer compete with it, a practice ends with “试说完成”, and opening a
+  dialog no longer repeats the last message.
+- Dictation needs a verified original target before typing or pasting.
+  Fcitx5 previews and commits stay bound to the original input context.
+  When a send may have reached an application, Voiceless keeps the result
+  available for a user-initiated repaste.
 
 ## 0.1.3 - 2026-11-24
 

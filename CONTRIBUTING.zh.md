@@ -17,6 +17,20 @@ nix develop .#vulkan   # x86-64 上的 Vulkan SDK，无需 CUDA 工具链
 GPU 开发 shell 也会为 `cargo build --features cuda` 或 `cargo build --features vulkan`
 设置 `TRANSCRIBE_CMAKE_ARGS`。
 
+Nix 开发 shell 和软件包会嵌入 `frontend/` 经 Vite 构建的 HTML、JavaScript 和 CSS。
+修改前端后，可在 `nix develop .#cpu` 中从仓库根目录构建并验收。
+
+```bash
+npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+npm --prefix frontend run build
+VOICELESS_CONSOLE_DIST="$PWD/frontend/dist" cargo test --manifest-path rust/Cargo.toml --test console
+npm --prefix frontend exec -- playwright install chromium
+npm --prefix frontend run test:e2e -- --grep navigation
+```
+
+可用 `VOICELESS_BIN` 指定浏览器测试使用的已安装程序。在 Nix shell 外执行 Cargo 时，
+默认从 `frontend/dist/` 读取资源。
+
 `just` 封装了常用命令，并总是带上 `--manifest-path rust/Cargo.toml`：
 
 | 配方 | 实际执行 |
@@ -29,11 +43,9 @@ GPU 开发 shell 也会为 `cargo build --features cuda` 或 `cargo build --feat
 
 ### 值得知道的坑
 
-- **Clippy 用独立的 target 目录**（`rust/target/clippy`）。`sherpa-onnx-sys`
-  的构建脚本会把只读的 Nix store 库复制进 profile 目录，第二次运行无法覆盖，
-  所以 `cargo test` 与 `cargo clippy` 共用 target 目录会报 `Permission denied`。
-  任何会重跑构建脚本的 cargo 命令（例如 `cargo doc`）都请换一个
-  `CARGO_TARGET_DIR`。
+- **复用 Cargo 构建目录。** Nix shell 提供 Sherpa-ONNX 和 ONNX Runtime 的链接配置。
+  `just test` 和 `just lint` 自动使用它。手动构建时可在 shell 的 `rust/` 目录运行
+  `cargo build --config "$VOICELESS_CARGO_CONFIG"`，直接链接 Nix 提供的库。
 - **用 shell 里的 `cargo`/`clippy`/`rustfmt`。** 用户 profile 里的 clippy 会拒绝
   shell 的 rustc 构建出的 crate（E0514）。
 - **GPU 推理测试需要主机驱动。** Vulkan Nix 包会在沙箱里运行无需模型的测试。
@@ -69,9 +81,10 @@ rust/src/
   modes.rs           模式仓库（modes.json）                history.rs        SQLite 历史，schema v2
   models.rs          固定模型目录 + 安装器                 config.rs         严格 TOML schema、0600 门禁
   batch.rs / batch_cmd.rs       `transcribe`、`record`     doctor.rs         依赖检查
-  benchmark*.rs / latency*.rs   CER 与延迟门禁             console/          axum 控制台（+ assets/console）
+  benchmark*.rs / latency*.rs   CER 与延迟门禁             console/          axum 控制台
   *_cmd.rs           model / mode / history 的薄 CLI 适配层
 rust/tests/          集成测试；`common/mod.rs` 放各种 fake（采集、传输、注入器、历史）
+frontend/            Vite 控制台源码与 Chromium 端到端测试
 fcitx5-bridge/       C++ Fcitx5 插件，暴露 dev.voiceless.Fcitx5Bridge1
 contrib/eww-overlay/ 由 `voiceless ctl watch` 驱动的 eww 浮层
 nix/                 Home Manager 模块、Fcitx5 桥接包
@@ -123,7 +136,7 @@ Conventional-commit 风格，祈使语气，一次提交一个改动：`feat: �
   独立核验哈希。
 - **控制台端点**：`console/` 里的 handler、`docs/console-api.md` 的一行、
   `tests/console.rs` 里覆盖令牌与 `Host` 检查的测试，以及
-  `rust/assets/console/app.js` 的页面代码。
+  `frontend/src/` 的页面代码。
 - **配置键**：`config.rs` 里带默认值的字段、校验、两种语言的 README 键参考，
   以及用户需要编辑时的控制台设置页。
 

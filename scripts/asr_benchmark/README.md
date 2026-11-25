@@ -9,7 +9,7 @@
 corpus/dev.jsonl    开发集（调参/选型用，可反复折腾）
 corpus/test.jsonl   测试集（回归用，冻结不动）
 audio/<id>.wav      由 qwen3-tts-flash 合成的音频（生成缓存，不入库）
-reports/*.json      基准报告（不入库）
+reports/*.json      包含逐条转写或逐次延迟的原始报告
 ```
 
 语料条目为 JSONL：`{"id", "reference", "voice"}`。`reference` 是送入 TTS 的
@@ -21,20 +21,28 @@ reports/*.json      基准报告（不入库）
 ## 用法
 
 ```bash
-# 1. 生成/补齐音频（需要 BAILIAN_API_KEY）
-BAILIAN_API_KEY=... nix develop --command python scripts/asr_benchmark/generate.py
+# 1. 在仓库根目录补齐冻结语料的 WAV，凭据从环境读取
+nix develop --command python scripts/asr_benchmark/generate.py --split test
 
-# 2. 跑基准（默认全部模型）
-BAILIAN_API_KEY=... nix develop --command python scripts/asr_benchmark/benchmark.py \
-    --split test --out reports/test-$(date +%F).json
+# 2. 使用已配置的 DashScope 实时服务，逐条比较参考文本
+voiceless benchmark asr --split test --backend cloud-realtime --enforce
 
-# 3. 快速回归（只跑主力模型 + 指定数量）
-BAILIAN_API_KEY=... nix develop --command python scripts/asr_benchmark/benchmark.py \
-    --split test --models qwen3-asr-flash-2026-02-10,sensevoice --limit 12
+# 3. 在专用测试输入框中接收上屏结果，运行 100 次完整听写
+voiceless benchmark latency --backend cloud-realtime --mode quick --trials 100 --inject --enforce
 ```
 
-`benchmark.py --help` 可见全部选项。本地模型（`sensevoice`、`qwen3-sherpa`、
-`hybrid`）依赖仓库模型目录已安装（`type4me-linux model install sensevoice-int8`）。
+`--inject` 会把结果输入当前焦点窗口。运行延迟门禁前先聚焦专用输入框。公开版 `0.1.3` 的延迟命令默认使用云端实时和 quick 模式，省略 `--backend` 和 `--mode` 即可运行。
+
+## 2026-11-25 云端实时验收
+
+两次均在 Apollo 上使用模型 `qwen3-asr-flash-realtime` 和语料 `corpus-d2a9e20453ce7074`。准确度取 12 条测试音频的平均内容 CER。延迟来自 100 次独立的 quick 听写，每次都执行上屏。两版的质量和延迟门禁均通过。
+
+| Linux x86-64 产物 | 内容 CER | 首字 P95 | 停录到定稿 P50 | 停录到上屏 P99 | 原始报告 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 公开版 `0.1.3` | 0.704% | 457 ms | 267 ms | 593 ms | [逐条转写](reports/cloud-realtime-test-2026-11-25T06-56-39.833539774Z.json) · [100 次延迟](reports/latency-cloud-realtime-2026-11-25T07-14-10.184849101Z.json) |
+| 私有候选 `0.2.0` | 0.704% | 871 ms | 270 ms | 657 ms | [逐条转写](reports/cloud-realtime-test-2026-11-25T08-33-06.194466877Z.json) · [100 次延迟](reports/latency-cloud-realtime-2026-11-25T08-49-20.44628402Z.json) |
+
+两轮的 ELF SHA-256 分别为 `940a3df4cc69157db441a71267f97d1c74a232b15c20938359f738004b380661` 和 `c56e81f26182d56261fd24af352058f0db2f344430ea080b8fe17ddaf8ddeb2f`。门槛为内容 CER 2%、首字 P95 1 秒、停录到定稿 P50 600 毫秒、停录到上屏 P99 1 秒。每版只进行了一轮云端延迟测试。
 
 ## 本地远讲与流式延迟
 
@@ -46,6 +54,7 @@ python3 scripts/asr_benchmark/replay_local.py --binary ./rust/target/debug/voice
 ```
 
 脚本用 `ffmpeg` 转换到 16 kHz PCM，以 32 毫秒节奏驱动独立的 `voiceless stream` 进程。
+送完最后一帧后，脚本向该次 CLI 发送一次 SIGINT，`stop_final` 从发送信号计到收到定稿。
 它按原音、两档模拟远讲和纯噪声输出 JSONL。每行包含采集启动耗时、录音开始到首条非空预览的耗时、
 录音开始、预览更新和录音结束之间的最大间隔（无预览时等于录音时长）、停录到定稿的耗时、内容 CER 和最终文本。
 样本可用 `--sample` 缩小，条件可用 `--condition` 缩小。比较不同构建时使用同一语料、模型和机器。纯噪声行的 CER 为 `null`，

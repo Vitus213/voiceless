@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import random
 import shlex
+import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -25,18 +27,17 @@ CONDITIONS = ("clean", "far-0db", "far-5db", "noise-only")
 
 def replay_capture():
     audio = Path(os.environ["VOICE_REPLAY_PCM"]).read_bytes()
-    stamp = Path(os.environ["VOICE_REPLAY_STAMP"])
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     start = time.monotonic()
-    stamp.write_text(f"{start}\n")
     for offset in range(0, len(audio), CHUNK_BYTES):
         end = min(offset + CHUNK_BYTES, len(audio))
         deadline = start + end / (2 * RATE)
         time.sleep(max(0, deadline - time.monotonic()))
-        if end == len(audio):
-            with stamp.open("a") as output:
-                output.write(f"{time.monotonic()}\n")
         sys.stdout.buffer.write(audio[offset:end])
         sys.stdout.buffer.flush()
+    # Keep the microphone open until the CLI stops it. EOF means device loss.
+    os.write(int(os.environ["VOICE_REPLAY_TIMING_FD"]), struct.pack("!dd", start, time.monotonic()))
+    signal.pause()
 
 
 def audio_variants(pcm):
@@ -68,27 +69,36 @@ def pcm16(samples):
     return b"".join(struct.pack("<h", min(32767, max(-32768, round(sample)))) for sample in samples)
 
 
-async def measure(binary, config, scratch, pcm, reference):
+async def measure(binary, config, scratch, pcm, reference, timing, recorder_timing):
     input_path = scratch / "input.pcm"
-    stamp_path = scratch / "timestamps"
     input_path.write_bytes(pcm)
-    stamp_path.unlink(missing_ok=True)
     env = dict(
         os.environ,
         PATH=f"{scratch}{os.pathsep}{os.environ['PATH']}",
         XDG_CONFIG_HOME=str(scratch / "config"),
         VOICE_REPLAY_PCM=str(input_path),
-        VOICE_REPLAY_STAMP=str(stamp_path),
+        VOICE_REPLAY_TIMING_FD=str(recorder_timing.fileno()),
     )
     launched = time.monotonic()
     process = await asyncio.create_subprocess_exec(
         binary, "--config", str(config), "stream", "--json", "--no-inject",
-        stdout=asyncio.subprocess.PIPE, env=env,
+        stdout=asyncio.subprocess.PIPE, env=env, pass_fds=(recorder_timing.fileno(),),
     )
     updates = []
     final_time = None
     transcript = ""
     audio_seconds = len(pcm) / (2 * RATE)
+    stamps = None
+    loop = asyncio.get_running_loop()
+
+    def stop_after_audio():
+        nonlocal stamps
+        first, last = struct.unpack("!dd", timing.recv(16))
+        stamps = first, last, time.monotonic()
+        if process.returncode is None:
+            process.send_signal(signal.SIGINT)
+
+    loop.add_reader(timing, stop_after_audio)
     try:
         async with asyncio.timeout(audio_seconds + 90):
             async for line in process.stdout:
@@ -105,11 +115,14 @@ async def measure(binary, config, scratch, pcm, reference):
             if await process.wait() != 0:
                 raise RuntimeError(f"voiceless exited with status {process.returncode}")
     finally:
+        loop.remove_reader(timing)
         if process.returncode is None:
             process.kill()
             await process.wait()
 
-    start, end = map(float, stamp_path.read_text().splitlines())
+    if stamps is None:
+        raise RuntimeError("replay ended before the recorder delivered the complete sample")
+    start, end, stopped_at = stamps
     live = [timestamp for timestamp in updates if timestamp < end]
     observations = [start, *live, end]
     return {
@@ -118,7 +131,7 @@ async def measure(binary, config, scratch, pcm, reference):
         "first_text": live[0] - start if live else None,
         "max_live_gap": max(b - a for a, b in zip(observations, observations[1:])),
         "live_updates": len(live),
-        "stop_final": final_time - end if final_time is not None else None,
+        "stop_final": final_time - stopped_at if final_time is not None else None,
         "cer": cer(reference, transcript) if reference else None,
         "transcript": transcript,
     }
@@ -131,11 +144,19 @@ async def run(args):
     if args.sample and (unknown := set(args.sample) - available):
         raise SystemExit(f"Unknown samples in {corpus}: {', '.join(sorted(unknown))}")
     conditions = set(args.condition or CONDITIONS)
-    with tempfile.TemporaryDirectory(prefix="voiceless-replay-") as directory:
+    timing, recorder_timing = socket.socketpair(type=socket.SOCK_DGRAM)
+    with timing, recorder_timing, tempfile.TemporaryDirectory(prefix="voiceless-replay-") as directory:
         scratch = Path(directory)
         recorder = scratch / "pw-record"
-        recorder.write_text(f"#!/bin/sh\nexec {shlex.join([sys.executable, str(Path(__file__).resolve()), '--capture'])}\n")
+        capture = shlex.join([sys.executable, str(Path(__file__).resolve()), "--capture"])
+        recorder.write_text(
+            '#!/bin/sh\nif [ "$1" = --help ]; then echo "--properties --raw"; exit 0; fi\n'
+            f"exec {capture}\n"
+        )
         recorder.chmod(0o700)
+        graph = scratch / "pw-dump"
+        graph.write_text("#!/bin/sh\nprintf '[]\\n'\n")
+        graph.chmod(0o700)
         config = scratch / "session.toml"
         settings = (
             '[asr]\nstreaming_backend = "local-offline"\n[local]\n'
@@ -163,7 +184,7 @@ async def run(args):
             for condition, audio in audio_variants(pcm):
                 if condition in conditions:
                     reference = "" if condition == "noise-only" else row["reference"]
-                    result = await measure(args.binary, config, scratch, audio, reference)
+                    result = await measure(args.binary, config, scratch, audio, reference, timing, recorder_timing)
                     print(json.dumps(dict(sample=sample, condition=condition, **result), ensure_ascii=False), flush=True)
 
 

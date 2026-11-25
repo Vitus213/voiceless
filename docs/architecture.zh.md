@@ -175,8 +175,8 @@ Silero VAD（512 采样窗口）在停顿处切分音频流。保留 10 个窗�
 
 ## 7. 注入
 
-`[inject] prefer` 选择方式；`clipboard_fallback = true` 时 `wtype` 或 `fcitx5`
-失败会改用剪贴板重试。`timeout_seconds` 约束每个外部命令。
+`[inject] prefer` 选择方式（`wtype`、`clipboard`、`fcitx5` 或 `copy`）；`clipboard_fallback = true`
+时 `wtype` 或 `fcitx5` 失败会改用剪贴板重试。`timeout_seconds` 约束每个外部命令。
 
 - **`wtype`**：Wayland 虚拟键盘，文本拆成多次 `wtype` 调用
   （`stream::wtype_invocations`）。
@@ -192,6 +192,15 @@ Silero VAD（512 采样窗口）在停顿处切分音频流。保留 10 个窗�
   sink，把每个局部结果以下划线预编辑显示在焦点输入框里；`CommitString` 用
   最终文本替换它。桥接（`fcitx5-bridge/`）是一个很小的 Fcitx5 插件，向最近
   获得焦点的输入上下文提交文本并报告目标程序。
+- **`copy`**：`wl-copy` 写入文本，留给用户自己粘贴。
+
+`ConfiguredInjector` 在录音开始和文字就绪时各读取一次焦点窗口。Niri 提供窗口 ID，
+单座席的 Sway 通过 `swaymsg` 提供客户端 ID，原生 X11 通过 `xdotool` 查询。
+Fcitx5 也可以通过桥接确认原输入上下文。焦点改变或无法确认时，受保护的交付返回
+`Delivery::NotDelivered`，并保留文字供用户使用。目标是终端时（`desktop::focus::is_terminal`：应用标识，
+或 `terminal_apps` 之一），带换行的文本改用 `terminal_paste_command` 粘贴而不逐键输入，
+因为终端会把输入的每一行当作命令执行。每个 `InjectionResult` 都带 `Delivery`：`committed`
+（Fcitx5 提交）、`unconfirmed`（按键或粘贴已发出）、`copied` 或 `not-delivered`。
 
 ## 8. daemon
 
