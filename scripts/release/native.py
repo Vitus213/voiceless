@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build native Voiceless release candidates on the matching Ubuntu 22.04 architecture."""
+"""Build the native Voiceless release candidates, npm packages and the desktop package on the matching Ubuntu 22.04 architecture."""
 
 import argparse
 import gzip
@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +55,7 @@ VULKAN_LICENSES = ("libvulkan1", "vulkan-headers", "spirv-headers")
 PLATFORMS = {
     "x86_64": {
         "npm_cpu": "x64",
+        "deb_arch": "amd64",
         "machine": "Advanced Micro Devices X86-64",
         "loader": "/lib64/ld-linux-x86-64.so.2",
         "rust_cpu": "x86-64",
@@ -64,6 +65,7 @@ PLATFORMS = {
     },
     "aarch64": {
         "npm_cpu": "arm64",
+        "deb_arch": "arm64",
         "machine": "AArch64",
         "loader": "/lib/ld-linux-aarch64.so.1",
         "rust_cpu": "generic",
@@ -72,6 +74,26 @@ PLATFORMS = {
         "libraries": SHERPA_LIBRARIES,
     },
 }
+# System libraries any candidate may load beyond its own bundled ones.
+SYSTEM_LIBRARIES = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1",
+                    "libstdc++.so.6", "libgcc_s.so.1", "libutil.so.1"}
+# The desktop host's binary, Debian package, launcher and icon share one name:
+# it is also the program name GTK reports, by which the launcher finds its
+# window. The package keeps the host beside the runtime it was built with,
+# which is the runtime the host starts.
+DESKTOP = "voiceless-desktop"
+DESKTOP_PREFIX = Path("usr/lib") / DESKTOP
+# The system runtime of the glibc baseline, which the package does not bundle.
+DESKTOP_BASE_DEPENDS = ("libc6 (>= 2.35)", "libgcc-s1", "libstdc++6")
+# What the host must load from the system, with the packages declared for them.
+DESKTOP_LINKED = {"libwebkit2gtk-4.1.so.0": "libwebkit2gtk-4.1-0", "libgtk-3.so.0": "libgtk-3-0"}
+# The tray loads its indicator library only where a desktop has a tray host,
+# so it is in no DT_NEEDED: the dependency is declared by hand, and the host
+# names the libraries it tries.
+DESKTOP_TRAY_DEPENDS = "libayatana-appindicator3-1 | libappindicator3-1"
+DESKTOP_TRAY_PACKAGE = "libayatana-appindicator3-1"
+DESKTOP_TRAY_LIBRARY = "libayatana-appindicator3.so.1"
+DESKTOP_TRAY_NAMES = (b"libayatana-appindicator3.so.1", b"libappindicator3.so.1")
 
 
 def require(condition, message):
@@ -155,12 +177,16 @@ def package_json(version, arch=None):
     return package
 
 
-def cargo(*args, **kwargs):
-    return output("rustup", "run", RUST, "cargo", *args, cwd=ROOT / "rust", **kwargs)
+def cargo(*args, directory=ROOT / "rust", **kwargs):
+    return output("rustup", "run", RUST, "cargo", *args, cwd=directory, **kwargs)
 
 
 def app_package(metadata):
     return next(pkg for pkg in metadata["packages"] if Path(pkg["manifest_path"]) == ROOT / "rust/Cargo.toml")
+
+
+def desktop_package(metadata):
+    return next(pkg for pkg in metadata["packages"] if Path(pkg["manifest_path"]) == ROOT / "desktop/Cargo.toml")
 
 
 def app_version():
@@ -169,6 +195,18 @@ def app_version():
     require(re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}", version),
             f"release candidates require a stable Cargo version, got {version}")
     return version
+
+
+def build_console(work):
+    source = ROOT / "frontend"
+    frontend = work / "frontend"
+    shutil.copytree(source / "src", frontend / "src")
+    shutil.copytree(source / "scripts", frontend / "scripts")
+    for name in ("index.html", "package.json", "package-lock.json", "tsconfig.json", "vite.config.ts"):
+        shutil.copyfile(source / name, frontend / name)
+    subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=frontend, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=frontend, check=True)
+    return frontend / "dist"
 
 
 def build_environment(work, arch):
@@ -183,6 +221,7 @@ def build_environment(work, arch):
     abi = PLATFORMS[arch]
     env.update(
         LC_ALL="C", CARGO_TARGET_DIR=str(work / "cargo-target"),
+        VOICELESS_CONSOLE_DIST=str(build_console(work)),
         CC="/usr/bin/gcc-11", CXX="/usr/bin/g++-11", AR="/usr/bin/ar",
         PKG_CONFIG="/usr/bin/pkg-config", CFLAGS=f"-march={abi['c_arch']}",
         CXXFLAGS=f"-march={abi['c_arch']}", LIBSQLITE3_SYS_USE_PKG_CONFIG="0", BZIP2_NO_PKG_CONFIG="1",
@@ -286,7 +325,7 @@ def prepare_sherpa(work, arch, runtime, env):
     return libs
 
 
-def copy_cargo_licenses(metadata, built_ids, licenses):
+def copy_cargo_licenses(metadata, built_ids, licenses, prefix=""):
     notices = []
     license_name = re.compile(r"^(?:licen[cs]e|copying|copyright|notice|third[-_ ]?party)", re.I)
     for package in sorted(metadata["packages"], key=lambda pkg: (pkg["name"], pkg["version"])):
@@ -310,7 +349,7 @@ def copy_cargo_licenses(metadata, built_ids, licenses):
             dest = licenses / label / source.relative_to(root)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, dest)
-            files.append(dest.relative_to(licenses.parent).as_posix())
+            files.append(prefix + dest.relative_to(licenses.parent).as_posix())
         url = f"https://crates.io/crates/{package['name']}/{package['version']}"
         notices.append(f"{label} ({package['license'] or 'see source license'})\n{url}\n" + "\n".join(files))
     return "\n\n".join(notices)
@@ -388,6 +427,241 @@ def build_native(work, destination, version, arch):
     archive(payload, destination / f"voiceless-v{version}-{target(arch)}.tar.gz")
     write_json(payload / "package.json", package_json(version, arch))
     archive(payload, destination / f"{leaf_name(arch)}-{version}.tgz", "package/")
+    return payload, env
+
+
+def desktop_name(version, arch):
+    return f"{DESKTOP}-v{version}-{target(arch)}.deb"
+
+
+def desktop_config(version):
+    """`desktop/tauri.conf.json`, the metadata the desktop package is built
+    from, at the release version."""
+    config = json.loads((ROOT / "desktop/tauri.conf.json").read_text(encoding="utf-8"))
+    require(config["version"] == version, "desktop/tauri.conf.json and rust/Cargo.toml must declare one version")
+    bundle, deb = config["bundle"], config["bundle"]["linux"]["deb"]
+    require(all(isinstance(bundle.get(field), str) and bundle[field].strip()
+                for field in ("publisher", "homepage", "category", "shortDescription", "longDescription")),
+            "desktop/tauri.conf.json needs the publisher, homepage, category and descriptions of the bundle")
+    require(all(isinstance(deb.get(field), str) and deb[field].strip()
+                for field in ("section", "priority", "changelog", "desktopTemplate"))
+            and isinstance(deb.get("depends"), list),
+            "desktop/tauri.conf.json needs the depends, section, priority, changelog "
+            "and desktopTemplate of the deb bundle")
+    return config
+
+
+def desktop_input(config, field):
+    """A file the Debian bundle configuration names, relative to desktop/."""
+    path = (ROOT / "desktop" / config["bundle"]["linux"]["deb"][field]).resolve()
+    require(path.is_relative_to(ROOT) and path.is_file(), f"missing desktop bundle {field}: {path}")
+    return path
+
+
+def desktop_icons(config):
+    """The bundle's icons by the hicolor size they are installed under."""
+    icons = {}
+    for icon in config["bundle"]["icon"]:
+        match = re.fullmatch(r"icons/(\d+x\d+)\.png", icon)
+        require(match and (ROOT / "desktop" / icon).is_file(), f"unsupported desktop bundle icon: {icon}")
+        icons[match[1]] = ROOT / "desktop" / icon
+    require(icons, "desktop/tauri.conf.json declares no icon")
+    return icons
+
+
+def loaded(path, arch):
+    """The shared objects the loader gives an executable, as `(soname, file)`."""
+    entries = re.findall(r"^\s*(\S+) => (\S+) \(0x[0-9a-f]+\)$",
+                         output(PLATFORMS[arch]["loader"], "--list", path, env={"LC_ALL": "C"}), re.M)
+    require(entries and all(Path(file).is_absolute() for _, file in entries),
+            f"unresolved libraries in {path}: {entries}")
+    return entries
+
+
+def package_owner(path):
+    """The installed package that owns a file, by dpkg's database, which may
+    name it through the other of the merged /lib and /usr/lib."""
+    # The loader may report a merged-/usr alias or a symlink maintained by
+    # ldconfig. Query the owning package of the actual versioned file too.
+    resolved = os.path.realpath(path)
+    for candidate in dict.fromkeys([path, resolved, resolved.removeprefix("/usr"),
+                                    "/usr" + resolved.removeprefix("/usr")]):
+        result = subprocess.run(["dpkg-query", "--search", candidate], capture_output=True, text=True)
+        if result.returncode == 1:
+            continue
+        result.check_returncode()
+        owners = {match[1] for line in result.stdout.splitlines()
+                  if (match := re.fullmatch(r"([a-z0-9][a-z0-9+.-]*)(?::[a-z0-9-]+)?: "
+                                           + re.escape(candidate), line))}
+        if len(owners) == 1:
+            return owners.pop()
+    raise ValueError(f"cannot identify the installed package owning {path}")
+
+
+def desktop_depends(host, arch, declared):
+    """`Depends` of the desktop package: the runtime of the glibc baseline, the
+    dependencies declared in tauri.conf.json (among them the tray's), and the
+    package of every other system library the host loads directly. The
+    libraries bundled beside the host are the runtime's own."""
+    linked = dict(loaded(host, arch))
+    direct = set(re.findall(r"\(NEEDED\).*\[([^\]]+)\]", output("readelf", "--dynamic", "--wide", host)))
+    # glibc's loader lists itself by absolute path, without a SONAME => path row.
+    # libc6 supplies the interpreter even when it also appears in DT_NEEDED.
+    direct.discard(Path(PLATFORMS[arch]["loader"]).name)
+    require(direct <= linked.keys(), f"unresolved direct desktop libraries: {sorted(direct - linked.keys())}")
+    names = {name.strip().split(" ", 1)[0] for entry in declared for name in entry.split("|")}
+    for soname, package in DESKTOP_LINKED.items():
+        require(soname in direct and package in names and package_owner(linked[soname]) == package,
+                f"the desktop host must link {soname} from the declared package {package}")
+    require(DESKTOP_TRAY_DEPENDS in declared, f"the desktop package must depend on {DESKTOP_TRAY_DEPENDS}")
+    bundled = set(PLATFORMS[arch]["libraries"])
+    owners = {package_owner(linked[name]) for name in direct - bundled - SYSTEM_LIBRARIES}
+    return [*DESKTOP_BASE_DEPENDS, *declared, *sorted(owners - names)]
+
+
+def check_tray(host):
+    """The host names the indicator libraries it tries, and the package the
+    dependency names first provides the one tried first."""
+    content = host.read_bytes()
+    require(all(name in content for name in DESKTOP_TRAY_NAMES), "the desktop host does not contain the tray")
+    listing = subprocess.run(["dpkg-query", "--listfiles", DESKTOP_TRAY_PACKAGE], check=True,
+                             capture_output=True, text=True).stdout
+    require(DESKTOP_TRAY_LIBRARY in {PurePosixPath(line).name for line in listing.splitlines()},
+            f"{DESKTOP_TRAY_PACKAGE} does not provide {DESKTOP_TRAY_LIBRARY}")
+
+
+def desktop_description(config):
+    """The package's description: the bundle's synopsis and its long text."""
+    bundle = config["bundle"]
+    return f"{bundle['shortDescription']}\n{bundle['longDescription']}"
+
+
+def desktop_control(config, package, arch, depends, size):
+    """The package's control file. Its fields come from where Tauri's own
+    bundler takes them: the crate, and `bundle` in tauri.conf.json."""
+    bundle, deb = config["bundle"], config["bundle"]["linux"]["deb"]
+    # Tauri's deb takes Cargo `authors` over `bundle.publisher`: unset, they cannot disagree.
+    require(not package["authors"] and re.fullmatch(r"[^<>]+ <[^<>\s@]+@[^<>\s@]+>", bundle["publisher"]),
+            "the Debian maintainer is bundle.publisher, as `Name <email>`; Cargo authors must stay unset")
+    synopsis, _, description = desktop_description(config).partition("\n")
+    return "".join([
+        f"Package: {DESKTOP}\nVersion: {package['version']}\nArchitecture: {PLATFORMS[arch]['deb_arch']}\n",
+        f"Maintainer: {bundle['publisher']}\nInstalled-Size: {(size + 1023) // 1024}\n",
+        f"Depends: {', '.join(depends)}\n",
+        f"Section: {deb['section']}\nPriority: {deb['priority']}\nHomepage: {bundle['homepage']}\n",
+        f"Description: {synopsis}\n", *(f" {line}\n" for line in description.splitlines()),
+    ])
+
+
+def desktop_copyright():
+    """The package's copyright notice: the project's license, and where the
+    notices of its third-party components are."""
+    runtime, doc = DESKTOP_PREFIX.as_posix(), f"usr/share/doc/{DESKTOP}"
+    return "\n".join([
+        "Voiceless desktop host and its bundled runtime", "",
+        f"{runtime}/ holds the Voiceless runtime and the desktop host, both under the MIT License:", "",
+        (ROOT / "LICENSE").read_text(encoding="utf-8").rstrip("\n"), "",
+        "Third-party components keep their own licenses and notices:", "",
+        f"  the bundled runtime: {runtime}/THIRD_PARTY_NOTICES.txt and {runtime}/licenses/",
+        f"  the desktop host: {doc}/THIRD_PARTY_NOTICES.txt and {doc}/licenses/", "",
+    ])
+
+
+def desktop_notices(metadata, built_ids, licenses):
+    """Third-party notices of the desktop host: the crates compiled into it,
+    and where the bundled runtime carries its own notices."""
+    runtime, doc = DESKTOP_PREFIX.as_posix(), f"usr/share/doc/{DESKTOP}"
+    return "\n\n".join([
+        "Third-party notices for the Voiceless desktop host (Linux release)",
+        f"The bundled runtime under {runtime}/ carries its own notices for Sherpa-ONNX,\n"
+        f"ONNX Runtime, the Vulkan loader and the Rust toolchain: {runtime}/THIRD_PARTY_NOTICES.txt\n"
+        f"and {runtime}/licenses/.",
+        "GTK, WebKitGTK and the tray indicator are the distribution's: the package depends\n"
+        "on their packages and redistributes none of them.",
+        "Rust crates compiled into the host for this candidate (including build dependencies).\n"
+        f"Their license texts are under {doc}/licenses/:",
+        copy_cargo_licenses(metadata, built_ids, licenses, f"{doc}/"),
+    ]) + "\n"
+
+
+def build_desktop(work, destination, version, arch, payload, env):
+    """The desktop host and the runtime just built, as one Debian package.
+    The host is built like the runtime: same baseline, same console bundle."""
+    config = desktop_config(version)
+    deb = config["bundle"]["linux"]["deb"]
+    rust_target = f"{arch}-unknown-linux-gnu"
+    with (work / "desktop-cargo.jsonl").open("w+") as messages:
+        subprocess.run(["rustup", "run", RUST, "cargo", "build", "--release", "--locked",
+                        "--bin", DESKTOP, "--target", rust_target, "--message-format=json-render-diagnostics"],
+                       cwd=ROOT / "desktop", env=env, stdout=messages, check=True)
+        messages.seek(0)
+        built_ids = {item["package_id"] for item in map(json.loads, messages)
+                     if item["reason"] == "compiler-artifact"}
+    metadata = json.loads(cargo("metadata", "--locked", "--format-version", "1",
+                                "--filter-platform", rust_target, directory=ROOT / "desktop", env=env))
+    package = desktop_package(metadata)
+    require(package["id"] in built_ids and package["name"] == DESKTOP and package["version"] == version,
+            "Cargo must build the desktop host at the core release version")
+
+    # The runtime tree is the core payload just built, unchanged: the host goes beside it.
+    tree = work / "desktop-package"
+    runtime = tree / DESKTOP_PREFIX
+    manifest = json.loads((payload / "release.json").read_text())
+    for name in sorted([*manifest["files"], "release.json"]):
+        (runtime / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(payload / name, runtime / name)
+        (runtime / name).chmod(0o755 if (payload / name).stat().st_mode & 0o111 else 0o644)
+    host = runtime / "bin" / DESKTOP
+    shutil.copyfile(Path(env["CARGO_TARGET_DIR"]) / rust_target / "release" / DESKTOP, host)
+    host.chmod(0o755)
+    subprocess.run(["patchelf", "--set-rpath", "$ORIGIN/../lib", host], check=True)
+    subprocess.run(["strip", "--strip-debug", host], check=True)
+    check_machine(host, arch)
+    depends = desktop_depends(host, arch, deb["depends"])
+    check_tray(host)
+
+    def install(source, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        target.chmod(0o644)
+
+    share = tree / "usr/share"
+    install(desktop_input(config, "desktopTemplate"), share / "applications" / f"{DESKTOP}.desktop")
+    for size, icon in desktop_icons(config).items():
+        install(icon, share / "icons/hicolor" / size / "apps" / f"{DESKTOP}.png")
+    doc = share / "doc" / DESKTOP
+    doc.mkdir(parents=True)
+    (doc / "copyright").write_text(desktop_copyright(), encoding="utf-8")
+    (doc / "THIRD_PARTY_NOTICES.txt").write_text(
+        desktop_notices(metadata, built_ids, doc / "licenses"), encoding="utf-8")
+    with (doc / "changelog.gz").open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            gz.write(desktop_input(config, "changelog").read_bytes())
+    # Links, not copies: the core's `$ORIGIN/../lib` stays beside it, and the
+    # host keeps its file name, which GTK reports as the program name.
+    (tree / "usr/bin").mkdir(parents=True)
+    (tree / "usr/bin" / DESKTOP).symlink_to(f"../lib/{DESKTOP}/bin/{DESKTOP}")
+    (tree / "usr/bin" / "voiceless").symlink_to(f"../lib/{DESKTOP}/bin/voiceless")
+
+    paths = [tree, *sorted(tree.rglob("*"))]
+    for path in paths:
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)
+    files = sorted((path for path in paths if path.is_file() and not path.is_symlink()),
+                   key=lambda path: path.relative_to(tree).as_posix())
+    size = sum(path.stat().st_size for path in files) + 4096 * sum(1 for path in paths if path.is_dir())
+    control = tree / "DEBIAN"
+    control.mkdir()
+    (control / "control").write_text(desktop_control(config, package, arch, depends, size), encoding="utf-8")
+    (control / "md5sums").write_text(
+        "".join(f"{hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()}  "
+                f"{path.relative_to(tree).as_posix()}\n" for path in files), encoding="ascii")
+    for path in control.iterdir():
+        path.chmod(0o644)
+    # dpkg-deb writes root ownership and, with SOURCE_DATE_EPOCH, one timestamp.
+    subprocess.run(["dpkg-deb", "--build", "--root-owner-group", "-Zxz", "-z6", tree,
+                    destination / desktop_name(version, arch)],
+                   env=dict(os.environ, SOURCE_DATE_EPOCH="0"), check=True)
 
 
 def build_root(work, destination, version):
@@ -412,12 +686,16 @@ def main():
     require(output("getconf", "GNU_LIBC_VERSION") == f"glibc {GLIBC}",
             f"build on the glibc {GLIBC} baseline (Ubuntu 22.04)")
     version = app_version()
+    desktop_config(version)
+    require((ROOT / "desktop/Cargo.lock").is_file(),
+            "desktop/Cargo.lock is missing: track it beside desktop/Cargo.toml, as the flake does")
     if os.environ.get("GITHUB_REF_TYPE") == "tag":
         require(os.environ.get("GITHUB_REF_NAME") == f"v{version}", "Git tag must match the Cargo version")
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="voiceless-release-") as directory:
         work = Path(directory)
-        build_native(work, args.output, version, arch)
+        payload, env = build_native(work, args.output, version, arch)
+        build_desktop(work, args.output, version, arch, payload, env)
         build_root(work, args.output, version)
     print(f"Wrote release candidates for {target(arch)} to {args.output}")
 

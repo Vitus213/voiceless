@@ -113,6 +113,8 @@ pub mod coordinator;
 pub mod ctl;
 /// `voiceless daemon`: gateway, warm engine, D-Bus control and hotkey.
 pub mod daemon;
+/// Linux desktop capabilities: which window has the keyboard focus.
+pub mod desktop;
 /// `voiceless doctor` dependency checks.
 pub mod doctor;
 /// Volcengine Doubao streaming ASR transport.
@@ -120,6 +122,7 @@ pub mod doubao;
 /// Warm (preloaded) local recognition engines shared by daemon sessions.
 pub mod engine;
 /// Client of the Fcitx5 bridge module: commit and in-field preedit.
+#[cfg(target_os = "linux")]
 pub mod fcitx5;
 /// GGUF ASR models on transcribe.cpp (feature `transcribe`).
 #[cfg(feature = "transcribe")]
@@ -129,6 +132,10 @@ pub mod history;
 /// `voiceless history` subcommands.
 pub mod history_cmd;
 /// evdev push-to-talk key listener.
+#[cfg(target_os = "linux")]
+pub mod hotkey;
+#[cfg(not(target_os = "linux"))]
+#[path = "desktop/native_hotkey.rs"]
 pub mod hotkey;
 /// Stop-to-inject latency gate (trial runner and percentiles).
 pub mod latency;
@@ -137,7 +144,12 @@ pub mod latency_cmd;
 /// Sherpa-ONNX online streaming recognizer (`local-streaming`).
 pub mod local_asr;
 /// MPRIS pause/resume and start/stop audio cues.
+#[cfg(target_os = "linux")]
 pub mod media;
+/// User-selected microphone and system audio recordings and their recovery journals.
+pub mod meeting_capture;
+/// Timestamped edits and highlights for finalized meeting tracks.
+pub mod meeting_review;
 /// `voiceless mode` subcommands.
 pub mod mode_cmd;
 /// `voiceless model` subcommands.
@@ -148,15 +160,25 @@ pub mod models;
 pub mod modes;
 /// Offline models driven as a streaming backend with VAD (`local-offline`).
 pub mod offline_asr;
+/// Ordered output steps and per-application mode rules.
+pub mod output;
 /// LLM post-processing for non-quick modes.
 pub mod processing;
 /// DashScope realtime WebSocket transport (`cloud-realtime`).
 pub mod realtime;
+/// Advisory locks that tell a runtime process, even one still loading, from none.
+pub mod runtime;
 /// Transcript state: confirmed segments, partial text, final snapshot.
 pub mod session;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/common/session_bus.rs"]
+mod session_bus;
 /// `voiceless stream`: production pipeline wiring and text injection.
 pub mod stream;
 /// `[text]` cleanup applied to every final transcript.
 pub mod text;
+/// Durable background media jobs and shared decoding resources.
+pub mod transcription_jobs;
 /// Versioned application installation and manager-aware updates.
+#[cfg(target_os = "linux")]
 pub mod update;

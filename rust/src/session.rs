@@ -43,8 +43,7 @@ pub enum SessionState {
     /// `Finished` arrived while stopping; the injection text (if any) can
     /// be taken once.
     Completed,
-    /// A second stop, or a cancel during the flush, discarded the session;
-    /// later events are ignored and nothing is injected.
+    /// An explicit cancel discarded the session and any pending delivery.
     Cancelled,
     /// The backend reported an error; later events are ignored and nothing
     /// is injected.
@@ -56,9 +55,7 @@ pub enum SessionState {
 pub enum SessionAction {
     /// First stop: flush the audio and send `finish`.
     Finish,
-    /// Stop while already stopping: abort the flush, never inject.
-    Cancel,
-    /// The session is already over; nothing to do.
+    /// A stop was already requested or the session is over.
     Ignore,
 }
 
@@ -105,25 +102,24 @@ impl RecognitionSession {
         self.state
     }
 
-    /// Register a stop request. `Recording -> Stopping` returns `Finish`
-    /// (flush and send `finish`); a stop while already `Stopping` returns
-    /// `Cancel`, moves to `Cancelled` and drops any injection text; in a
-    /// terminal state it returns `Ignore`.
+    /// Register the first stop request. Later stops leave the flush running.
     pub fn request_stop(&mut self) -> SessionAction {
         match self.state {
             SessionState::Recording => {
                 self.state = SessionState::Stopping;
                 SessionAction::Finish
             }
-            SessionState::Stopping => {
-                self.state = SessionState::Cancelled;
-                self.injection_text = None;
-                SessionAction::Cancel
-            }
-            SessionState::Completed | SessionState::Cancelled | SessionState::Failed => {
-                SessionAction::Ignore
-            }
+            SessionState::Stopping
+            | SessionState::Completed
+            | SessionState::Cancelled
+            | SessionState::Failed => SessionAction::Ignore,
         }
+    }
+
+    /// Discard pending delivery and ignore late recognition events.
+    pub fn cancel(&mut self) {
+        self.state = SessionState::Cancelled;
+        self.injection_text = None;
     }
 
     /// Fold one backend event into the transcript. After `Cancelled` or
@@ -192,7 +188,8 @@ impl RecognitionSession {
                 self.injection_text = None;
                 SessionUpdate::Error(message)
             }
-            crate::realtime::RealtimeEvent::Ready => SessionUpdate::Ignored,
+            crate::realtime::RealtimeEvent::Ready
+            | crate::realtime::RealtimeEvent::DevicesLoaded(_) => SessionUpdate::Ignored,
         }
     }
 
@@ -208,7 +205,7 @@ impl RecognitionSession {
         TranscriptSnapshot {
             confirmed_segments: self.confirmed_segments.clone(),
             partial_text: self.partial_text.clone(),
-            authoritative_text: self.confirmed_segments.join("") + &self.partial_text,
+            authoritative_text: self.confirmed_segments.join("") + self.partial_text.as_str(),
             is_final,
             backend: self.backend.clone(),
         }

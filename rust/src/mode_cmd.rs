@@ -19,6 +19,9 @@
 use crate::models::default_config_dir;
 use crate::modes::ModesRepository;
 
+mod preview;
+pub use preview::{preview, serve_mcp, PreviewArgs};
+
 /// Run one action and return the process exit code. `add` needs `--name`
 /// (prompt and label default to empty); `update` and `remove` need `--id`
 /// and `update` changes only the flags given. Blocking file I/O.

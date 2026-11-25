@@ -538,7 +538,11 @@ impl DoubaoSession {
         tokio::spawn(async move {
             let mut tracker = ResultTracker::default();
             loop {
-                let message = match reader.next().await {
+                let message = tokio::select! {
+                    _ = event_tx.closed() => break,
+                    message = reader.next() => message,
+                };
+                let message = match message {
                     Some(Ok(message)) => message,
                     Some(Err(error)) => {
                         let _ = event_tx.send(Err(socket_error(error))).await;

@@ -22,7 +22,7 @@
 //! - a WebSocket Close frame from `cancel`.
 //!
 //! Messages received (JSON text frames, mapped by `parse_event`):
-//! - `session.created` / `session.updated` -> `Ready` (passes the ready gate).
+//! - `session.updated` -> `Ready` (passes the ready gate).
 //! - `conversation.item.input_audio_transcription.text` -> `Partial`
 //!   (`text` plus the still-revisable `stash`).
 //! - `conversation.item.input_audio_transcription.completed` -> `Completed`
@@ -38,13 +38,10 @@
 //! `pw-record`. Partial and confirmed text both come from the server as-is;
 //! the `session.finished` transcript replaces the confirmed segments.
 //!
-//! Failure semantics: no retries, reconnects or timeouts live here. A socket
-//! error, a close frame, EOF or malformed JSON ends the event stream with an
-//! `io::Error`; a server `error` event is delivered as `RealtimeEvent::Error`.
-//! Both end the session in the coordinator. Fallback to another backend is
-//! decided only by `stream.rs` when `connect` fails, never inside this
-//! module. All deadlines (ready 5 s, send 500 ms, finish 2 s) are enforced by
-//! the coordinator, not by the transport.
+//! A socket error, close frame, EOF or malformed JSON ends the event stream
+//! with an `io::Error`. A server `error` event becomes `RealtimeEvent::Error`.
+//! `stream.rs` may switch backends during startup. After capture starts,
+//! the coordinator reports failures without reconnecting.
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -64,6 +61,8 @@ pub enum RealtimeEvent {
     /// for the first `Ready` before starting capture; later ones are
     /// ignored by the session state machine.
     Ready,
+    /// The local decoder finished loading and reports its actual devices.
+    DevicesLoaded(Box<crate::offline_asr::EngineDevices>),
     /// Live, revisable text of the open utterance. `text` is the part the
     /// server considers stable so far and `stash` the trailing part it may
     /// still rewrite; the session displays `text` + `stash` and clears both
@@ -120,8 +119,8 @@ impl RealtimeSession {
     /// TLS, or the HTTP rejection of a bad key), `BrokenPipe` if the writer
     /// task died before the update could be queued. Side effects: one
     /// network connection and two spawned tokio tasks. No `Ready` is
-    /// produced here; it arrives from the server as `session.created` or
-    /// `session.updated`.
+    /// emitted here; it arrives when the server acknowledges the configuration
+    /// with `session.updated`.
     pub async fn connect(endpoint: &str, api_key: &str, model: &str) -> io::Result<Self> {
         let separator = if endpoint.contains('?') { '&' } else { '?' };
         let url = format!("{endpoint}{separator}model={model}");
@@ -174,7 +173,11 @@ impl RealtimeSession {
         // `next_event` always observes why the stream ended.
         tokio::spawn(async move {
             loop {
-                let message = match reader.next().await {
+                let message = tokio::select! {
+                    _ = event_tx.closed() => break,
+                    message = reader.next() => message,
+                };
+                let message = match message {
                     Some(Ok(message)) => message,
                     Some(Err(error)) => {
                         let _ = event_tx.send(Err(socket_error(error))).await;
@@ -203,13 +206,6 @@ impl RealtimeSession {
                             break;
                         }
                     },
-                    Message::Ping(payload) => {
-                        // A server ping (keepalive) is reported as `Ready`
-                        // too: tungstenite answers the pong itself, and the
-                        // session ignores `Ready` after the ready gate.
-                        let _ = event_tx.send(Ok(RealtimeEvent::Ready)).await;
-                        let _ = payload;
-                    }
                     Message::Close(frame) => {
                         let reason = frame
                             .map(|value| value.reason.to_string())
@@ -219,7 +215,10 @@ impl RealtimeSession {
                             .await;
                         break;
                     }
-                    Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+                    Message::Binary(_)
+                    | Message::Ping(_)
+                    | Message::Pong(_)
+                    | Message::Frame(_) => {}
                 }
             }
         });
@@ -327,9 +326,7 @@ fn parse_event(text: &str) -> io::Result<Option<RealtimeEvent>> {
         .and_then(Value::as_str)
         .unwrap_or_default()
     {
-        // Either acknowledgement passes the ready gate; which one arrives
-        // first depends on the server.
-        "session.created" | "session.updated" => Some(RealtimeEvent::Ready),
+        "session.updated" => Some(RealtimeEvent::Ready),
         "conversation.item.input_audio_transcription.text" => Some(RealtimeEvent::Partial {
             text: string_field(&value, "text"),
             stash: string_field(&value, "stash"),

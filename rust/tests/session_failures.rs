@@ -1,6 +1,6 @@
 //! Failure and cancel paths of `coordinator::run_session`: no capture
-//! before `Ready`, no injection on any failure, cancel (explicit or via a
-//! second stop) during the flush skips `finish`, and a hanging finish is
+//! before `Ready`, no injection on failures, explicit cancellation during
+//! flush and idempotent stop retries. A hanging finish is
 //! bounded by the flush deadline. Fakes from `common` as in
 //! `audio_backpressure.rs`; `commands` are queued on the control channel
 //! before the session starts.
@@ -19,9 +19,14 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .iter()
         .map(|event| match event {
             OutputEvent::Ready => "ready",
+            OutputEvent::BackendSelected(_) => "backend-selected",
+            OutputEvent::DevicesLoaded(_) => "devices-loaded",
             OutputEvent::Level(_) => "level",
             OutputEvent::Transcript(snapshot) if snapshot.is_final => "final",
             OutputEvent::Transcript(_) => "transcript",
+            OutputEvent::Phase(voiceless::coordinator::SessionPhase::Delivering) => "delivering",
+            OutputEvent::Phase(_) => "phase",
+            OutputEvent::Output(_) => "output",
             OutputEvent::Finalized { .. } => "finalized",
             OutputEvent::Warning(_) => "warning",
             OutputEvent::Error(_) => "error",
@@ -137,7 +142,7 @@ async fn capture_start_failure_reports_error_without_injection() {
 }
 
 #[tokio::test]
-async fn second_stop_during_flush_cancels_without_finish_or_injection() {
+async fn duplicate_stop_during_flush_leaves_one_final_delivery() {
     let log = new_log();
     let transport = ScriptedTransport::new(log.clone());
     transport.before_finish(Ok(RealtimeEvent::Ready));
@@ -149,26 +154,35 @@ async fn second_stop_during_flush_cancels_without_finish_or_injection() {
     // the tail frame is being flushed.
     transport.trigger(1, ControlCommand::Stop);
     transport.trigger(2, ControlCommand::Stop);
+    transport.after_finish(Ok(RealtimeEvent::Finished {
+        transcript: "你好".to_owned(),
+    }));
     let capture = FakeCapture::new(log.clone(), vec![vec![1; 1024]], Some(vec![2; 512]));
     let plan = SessionPlan::new("cloud-realtime", true);
 
     let (code, events, log_entries) = run_fixture(plan, capture, transport, vec![]).await;
 
-    assert_eq!(code, 130);
+    assert_eq!(code, 0);
     let kinds = event_kinds(&events);
-    assert!(kinds.contains(&"cancelled"), "{kinds:?}");
+    assert_eq!(kinds.iter().filter(|&&kind| kind == "final").count(), 1);
     assert_eq!(kinds.last().copied(), Some("completed"));
-    assert!(!kinds.contains(&"final"), "{kinds:?}");
-    assert!(!kinds.contains(&"finalized"), "{kinds:?}");
-    assert!(
-        !log_entries.iter().any(|entry| entry == "transport.finish"),
-        "{log_entries:?}"
-    );
-    assert!(
-        !log_entries
-            .iter()
-            .any(|entry| entry.starts_with("injector.inject:")),
-        "{log_entries:?}"
+    let effects: Vec<_> = log_entries
+        .iter()
+        .map(String::as_str)
+        .filter(|entry| {
+            entry.starts_with("transport.append:")
+                || *entry == "transport.finish"
+                || entry.starts_with("injector.inject:")
+        })
+        .collect();
+    assert_eq!(
+        effects,
+        [
+            "transport.append:1024",
+            "transport.append:512",
+            "transport.finish",
+            "injector.inject:你好",
+        ]
     );
 }
 
@@ -235,6 +249,43 @@ async fn disconnect_after_partial_fails_without_injecting_partial_text() {
     );
 }
 
+#[tokio::test]
+async fn microphone_loss_preserves_preview_and_does_not_finalize() {
+    let log = new_log();
+    let transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Ready));
+    transport.before_finish(Ok(RealtimeEvent::Partial {
+        text: "半句".to_owned(),
+        stash: String::new(),
+    }));
+    let mut capture = FakeCapture::new(log.clone(), vec![vec![0; 1024]], None);
+    capture.end_error = Some("microphone disconnected".to_owned());
+    let (code, events, effects) = run_fixture(
+        SessionPlan::new("cloud-realtime", true),
+        capture,
+        transport,
+        vec![],
+    )
+    .await;
+    assert_eq!(code, 1);
+    assert!(events.iter().any(|event| matches!(event,
+        OutputEvent::Transcript(text) if !text.is_final && text.authoritative_text == "半句"
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        OutputEvent::Error(message) if message.contains("microphone disconnected")
+    )));
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| *effect == "capture.abort")
+            .count(),
+        1
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| { effect == "transport.finish" || effect.starts_with("injector.inject:") }));
+}
+
 /// `finish` never returns: the flush deadline fails the session.
 #[tokio::test]
 async fn finish_timeout_fails_the_session_without_injection() {
@@ -288,7 +339,7 @@ async fn local_final_text_can_arrive_after_the_flush_deadline() {
     assert_eq!(code, 0, "{:?}", event_kinds(&events));
     assert_eq!(
         event_kinds(&events),
-        ["ready", "final", "finalized", "completed"]
+        ["ready", "final", "delivering", "finalized", "completed"]
     );
     assert_eq!(
         log.iter()

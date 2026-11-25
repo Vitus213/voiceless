@@ -60,6 +60,23 @@ fn relayed_session_waits_for_its_own_start_and_end() {
     assert_eq!(run(&[state("recording"), state("stopping")]), None);
 }
 
+#[test]
+fn identified_relay_uses_only_its_accepted_session() {
+    let mut relay = RelayedSession::for_session(9);
+    for event in [
+        json!({"type": "error", "session_id": 8}),
+        json!({"type": "state", "state": "recording", "session_id": 9}),
+        json!({"type": "state", "state": "idle", "session_id": 8}),
+        json!({"type": "completed", "session_id": 9}),
+    ] {
+        assert_eq!(relay.observe(&event), None, "{event}");
+    }
+    assert_eq!(
+        relay.observe(&json!({"type": "state", "state": "idle", "session_id": 9})),
+        Some(0),
+    );
+}
+
 /// Coordinator event kinds are printable; the daemon's own `state`, `log`,
 /// `session` and `level` lines are not.
 #[test]

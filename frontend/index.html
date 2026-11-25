@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<!--
+  Voiceless console shell. Served by rust/src/console/mod.rs (`index`) with
+  the VOICELESS_TOKEN placeholder (double braces, below) replaced by the
+  per-start API token; app.js reads it from the meta tag and sends it on
+  every /api call. Vite emits this shell and its bundled JavaScript and
+  CSS. All three are embedded in the binary for offline use. The theme
+  and the amount of motion follow the OS unless pinned from the rail.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Filled by the server on every request; the page is sent Cache-Control: no-store. -->
+<meta name="voiceless-token" content="{{VOICELESS_TOKEN}}">
+<meta name="color-scheme" content="dark light">
+<script>
+// Effective theme, motion and language on <html> before first paint: the
+// pinned choice ("" follows the OS) or the OS setting. app.js changes the
+// theme through window.voicelessTheme(pin), the others through the
+// "voiceless.motion" and "voiceless.locale" entries it reads here.
+(function () {
+  function pinned(name) {
+    try { return JSON.parse(localStorage.getItem("voiceless." + name) || '""') || ""; } catch (error) { return ""; /* blocked storage */ }
+  }
+  var media = matchMedia("(prefers-color-scheme: light)"), pin = pinned("theme");
+  function apply(value) {
+    if (value !== undefined) pin = value;
+    document.documentElement.dataset.theme = pin || (media.matches ? "light" : "dark");
+  }
+  media.addEventListener("change", function () { apply(); });
+  window.voicelessTheme = apply;
+  apply();
+  document.documentElement.dataset.motion = pinned("motion") || (matchMedia("(prefers-reduced-motion: reduce)").matches ? "reduced" : "full");
+  var language = pinned("locale") || (navigator.language.toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+})();
+</script>
+<title>Voiceless</title>
+<script type="module" src="/src/main.ts"></script>
+</head>
+<body>
+<a class="skip-link" href="#page">跳到主要内容</a>
+<div class="shell">
+  <aside class="rail" aria-label="导航">
+    <a class="brand" href="#live" data-tip="Voiceless" aria-label="Voiceless" id="brand"></a>
+    <nav class="rail-nav" id="nav" aria-label="控制台"></nav>
+    <button class="rail-btn" id="theme" type="button" data-tip="主题：跟随系统"></button>
+    <button class="rail-btn" id="menu" type="button" data-tip="显示与搜索" aria-label="显示与搜索" aria-keyshortcuts="Control+k"></button>
+    <div class="lamp" id="lamp" role="img" aria-label="连接中…" data-tip="连接中…"><span class="lamp-dot"></span></div>
+  </aside>
+  <main class="view">
+    <section class="deck" id="deck" aria-label="语音输入"></section>
+    <div id="page" class="page" tabindex="-1"></div>
+  </main>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<!-- The one live region for session phases and results; the transcript itself is not announced.
+     It has no role on purpose: a status bar is throttled with every other text change of the
+     page by Orca, a plain live region is presented each time. -->
+<div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
+<dialog id="dialog" aria-modal="true"></dialog>
+<noscript><p class="noscript">需要启用 JavaScript。</p></noscript>
+</body>
+</html>

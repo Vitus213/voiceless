@@ -1,11 +1,19 @@
 //! `asr.fallback_backend`: when the primary backend cannot open before a
 //! session starts, the fallback is tried and a warning event says so.
 //! Data and config dirs point at a temp dir, never the user's home.
-//! Runs the real `stream::run_with_env` with a broadcast sink standing in
-//! for the daemon; no model is installed and no credentials exist, so both
-//! backends fail to open and no capture ever starts.
+//! Runs the real `stream::run_with_env` with a test event sink. Both
+//! backends fail to open, so no audio capture starts.
 
+use voiceless::coordinator::{EventSink, OutputEvent};
 use voiceless::stream::{run_with_env, SessionEnv, StreamError, StreamOptions};
+
+struct Events(tokio::sync::mpsc::UnboundedSender<OutputEvent>);
+
+impl EventSink for Events {
+    fn emit(&mut self, event: OutputEvent) -> std::io::Result<()> {
+        self.0.send(event).map_err(std::io::Error::other)
+    }
+}
 
 /// `local-offline` has no installed model: a warning names the fallback
 /// and the primary's reason; the fallback's own credential error is what
@@ -23,7 +31,7 @@ async fn missing_local_model_falls_back_and_reports_the_switch() {
     )
     .unwrap();
 
-    let (events, mut received) = tokio::sync::broadcast::channel(16);
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let (_control_tx, control) = tokio::sync::mpsc::channel(1);
     let result = run_with_env(
         StreamOptions {
@@ -32,11 +40,12 @@ async fn missing_local_model_falls_back_and_reports_the_switch() {
             json: true,
             inject: false,
             mode: "quick".to_owned(),
+            context: Default::default(),
         },
         control,
         SessionEnv {
             warm: None,
-            events: Some(events),
+            sink: Some(Box::new(Events(events))),
         },
     )
     .await;
@@ -46,8 +55,10 @@ async fn missing_local_model_falls_back_and_reports_the_switch() {
         matches!(result, Err(StreamError::MissingDoubaoCredentials)),
         "{result:?}"
     );
-    let warning = received.try_recv().expect("fallback warning event");
-    assert!(warning.contains(r#""type":"warning""#), "{warning}");
+    assert!(matches!(received.try_recv(), Ok(OutputEvent::Output(_))));
+    let OutputEvent::Warning(warning) = received.try_recv().expect("fallback warning event") else {
+        panic!("expected the fallback warning");
+    };
     assert!(
         warning.contains("falling back to doubao-realtime"),
         "{warning}"

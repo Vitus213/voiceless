@@ -385,121 +385,134 @@ fn path_string(path: &Path) -> Result<String, BatchError> {
         .ok_or_else(|| BatchError::Local("model path is not valid UTF-8".to_owned()))
 }
 
-/// Transcribe one WAV through the selected backend.
-///
-/// `backend` is `"cloud"`, `"local"` or its alias `"sensevoice"`; anything
-/// else is a `Local` error ("not implemented in this build"). The WAV is
-/// always validated with `load_wav_pcm16` first, so the cloud backend
-/// never uploads a file the local path would reject; the cloud request
-/// then sends the original file bytes (re-read from disk), the local path
-/// decodes the parsed PCM. `model_dir` is `[asr] batch_model_dir` and is
-/// required for the local backend. Blocking (network or model load plus
-/// decode).
+#[derive(Clone, Copy)]
+pub(crate) enum BatchBackend {
+    Cloud,
+    Local,
+    SenseVoice,
+}
+
+impl BatchBackend {
+    pub(crate) fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "cloud" => Ok(Self::Cloud),
+            "local" => Ok(Self::Local),
+            "sensevoice" => Ok(Self::SenseVoice),
+            _ => Err(format!(
+                "unknown batch backend {name:?}; expected cloud or local (also accepts sensevoice). See ASR migration in the README."
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cloud => "cloud",
+            Self::Local => "local",
+            Self::SenseVoice => "sensevoice",
+        }
+    }
+
+    pub(crate) fn transcribe(
+        self,
+        wav_path: &Path,
+        config: &crate::config::AppConfig,
+        model_dir: Option<&Path>,
+    ) -> Result<BatchResult, BatchError> {
+        let pcm = load_wav_pcm16(wav_path)?;
+        let text = match self {
+            Self::Cloud => {
+                let client = CloudBatchClient::new(
+                    config.cloud.base_url.clone(),
+                    config.cloud.api_key.clone(),
+                    config.cloud.model.clone(),
+                    Duration::from_secs_f64(config.cloud.timeout_seconds),
+                    UreqBatchPoster,
+                );
+                let wav_bytes = fs::read(wav_path)?;
+                client.transcribe_wav_bytes(&wav_bytes)?
+            }
+            Self::Local | Self::SenseVoice => {
+                let dir = model_dir.ok_or_else(|| {
+                    BatchError::Local(
+                        "local batch transcription requires a model directory".to_owned(),
+                    )
+                })?;
+                LocalBatchRecognizer::new(dir)?.transcribe_pcm16(&pcm)?
+            }
+        };
+        Ok(BatchResult {
+            text,
+            backend: self.name().to_owned(),
+        })
+    }
+}
+
+/// Transcribe one PCM16 WAV with `cloud`, `local` or the alias `sensevoice`.
+/// The local backend needs a `model_dir`. This call blocks while it loads
+/// and runs the model or calls the cloud batch endpoint.
 pub fn transcribe(
     wav_path: &Path,
     backend: &str,
     config: &crate::config::AppConfig,
     model_dir: Option<&Path>,
 ) -> Result<BatchResult, BatchError> {
-    let pcm = load_wav_pcm16(wav_path)?;
-    match backend {
-        "cloud" => {
-            let client = CloudBatchClient::new(
-                config.cloud.base_url.clone(),
-                config.cloud.api_key.clone(),
-                config.cloud.model.clone(),
-                Duration::from_secs_f64(config.cloud.timeout_seconds),
-                UreqBatchPoster,
-            );
-            let wav_bytes = fs::read(wav_path)?;
-            let text = client.transcribe_wav_bytes(&wav_bytes)?;
-            Ok(BatchResult {
-                text,
-                backend: "cloud".to_owned(),
-            })
-        }
-        "sensevoice" | "local" => {
-            let dir = model_dir.ok_or_else(|| {
-                BatchError::Local("local batch transcription requires a model directory".to_owned())
-            })?;
-            let recognizer = LocalBatchRecognizer::new(dir)?;
-            let text = recognizer.transcribe_pcm16(&pcm)?;
-            Ok(BatchResult {
-                text,
-                backend: backend.to_owned(),
-            })
-        }
-        other => Err(BatchError::Local(format!(
-            "batch backend not implemented in this build: {other}"
-        ))),
-    }
+    BatchBackend::parse(backend)
+        .map_err(BatchError::Local)?
+        .transcribe(wav_path, config, model_dir)
 }
 
-/// Record N seconds to a WAV file via `pw-record`.
-///
-/// Spawns `pw-record --rate 16000 --channels 1 --format s16
-/// --file-format=wav <destination>` with stdin closed and blocks until the
-/// child exits; a non-zero exit is a `Local` error, a failed spawn an
-/// `Io` error. The `seconds` argument is currently not passed to the
-/// child (see the `let _ = seconds` below): no duration limit is applied
-/// here, the recording lasts until `pw-record` itself exits.
+/// Record N seconds of microphone audio to a mono PCM16 WAV file.
 pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError> {
-    record_seconds_with("pw-record", seconds, destination)
-}
+    use crate::capture::{wav_header, RawCapture};
+    use std::io::{Seek as _, Write as _};
 
-/// `record_seconds` with the recorder binary made explicit (tests use a
-/// fake that honours SIGINT). `pw-record` has no duration option, so the
-/// child runs for `seconds` and is then sent SIGINT, on which pw-cat drains
-/// the stream and finalizes the WAV header before exiting. The child is
-/// polled every 20 ms so an early exit (no device, unwritable destination)
-/// is reported at once instead of after the full timer.
-pub fn record_seconds_with(
-    recorder: &str,
-    seconds: f64,
-    destination: &Path,
-) -> Result<(), BatchError> {
-    use std::os::unix::process::ExitStatusExt;
-
-    let mut child = std::process::Command::new(recorder)
-        .args([
-            "--rate",
-            &SAMPLE_RATE.to_string(),
-            "--channels",
-            "1",
-            "--format",
-            "s16",
-        ])
-        .arg("--file-format=wav")
-        .arg(destination)
-        .stdin(std::process::Stdio::null())
-        .spawn()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
-    let mut interrupted = false;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if std::time::Instant::now() >= deadline {
-            // Our own child, still running: ask it to stop. pw-cat exits 0
-            // on SIGINT; a recorder that dies from the signal instead is
-            // also accepted below, since the stop was requested.
-            // SAFETY: `kill` on a pid this process spawned and has not
-            // reaped; no memory is involved.
-            unsafe {
-                libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let selected = crate::config::load_default_config()
+            .map_err(|error| BatchError::Local(error.to_string()))?
+            .audio
+            .source;
+        #[cfg(not(target_os = "linux"))]
+        let target = match selected {
+            Some(source) => Some(
+                crate::desktop::audio::require_source(&source)
+                    .await
+                    .map_err(BatchError::Local)?,
+            ),
+            None => None,
+        };
+        let mut output = tempfile::NamedTempFile::new_in(
+            destination.parent().unwrap_or_else(|| Path::new(".")),
+        )?;
+        output.write_all(&wav_header(0, SAMPLE_RATE))?;
+        #[cfg(target_os = "linux")]
+        let mut capture = RawCapture::start(selected.as_deref()).await?;
+        #[cfg(not(target_os = "linux"))]
+        let mut capture = RawCapture::start(target)?;
+        let end = tokio::time::sleep(Duration::from_secs_f64(seconds.max(0.0)));
+        tokio::pin!(end);
+        let mut bytes = 0_u64;
+        loop {
+            tokio::select! {
+                _ = &mut end => break,
+                chunk = capture.next_chunk() => {
+                    let Some(chunk) = chunk? else { break };
+                    output.write_all(&chunk)?;
+                    bytes += chunk.len() as u64;
+                }
             }
-            interrupted = true;
-            break child.wait()?;
         }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let stopped_by_us = interrupted && status.signal() == Some(libc::SIGINT);
-    if !status.success() && !stopped_by_us {
-        return Err(BatchError::Local(format!(
-            "{recorder} exited with {status}"
-        )));
-    }
-    Ok(())
+        if let Some(tail) = capture.stop().await? {
+            output.write_all(&tail)?;
+            bytes += tail.len() as u64;
+        }
+        output.rewind()?;
+        output.write_all(&wav_header(bytes, SAMPLE_RATE))?;
+        output.persist(destination).map_err(|error| error.error)?;
+        Ok(())
+    })
 }
 
 /// Scratch WAV for `voiceless record`: `$TMPDIR/voiceless-record-<pid>.wav`

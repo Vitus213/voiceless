@@ -1,0 +1,98 @@
+#!/bin/sh
+# Stand-in for `pw-dump` in the browser tests. Voiceless reads three kinds
+# of object out of the graph, each as `pw-dump` prints it: nodes, links
+# and the `default` metadata. This desktop has one microphone, which the
+# system default names, one output, and the daemon's three recording
+# streams ($PPID is the daemon that runs this), each linked to the node it
+# asked for: that link is what Voiceless waits for before it keeps a
+# sample. VOICELESS_E2E_GRAPH=none prints a desktop without any microphone.
+set -eu
+if [ "${VOICELESS_E2E_GRAPH:-microphone}" = none ]; then
+  echo '[]'
+  exit 0
+fi
+cat <<GRAPH
+[
+  {
+    "id": 61,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "alsa_input.usb-Test_Microphone-00.mono-fallback",
+        "node.description": "Test Microphone",
+        "media.class": "Audio/Source",
+        "object.serial": 90
+      }
+    }
+  },
+  {
+    "id": 62,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "alsa_output.pci-0000_0c_00_4.analog-stereo",
+        "node.description": "Test Speakers",
+        "media.class": "Audio/Sink",
+        "object.serial": 91
+      }
+    }
+  },
+  {
+    "id": 63,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "voiceless-capture-$PPID",
+        "media.class": "Stream/Input/Audio",
+        "object.serial": 92
+      }
+    }
+  },
+  {
+    "id": 64,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "voiceless-meeting-$PPID-microphone",
+        "media.class": "Stream/Input/Audio",
+        "object.serial": 93
+      }
+    }
+  },
+  {
+    "id": 65,
+    "type": "PipeWire:Interface:Node",
+    "info": {
+      "props": {
+        "node.name": "voiceless-meeting-$PPID-system",
+        "media.class": "Stream/Input/Audio",
+        "object.serial": 94
+      }
+    }
+  },
+  {
+    "id": 0,
+    "type": "PipeWire:Interface:Metadata",
+    "props": {"metadata.name": "default"},
+    "metadata": [
+      {"key": "default.audio.source", "value": {"name": "alsa_input.usb-Test_Microphone-00.mono-fallback"}},
+      {"key": "default.audio.sink", "value": {"name": "alsa_output.pci-0000_0c_00_4.analog-stereo"}}
+    ]
+  },
+  {
+    "id": 71,
+    "type": "PipeWire:Interface:Link",
+    "info": {"output-node-id": 61, "input-node-id": 63, "state": "active"}
+  },
+  {
+    "id": 72,
+    "type": "PipeWire:Interface:Link",
+    "info": {"output-node-id": 61, "input-node-id": 64, "state": "active"}
+  },
+  {
+    "id": 73,
+    "type": "PipeWire:Interface:Link",
+    "info": {"output-node-id": 62, "input-node-id": 65, "state": "active"}
+  }
+]
+GRAPH

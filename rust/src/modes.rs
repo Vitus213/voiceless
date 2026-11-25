@@ -167,6 +167,9 @@ pub fn render_template(template: &str, text: &str, selected: &str, clipboard: &s
     output
 }
 
+/// Reserved explicit mode for the authoritative transcript without cleanup.
+pub(crate) const RAW_MODE_ID: &str = "raw";
+
 /// Mode id of the builtin prompt-optimize mode; `[processing].prompt`
 /// overrides its template.
 pub const PROMPT_OPTIMIZE_ID: &str = "prompt-optimize";

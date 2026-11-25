@@ -1,0 +1,62 @@
+#!/bin/sh
+# Stand-in for PipeWire's `pw-record` in the browser tests. Asked for its
+# help, it gives the one `pw-record` has on Ubuntu 24.04: that is how
+# Voiceless tells a `pw-record` it can talk to from one it cannot. Asked
+# to record, it ignores its arguments and streams the 16 kHz mono PCM16
+# file named by VOICELESS_E2E_PCM to stdout at real-time speed, then keeps
+# the stream open until the SIGINT that ends a session, as `pw-record`
+# does.
+#
+# The file named by VOICELESS_E2E_RECORDER decides how a capture starts:
+# `ok` streams the sample; anything else quits at once with the complaint
+# `pw-record` gives for a source that is gone. The test rewrites it.
+set -eu
+if [ "${1:-}" = --help ]; then
+  cat <<'HELP'
+pw-record [options] [<file>|-]
+  -h, --help                            Show this help
+      --version                         Show version
+  -v, --verbose                         Enable verbose operations
+
+  -R, --remote                          Remote daemon name
+      --media-type                      Set media type (default Audio)
+      --media-category                  Set media category (default Playback)
+      --media-role                      Set media role (default Music)
+      --target                          Set node target serial or name (default auto)
+                                          0 means don't link
+      --latency                         Set node latency (default 100ms)
+                                          Xunit (unit = s, ms, us, ns)
+                                          or direct samples (256)
+                                          the rate is the one of the source file
+  -P  --properties                      Set node properties
+
+      --rate                            Sample rate (req. for rec) (default 48000)
+      --channels                        Number of channels (req. for rec) (default 2)
+      --channel-map                     Channel map
+                                            one of: "stereo", "surround-51",... or
+                                            comma separated list of channel names: eg. "FL,FR"
+      --format                          Sample format (u8|s8|s16|s32|f32|f64) (req. for rec) (default s16)
+      --volume                          Stream volume 0-1.0 (default 1.000)
+  -q  --quality                         Resampler quality (0 - 15) (default 4)
+HELP
+  exit 0
+fi
+sample=${VOICELESS_E2E_PCM:?name the PCM sample}
+if [ "$(cat "${VOICELESS_E2E_RECORDER:-/dev/null}" 2>/dev/null || true)" != ok ]; then
+  echo 'error: failed to create stream: no such source' >&2
+  exit 1
+fi
+trap 'exit 0' INT TERM
+block=$(mktemp)
+trap 'rm -f "$block"' EXIT
+rm -f "$VOICELESS_E2E_RECORDER.ended"
+# 8000 bytes are a quarter of a second at 16 kHz mono PCM16.
+while :; do
+  dd of="$block" bs=8000 count=1 2>/dev/null
+  [ -s "$block" ] || break
+  cat "$block"
+  sleep 0.25
+done < "$sample"
+: > "$VOICELESS_E2E_RECORDER.ended"
+# The sample is over; only a session's SIGINT ends the stream, never EOF.
+while :; do sleep 0.1; done

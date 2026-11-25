@@ -1,0 +1,22 @@
+[package]
+name = "voiceless-desktop"
+version = "0.2.0"
+edition = "2021"
+description = "Voiceless desktop window and tray over the running daemon"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "voiceless-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+voiceless = { path = "../rust" }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"

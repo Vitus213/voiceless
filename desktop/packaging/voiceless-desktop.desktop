@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Voiceless
+Comment=Voiceless desktop window and tray over the running daemon
+Exec=voiceless-desktop
+Icon=voiceless-desktop
+Terminal=false
+Categories=Utility;
+StartupWMClass=voiceless-desktop

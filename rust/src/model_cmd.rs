@@ -5,31 +5,44 @@
 //! command works on the default XDG directories (`~/.local/share/voiceless`
 //! for payloads, `~/.cache/voiceless` for downloads) and returns a process
 //! exit code: 0 on success, 1 on any failure (unknown id, download or
-//! integrity error, corrupt payload, not installed).
+//! integrity error, corrupt payload, not installed, a model in use).
 //!
-//! Output contract: `list` prints one line per catalog entry, as NDJSON
-//! (`id`, `version`, `size_bytes`, `sha256_sri`, `license_status`) with
-//! `--json`, otherwise `<id> (version <version>)`. `install` and `check`
-//! print the payload directory on stdout; diagnostics and the per-file
-//! `missing:`/`extra:`/`corrupt:`/`error:` lines of a failed check go to
-//! stderr. `--json` is accepted globally but only affects `list`.
+//! Output contract: `list` prints one line per model, the catalog entries
+//! first and the imported ones after them, as NDJSON (`id`, `version`,
+//! `size_bytes`, `sha256_sri`, `license_status`, `name`, `languages`,
+//! `devices`, `imported`) with `--json`, otherwise `<id> (version
+//! <version>)` or `<id> (imported: <name>)`. `install` and `check` print
+//! the payload directory on stdout. `import` prints the id of the imported
+//! model on stdout, as a JSON object with `--json`. Diagnostics and the
+//! per-file `missing:`/`extra:`/`corrupt:`/`error:` lines of a failed check
+//! go to stderr.
 //!
 //! `install` blocks for the whole download and verification (gigabytes
 //! for the GGUF models) with no progress output; the console's
-//! `/api/models` is the interactive path. Nothing here checks whether a
-//! running daemon still uses a model being removed.
+//! `/api/models` is the interactive path. `import` runs the same code as
+//! the console's `/api/models/import`. A model that a running engine or
+//! session holds is refused by `remove`, from the daemon as from a one-shot
+//! session.
 
-use crate::models::{default_cache_dir, default_data_dir, HttpDownloader, ModelManager};
+use std::fs;
+use std::io::BufReader;
+use std::path::Path;
 
-/// Parsed `voiceless model <action> [id]`.
+use crate::models::{
+    default_cache_dir, default_data_dir, model_info, HttpDownloader, ModelManager,
+};
+
+/// Parsed `voiceless model <action> [argument]`.
 #[derive(Debug, Clone)]
 pub enum ModelCommand {
-    /// Print the pinned catalog.
+    /// Print the catalog and the imported models.
     List,
     /// Download, verify and activate a catalog model (idempotent; repairs
     /// a corrupt install).
     Install { id: String },
-    /// Re-verify the active payload of a catalog model.
+    /// Import a local GGUF file after verifying it.
+    Import { file: std::path::PathBuf },
+    /// Re-verify the active payload of a catalog or an imported model.
     Check { id: String },
     /// Delete the pointer and every installed version of a model.
     Remove { id: String },
@@ -40,17 +53,36 @@ pub enum ModelCommand {
 pub fn run(command: ModelCommand, json: bool) -> i32 {
     let manager = ModelManager::new(&default_data_dir(), &default_cache_dir());
     match command {
-        ModelCommand::List => list(json),
+        ModelCommand::List => list(&manager, json),
         ModelCommand::Install { id } => install(&manager, &id),
+        ModelCommand::Import { file } => import(&manager, &file, json),
         ModelCommand::Check { id } => check(&manager, &id),
         ModelCommand::Remove { id } => remove(&manager, &id),
     }
 }
 
-/// Print the catalog (never consults the disk, so it works before any
-/// install). JSON mode emits one object per line, not an array.
-fn list(json: bool) -> i32 {
-    for spec in crate::models::catalog() {
+/// Print the catalog and then the installed imported models. JSON mode
+/// emits one object per line, not an array. The catalog needs no disk
+/// access, so it is listed before any install; a store that cannot be read
+/// fails the command.
+fn list(manager: &ModelManager, json: bool) -> i32 {
+    let imported = match manager.list_imported() {
+        Ok(imported) => imported,
+        Err(error) => {
+            eprintln!("model list failed: {error}");
+            return 1;
+        }
+    };
+    let entries = crate::models::catalog()
+        .into_iter()
+        .map(|spec| (spec, None))
+        .chain(
+            imported
+                .into_iter()
+                .map(|model| (model.spec.clone(), Some(model))),
+        );
+    for (spec, imported) in entries {
+        let info = model_info(&spec, imported.as_ref());
         if json {
             println!(
                 "{}",
@@ -60,8 +92,14 @@ fn list(json: bool) -> i32 {
                     "size_bytes": spec.size_bytes,
                     "sha256_sri": spec.sha256_sri,
                     "license_status": spec.license_status,
+                    "name": info.name,
+                    "languages": info.languages,
+                    "devices": info.devices,
+                    "imported": imported.is_some(),
                 })
             );
+        } else if let Some(imported) = imported {
+            println!("{} (imported: {})", spec.id, imported.name);
         } else {
             println!("{} (version {})", spec.id, spec.version);
         }
@@ -70,12 +108,18 @@ fn list(json: bool) -> i32 {
 }
 
 /// Install `id`: prints the payload directory on success, the manager
-/// error on stderr otherwise.
+/// error on stderr otherwise. An imported model has no download source.
 fn install(manager: &ModelManager, id: &str) -> i32 {
-    let Some(spec) = find_spec(id) else {
+    let Some(spec) = manager.find_spec(id) else {
         eprintln!("unknown model id: {id}");
         return 1;
     };
+    if spec.url.is_empty() {
+        eprintln!(
+            "model {id} was imported and has no download source; import its file again with `voiceless model import <file>`"
+        );
+        return 1;
+    }
     match manager.install(&spec, &HttpDownloader) {
         Ok(path) => {
             println!("{}", path.display());
@@ -88,12 +132,65 @@ fn install(manager: &ModelManager, id: &str) -> i32 {
     }
 }
 
+/// Import `file` through the same code as the console: prints the id of
+/// the imported model on stdout and how to select it on stderr; the
+/// manager error on stderr otherwise. The file name is what the model is
+/// listed under.
+fn import(manager: &ModelManager, file: &Path, json: bool) -> i32 {
+    let name = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let source = match fs::File::open(file) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("cannot open {}: {error}", file.display());
+            return 1;
+        }
+    };
+    let bytes = match source.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            eprintln!("cannot read {}: {error}", file.display());
+            return 1;
+        }
+    };
+    let mut source = BufReader::new(source);
+    match manager.import_from(&mut source, name, bytes) {
+        Ok(model) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": model.spec.id,
+                        "name": model.name,
+                        "family": model.family,
+                        "languages": model.languages,
+                        "size_bytes": model.spec.size_bytes,
+                    })
+                );
+            } else {
+                println!("{}", model.spec.id);
+            }
+            eprintln!(
+                "imported {} ({}); set [local] model = \"{}\" to use it",
+                model.spec.id, model.name, model.spec.id
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("model import failed: {error}");
+            1
+        }
+    }
+}
+
 /// Check `id`: the payload path always goes to stdout once the pointer
 /// resolves; a clean report prints "model `<id>` is valid" and returns 0, a
 /// dirty one lists every finding on stderr and returns 1. A missing or
 /// malformed pointer is reported as "model check failed".
 fn check(manager: &ModelManager, id: &str) -> i32 {
-    let Some(spec) = find_spec(id) else {
+    let Some(spec) = manager.find_spec(id) else {
         eprintln!("unknown model id: {id}");
         return 1;
     };
@@ -126,9 +223,10 @@ fn check(manager: &ModelManager, id: &str) -> i32 {
     }
 }
 
-/// Remove `id`. Unlike the other commands this does not validate the id
-/// against the catalog, so leftovers of a model that was dropped from the
-/// catalog can still be deleted; "not installed" is an error (exit 1).
+/// Remove `id`. Unlike the other commands this does not look the id up in
+/// the catalog or the imports, so leftovers of a model that is known
+/// nowhere can still be deleted; "not installed" is an error (exit 1), and
+/// so is a model a running engine or session holds.
 fn remove(manager: &ModelManager, id: &str) -> i32 {
     match manager.remove(id) {
         Ok(true) => 0,
@@ -141,11 +239,4 @@ fn remove(manager: &ModelManager, id: &str) -> i32 {
             1
         }
     }
-}
-
-/// Catalog lookup by exact id.
-fn find_spec(id: &str) -> Option<crate::models::ModelSpec> {
-    crate::models::catalog()
-        .into_iter()
-        .find(|spec| spec.id == id)
 }

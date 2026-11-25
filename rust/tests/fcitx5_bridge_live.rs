@@ -203,3 +203,84 @@ async fn preedit_shows_inline_then_clears_before_the_commit() {
         "preedit cleared before the commit: {seen:?}"
     );
 }
+
+#[tokio::test]
+async fn guarded_preedit_and_commit_cannot_move_between_contexts() {
+    if std::env::var_os("VOICELESS_FCITX5_BRIDGE_TEST").is_none() {
+        eprintln!("skipped: set VOICELESS_FCITX5_BRIDGE_TEST=1");
+        return;
+    }
+    let bus = zbus::Connection::session().await.unwrap();
+    let frontend = zbus::Proxy::new(&bus, "org.fcitx.Fcitx5", FRONTEND_PATH, FRONTEND_INTERFACE)
+        .await
+        .unwrap();
+    let mut contexts = Vec::new();
+    for _ in 0..2 {
+        let (path, _): (zbus::zvariant::OwnedObjectPath, Vec<u8>) = frontend
+            .call("CreateInputContext", &(vec![("program", "same-program")],))
+            .await
+            .unwrap();
+        contexts.push(path);
+    }
+    let first = zbus::Proxy::new(
+        &bus,
+        "org.fcitx.Fcitx5",
+        contexts[0].as_str(),
+        CONTEXT_INTERFACE,
+    )
+    .await
+    .unwrap();
+    let second = zbus::Proxy::new(
+        &bus,
+        "org.fcitx.Fcitx5",
+        contexts[1].as_str(),
+        CONTEXT_INTERFACE,
+    )
+    .await
+    .unwrap();
+    let mut commits = second.receive_signal("CommitString").await.unwrap();
+    let bridge = zbus::Proxy::new(
+        &bus,
+        voiceless::fcitx5::SERVICE,
+        voiceless::fcitx5::PATH,
+        voiceless::fcitx5::INTERFACE,
+    )
+    .await
+    .unwrap();
+
+    first.call::<_, _, ()>("FocusIn", &()).await.unwrap();
+    let (focused, original): (bool, String) = bridge.call("FocusedContext", &()).await.unwrap();
+    assert!(focused);
+    let visible: (bool, String) = bridge
+        .call("PreeditToContext", &(&original, "preview"))
+        .await
+        .unwrap();
+    assert!(visible.0, "{visible:?}");
+
+    first.call::<_, _, ()>("FocusOut", &()).await.unwrap();
+    second.call::<_, _, ()>("FocusIn", &()).await.unwrap();
+    for method in ["PreeditToContext", "CommitToContext"] {
+        let verdict: (bool, String) = bridge
+            .call(method, &(&original, "foreign text"))
+            .await
+            .unwrap();
+        assert!(
+            !verdict.0 && verdict.1.contains("no longer"),
+            "{method}: {verdict:?}"
+        );
+    }
+
+    let (focused, current): (bool, String) = bridge.call("FocusedContext", &()).await.unwrap();
+    assert!(focused && current != original);
+    let commit: (bool, String) = bridge
+        .call("CommitToContext", &(&current, "explicit delivery"))
+        .await
+        .unwrap();
+    assert!(commit.0, "{commit:?}");
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), commits.next())
+        .await
+        .unwrap()
+        .unwrap();
+    let (text,): (String,) = message.body().deserialize().unwrap();
+    assert_eq!(text, "explicit delivery");
+}

@@ -1,5 +1,5 @@
 //! `session::RecognitionSession` in isolation: partials and confirmed
-//! segments accumulate, the first stop finishes and the second cancels,
+//! segments accumulate, duplicate stops leave the flush running,
 //! `Finished` while stopping exposes the injection text exactly once, and
 //! error or cancel paths never expose it. No fakes: the state machine is
 //! pure data.
@@ -7,8 +7,7 @@
 use voiceless::realtime::RealtimeEvent;
 use voiceless::session::{RecognitionSession, SessionAction, SessionState, SessionUpdate};
 
-/// Partial (text + stash) then a confirmed segment; stop -> Finish, a
-/// second stop -> Cancel.
+/// A partial and confirmed segment followed by two stop requests.
 #[test]
 fn normal_stop_flushes_one_authoritative_transcript_and_one_injection() {
     let mut session = RecognitionSession::new("cloud-realtime");
@@ -31,8 +30,8 @@ fn normal_stop_flushes_one_authoritative_transcript_and_one_injection() {
 
     assert_eq!(session.request_stop(), SessionAction::Finish);
     assert_eq!(session.state(), SessionState::Stopping);
-    assert_eq!(session.request_stop(), SessionAction::Cancel);
-    assert_eq!(session.state(), SessionState::Cancelled);
+    assert_eq!(session.request_stop(), SessionAction::Ignore);
+    assert_eq!(session.state(), SessionState::Stopping);
 }
 
 #[test]
@@ -96,7 +95,7 @@ fn errors_and_cancellation_never_expose_injection_text() {
 
     let mut cancelled = RecognitionSession::new("cloud-realtime");
     assert_eq!(cancelled.request_stop(), SessionAction::Finish);
-    assert_eq!(cancelled.request_stop(), SessionAction::Cancel);
+    cancelled.cancel();
     assert!(matches!(
         cancelled.apply(RealtimeEvent::Finished {
             transcript: "不要注入".to_owned(),
@@ -117,9 +116,15 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .iter()
         .map(|event| match event {
             OutputEvent::Ready => "ready",
+            OutputEvent::BackendSelected(_) => "backend-selected",
+            OutputEvent::DevicesLoaded(_) => "devices-loaded",
             OutputEvent::Level(_) => "level",
             OutputEvent::Transcript(snapshot) if snapshot.is_final => "final",
             OutputEvent::Transcript(_) => "transcript",
+            OutputEvent::Phase(voiceless::coordinator::SessionPhase::Delivering) => "delivering",
+            OutputEvent::Phase(voiceless::coordinator::SessionPhase::NoSpeech) => "no-speech",
+            OutputEvent::Phase(_) => "phase",
+            OutputEvent::Output(_) => "output",
             OutputEvent::Finalized { .. } => "finalized",
             OutputEvent::Warning(_) => "warning",
             OutputEvent::Error(_) => "error",
@@ -215,6 +220,7 @@ async fn stop_delivers_tail_and_finish_before_single_final_and_injection() {
             "transcript",
             "transcript",
             "final",
+            "delivering",
             "finalized",
             "completed"
         ],
@@ -282,11 +288,8 @@ async fn stop_without_speech_completes_without_injection_and_is_diagnosable() {
         !kinds.contains(&"final"),
         "no speech must not produce a final transcript: {kinds:?}"
     );
-    let finalized = sink.events.iter().find_map(|event| match event {
-        OutputEvent::Finalized { injection } => Some(injection.clone()),
-        _ => None,
-    });
-    assert_eq!(finalized, Some(None), "{:?}", sink.events);
+    assert!(kinds.contains(&"no-speech"), "{kinds:?}");
+    assert!(!kinds.contains(&"finalized"), "{kinds:?}");
     let log_entries = entries(&log);
     assert!(
         !log_entries

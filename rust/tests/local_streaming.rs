@@ -15,8 +15,8 @@ fn voiceless() -> Command {
     Command::new(env!("CARGO_BIN_EXE_voiceless"))
 }
 
-/// No model installed: the JSON stream is exactly `error`, `completed`,
-/// and the output mentions neither DashScope nor an authorization header.
+/// A missing model ends the selected output pipeline with a local error
+/// and `completed`. The JSON stream must not mention cloud credentials.
 #[test]
 fn explicit_local_backend_reports_model_error_without_cloud() {
     let root = tempdir().expect("temporary directory");
@@ -49,7 +49,7 @@ fn explicit_local_backend_reports_model_error_without_cloud() {
             .iter()
             .filter_map(|event| event.get("type").and_then(serde_json::Value::as_str))
             .collect::<Vec<_>>(),
-        vec!["error", "completed"]
+        vec!["output", "error", "completed"]
     );
     let rendered = stdout.to_ascii_lowercase();
     assert!(!rendered.contains("dashscope"));

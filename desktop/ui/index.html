@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voiceless</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #141517; color: #e8e6df; font: 16px/1.7 system-ui, "Noto Sans CJK SC", sans-serif; }
+  main { max-width: 34em; padding: 2em; }
+  h1 { font-size: 20px; margin: 0 0 .5em; }
+</style>
+<main>
+  <h1>Voiceless</h1>
+  <p id="message">正在连接后台服务…</p>
+</main>
+<script>
+  // The host sets the text once it knows where the console listens, or why it does not.
+  window.showMessage = (text) => { document.getElementById('message').textContent = text; };
+</script>
+</html>

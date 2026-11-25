@@ -11,11 +11,8 @@
 //!   audio were missing; a skip is never reported as a pass.
 //! - `130`: a `stream` session cancelled by the second Ctrl-C or SIGTERM.
 //!
-//! `stream` is special-cased: when the configured streaming backend needs a
-//! local model (`local-offline`, `local-streaming`) and a running daemon owns
-//! `dev.voiceless.Daemon` on the session bus, the session runs inside the
-//! daemon (which already holds the model; a second copy would not fit in
-//! VRAM) and this process only relays events and Ctrl-C through
+//! When a daemon owns the default data directory, it runs `stream` using the
+//! active configuration. This process relays events and forwards signals through
 //! `ctl::stream_via_daemon`.
 //!
 //! `///` comments on the clap items below are their `--help` text: keep each
@@ -53,11 +50,13 @@ enum Command {
     Transcribe(TranscribeArgs),
     /// Record for N seconds, then transcribe.
     Record(RecordArgs),
-    /// Manage the model catalog: list, install, check, remove.
+    /// Manage the model catalog: list, install, import, check, remove.
     Model(ModelArgs),
     /// Install the verified standalone release archive into your user directory.
+    #[cfg(target_os = "linux")]
     Install(InstallArgs),
-    /// Update the current installation, or roll back a standalone release.
+    /// Update through the installing channel, or save and restore a data snapshot.
+    #[cfg(target_os = "linux")]
     Update(UpdateArgs),
     /// Check dependencies and the data directory.
     Doctor,
@@ -67,14 +66,17 @@ enum Command {
     History(HistoryArgs),
     /// Open the web console, serving it locally when needed.
     Web(WebArgs),
-    /// Run the resident daemon (warm engine, D-Bus control, hotkey, console).
+    /// Apply a JSON settings patch from standard input.
+    Config(ConfigArgs),
+    /// Run the resident daemon (warm engine, local control, hotkey, console).
     Daemon(DaemonArgs),
-    /// Control the resident daemon (one D-Bus call; for hotkey bindings).
+    /// Control the resident daemon from the command line.
     Ctl(CtlArgs),
     /// Run the CER and stop-to-inject latency gates.
     Benchmark(BenchmarkArgs),
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 struct InstallArgs {
     /// Downloaded release archive for this platform.
@@ -84,11 +86,21 @@ struct InstallArgs {
     sha256: String,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 struct UpdateArgs {
     /// Switch a standalone installation to its previous local version.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["snapshot", "list", "restore"])]
     rollback: bool,
+    /// Save a private snapshot of the configuration and history now.
+    #[arg(long, conflicts_with_all = ["list", "restore"])]
+    snapshot: bool,
+    /// List the saved data snapshots.
+    #[arg(long, conflicts_with_all = ["restore"])]
+    list: bool,
+    /// Return the configuration and history to the snapshot with this id.
+    #[arg(long, value_name = "ID")]
+    restore: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -99,6 +111,18 @@ struct WebArgs {
     /// Print the URL without launching a browser.
     #[arg(long)]
     no_open: bool,
+}
+
+#[derive(Debug, Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    action: ConfigAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// Validate and save a JSON object of settings read from stdin.
+    Patch,
 }
 
 /// Arguments of `voiceless ctl`.
@@ -129,6 +153,12 @@ enum CtlCommand {
     Stop,
     /// Cancel the session without typing anything.
     Cancel,
+    /// Paste the last completed dictation into the focused window again.
+    Repaste,
+    /// Refuse every start (hotkey included) until `resume`; a session in progress finishes.
+    Pause,
+    /// Accept starts again after `pause`.
+    Resume,
     /// Print idle, recording or stopping.
     Status,
     /// Print every daemon event as a JSON line.
@@ -161,6 +191,12 @@ enum BenchmarkAction {
     },
     /// Run cloud sessions and measure stop-to-inject latency.
     Latency {
+        /// Realtime backend to measure. The latency gate supports cloud-realtime.
+        #[arg(long, default_value = "cloud-realtime")]
+        backend: String,
+        /// Processing mode to measure. The latency gate supports quick.
+        #[arg(long, default_value = "quick")]
+        mode: String,
         /// Number of trials to run.
         #[arg(long, default_value_t = 100)]
         trials: usize,
@@ -185,9 +221,15 @@ struct StreamArgs {
     /// Recognize without typing the result.
     #[arg(long)]
     no_inject: bool,
-    /// Processing mode (quick types the text as recognized).
-    #[arg(long, default_value = "quick")]
+    /// Override application rules with a specific processing mode.
+    #[arg(long, default_value = "")]
     mode: String,
+    /// Hostname supplied by an authorized caller for this session.
+    #[arg(long)]
+    site: Option<String>,
+    /// Project vocabulary to apply to this session.
+    #[arg(long)]
+    project: Option<String>,
 }
 
 /// Arguments of `voiceless transcribe`.
@@ -229,7 +271,7 @@ struct ModelArgs {
     /// Catalog operation.
     #[command(subcommand)]
     action: ModelAction,
-    /// Print the model list as JSON lines.
+    /// Print the model list, or the result of an import, as JSON.
     #[arg(long, global = true)]
     json: bool,
 }
@@ -244,14 +286,19 @@ enum ModelAction {
         /// Catalog id (see model list).
         id: String,
     },
-    /// Verify an installed model against the catalog.
+    /// Import a local GGUF model file after verifying it.
+    Import {
+        /// GGUF model file to verify and add to the model list.
+        file: PathBuf,
+    },
+    /// Verify an installed model.
     Check {
-        /// Catalog id (see model list).
+        /// Model id (see model list).
         id: String,
     },
     /// Remove an installed model.
     Remove {
-        /// Catalog id (see model list).
+        /// Model id (see model list).
         id: String,
     },
 }
@@ -289,6 +336,32 @@ enum ModeAction {
     Update,
     /// Remove a custom mode by --id (builtins are rejected).
     Remove,
+    /// Render sample text through a mode without capture or delivery.
+    Preview {
+        /// Sample text. Read from standard input when omitted.
+        #[arg(long)]
+        text: Option<String>,
+        /// Mode name or id. If omitted, use the matching rule or default mode.
+        #[arg(long, default_value = "")]
+        mode: String,
+        /// Application id for the preview's rule match.
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Hostname for the preview's authorized site rule.
+        #[arg(long)]
+        site: Option<String>,
+        /// Project vocabulary to apply to the sample.
+        #[arg(long)]
+        project: Option<String>,
+        /// Send this sample to the configured model when the mode permits it.
+        #[arg(long)]
+        send_model: bool,
+        /// Print a structured result with each output step.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve local output previews to an opted-in OpenCode client over stdio.
+    Mcp,
 }
 
 /// Arguments of `voiceless daemon`.
@@ -321,6 +394,27 @@ struct HistoryArgs {
     /// Continue list from a previous next_cursor.
     #[arg(long, global = true)]
     cursor: Option<String>,
+    /// Search the raw and current text.
+    #[arg(long, global = true)]
+    search: Option<String>,
+    /// Include records created at or after this RFC 3339 time.
+    #[arg(long, global = true)]
+    from: Option<String>,
+    /// Include records created before this RFC 3339 time.
+    #[arg(long, global = true)]
+    to: Option<String>,
+    /// Limit the query to a processing mode id.
+    #[arg(long, global = true)]
+    mode: Option<String>,
+    /// Limit the query to an application id.
+    #[arg(long, global = true)]
+    app: Option<String>,
+    /// Limit the query to a recognition model id.
+    #[arg(long, global = true)]
+    model: Option<String>,
+    /// Include records with or without a saved recording.
+    #[arg(long, global = true, value_parser = ["with", "without"])]
+    audio: Option<String>,
     /// CSV file written by export.
     #[arg(long, global = true)]
     destination: Option<PathBuf>,
@@ -343,7 +437,7 @@ enum HistoryAction {
     List,
     /// Delete records by --ids or --all, together with their recordings.
     Delete,
-    /// Export all records to a CSV file (--destination).
+    /// Export matching records to a CSV file (--destination).
     Export,
     /// Print aggregate counts.
     Totals,
@@ -353,15 +447,34 @@ enum HistoryAction {
     Serve,
 }
 
+fn main() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == voiceless::output::SCRIPT_WORKER_ARG)
+    {
+        std::process::exit(exit_with_result(voiceless::output::run_script_worker()));
+    }
+    run();
+}
+
 /// Parse the command line, run one subcommand and exit with its code.
 #[tokio::main]
-async fn main() {
+async fn run() {
     let cli = Cli::parse();
     let code = match cli.command {
-        // A daemon that already holds the local model runs the session; the
-        // relay returns `None` when no daemon owns the bus name.
-        Command::Stream(args) if uses_local_model(&cli.config, &args) => {
-            match voiceless::ctl::stream_via_daemon(&args.mode, !args.no_inject, args.json).await {
+        Command::Stream(args) if cli.config.is_none() && args.backend.is_none() => {
+            let context = voiceless::stream::DictationContext {
+                site: args.site.clone(),
+                project: args.project.clone(),
+            };
+            match voiceless::ctl::stream_via_daemon(
+                &args.mode,
+                !args.no_inject,
+                args.json,
+                &context,
+            )
+            .await
+            {
                 Some(Ok(code)) => code,
                 Some(Err(error)) => {
                     eprintln!("Voiceless: {error}");
@@ -393,6 +506,7 @@ async fn main() {
             match args.action {
                 ModelAction::List => voiceless::model_cmd::ModelCommand::List,
                 ModelAction::Install { id } => voiceless::model_cmd::ModelCommand::Install { id },
+                ModelAction::Import { file } => voiceless::model_cmd::ModelCommand::Import { file },
                 ModelAction::Check { id } => voiceless::model_cmd::ModelCommand::Check { id },
                 ModelAction::Remove { id } => voiceless::model_cmd::ModelCommand::Remove { id },
             },
@@ -405,6 +519,36 @@ async fn main() {
                 ModeAction::Add => "add",
                 ModeAction::Update => "update",
                 ModeAction::Remove => "remove",
+                ModeAction::Preview {
+                    text,
+                    mode,
+                    app_id,
+                    site,
+                    project,
+                    send_model,
+                    json,
+                } => {
+                    std::process::exit(
+                        voiceless::mode_cmd::preview(
+                            cli.config.as_deref(),
+                            voiceless::mode_cmd::PreviewArgs {
+                                text,
+                                mode,
+                                app_id,
+                                site,
+                                project,
+                                send_model,
+                                json,
+                            },
+                        )
+                        .await,
+                    );
+                }
+                ModeAction::Mcp => {
+                    std::process::exit(exit_with_result(
+                        voiceless::mode_cmd::serve_mcp(cli.config.as_deref()).await,
+                    ));
+                }
             };
             voiceless::mode_cmd::run(
                 action,
@@ -440,7 +584,7 @@ async fn main() {
                 HistoryAction::Usage => "usage",
                 HistoryAction::Serve => unreachable!("handled above"),
             };
-            voiceless::history_cmd::run(
+            voiceless::history_cmd::run_with(
                 action,
                 voiceless::history_cmd::HistoryArgs {
                     ids: args.ids,
@@ -450,13 +594,32 @@ async fn main() {
                     destination: args.destination,
                     days: args.days,
                 },
+                voiceless::history_cmd::HistoryFlags {
+                    search: args.search,
+                    from: args.from,
+                    to: args.to,
+                    mode: args.mode,
+                    app: args.app,
+                    model: args.model,
+                    audio: args.audio,
+                },
             )
         }
         Command::Web(args) => exit_with_result(run_web(cli.config, args).await),
+        #[cfg(target_os = "linux")]
         Command::Install(args) => {
             exit_with_result(voiceless::update::install(&args.archive, &args.sha256))
         }
-        Command::Update(args) => exit_with_result(voiceless::update::update(args.rollback)),
+        #[cfg(target_os = "linux")]
+        Command::Update(args) => exit_with_result(
+            voiceless::update::run(voiceless::update::Update {
+                rollback: args.rollback,
+                snapshot: args.snapshot,
+                list: args.list,
+                restore: args.restore,
+            })
+            .await,
+        ),
         Command::Doctor => {
             println!("Voiceless doctor");
             // The fcitx5 bridge check uses zbus::blocking, whose block_on
@@ -480,6 +643,9 @@ async fn main() {
             // Optional tools that are missing still pass; see `Check::pass`.
             i32::from(!all_ok)
         }
+        Command::Config(args) => match args.action {
+            ConfigAction::Patch => exit_with_result(patch_config(cli.config)),
+        },
         Command::Ctl(args) => {
             use voiceless::ctl::CtlAction;
             voiceless::ctl::run(match args.action {
@@ -487,8 +653,11 @@ async fn main() {
                 CtlCommand::Start { mode } => CtlAction::Start(mode),
                 CtlCommand::Stop => CtlAction::Stop,
                 CtlCommand::Cancel => CtlAction::Cancel,
+                CtlCommand::Repaste => CtlAction::Repaste,
                 CtlCommand::Status => CtlAction::Status,
                 CtlCommand::Watch => CtlAction::Watch,
+                CtlCommand::Pause => CtlAction::Pause,
+                CtlCommand::Resume => CtlAction::Resume,
             })
             .await
         }
@@ -499,6 +668,7 @@ async fn main() {
                 json: false,
                 inject: !args.no_inject,
                 mode: args.mode,
+                context: Default::default(),
             };
             match voiceless::daemon::serve(options).await {
                 Ok(()) => 0,
@@ -520,15 +690,21 @@ async fn main() {
                 voiceless::benchmark_cmd::run_asr(bench_args).await
             }
             BenchmarkAction::Latency {
+                backend,
+                mode,
                 trials,
                 inject,
                 enforce,
             } => {
-                let mut latency_args = voiceless::latency_cmd::LatencyBenchmarkArgs::new();
-                latency_args.trials = trials;
-                latency_args.inject = inject;
-                latency_args.enforce = enforce;
-                voiceless::latency_cmd::run_latency(latency_args).await
+                voiceless::latency_cmd::run_latency(voiceless::latency_cmd::LatencyBenchmarkArgs {
+                    backend,
+                    mode,
+                    trials,
+                    inject,
+                    enforce,
+                    ..Default::default()
+                })
+                .await
             }
         },
     };
@@ -546,6 +722,18 @@ fn exit_with_result(result: Result<(), String>) -> i32 {
     }
 }
 
+fn patch_config(path: Option<PathBuf>) -> Result<(), String> {
+    let path = path.unwrap_or_else(voiceless::config::default_config_path);
+    let body = serde_json::from_reader(std::io::stdin().lock()).map_err(|error| {
+        format!(
+            "invalid JSON settings patch at line {}, column {}",
+            error.line(),
+            error.column()
+        )
+    })?;
+    voiceless::config::patch(&path, &body)
+}
+
 async fn run_web(config_path: Option<PathBuf>, args: WebArgs) -> Result<(), String> {
     use voiceless::config::{default_config_path, AppConfig};
 
@@ -560,22 +748,6 @@ async fn run_web(config_path: Option<PathBuf>, args: WebArgs) -> Result<(), Stri
     .await
 }
 
-/// Whether `stream` would load the local model that a running daemon already
-/// holds; such sessions run in the daemon instead (see `ctl::stream_via_daemon`).
-/// An explicit `--config` or `--backend` asks for something the daemon's own
-/// configuration may not be, so those always run standalone.
-fn uses_local_model(config: &Option<PathBuf>, args: &StreamArgs) -> bool {
-    if config.is_some() || args.backend.is_some() {
-        return false;
-    }
-    voiceless::config::AppConfig::load_optional(None).is_ok_and(|config| {
-        matches!(
-            config.asr.streaming_backend.as_str(),
-            "local-offline" | "local-streaming"
-        )
-    })
-}
-
 /// Run `stream` in this process (SIGINT/SIGTERM control) and map a setup
 /// error to exit code 1 after printing it.
 async fn run_stream(config_path: Option<PathBuf>, args: StreamArgs) -> i32 {
@@ -585,6 +757,10 @@ async fn run_stream(config_path: Option<PathBuf>, args: StreamArgs) -> i32 {
         json: args.json,
         inject: !args.no_inject,
         mode: args.mode,
+        context: voiceless::stream::DictationContext {
+            site: args.site,
+            project: args.project,
+        },
     })
     .await
     {

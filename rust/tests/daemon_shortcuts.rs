@@ -38,8 +38,11 @@ struct FixtureRunner {
 impl SessionRunner for FixtureRunner {
     fn start(
         &mut self,
+        _session_id: u64,
         _mode: &str,
         _inject: Option<bool>,
+        _purpose: voiceless::daemon::SessionPurpose,
+        _context: voiceless::stream::DictationContext,
         control: mpsc::Receiver<ControlCommand>,
     ) -> Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> {
         self.sessions_started += 1;
@@ -311,4 +314,32 @@ fn hotkey_and_audio_config_are_validated() {
     assert!(config.audio.pause_media);
     assert!(!config.audio.cues);
     assert!(AppConfig::from_toml("[hotkey]\nkey = \"KEY_NOPE\"\n").is_err());
+}
+
+#[test]
+fn shortcut_conflicts_are_rejected_only_when_chords_overlap() {
+    use voiceless::config::AppConfig;
+
+    let legacy_conflict =
+        AppConfig::from_toml("[hotkey]\nkey = 'KEY_SCROLLLOCK'\nraw_key = 'Ctrl+KEY_SCROLLLOCK'\n")
+            .unwrap_err();
+    assert!(legacy_conflict
+        .to_string()
+        .contains("hotkey.raw_key conflicts with hotkey.key"));
+
+    let same_chord = AppConfig::from_toml(
+        "[hotkey]\nhold_key = 'Ctrl+Shift+KEY_F6'\ntoggle_key = 'Shift+Ctrl+KEY_F6'\n",
+    )
+    .unwrap_err();
+    assert!(same_chord
+        .to_string()
+        .contains("hotkey.toggle_key conflicts with hotkey.hold_key"));
+
+    let distinct_chords =
+        AppConfig::from_toml("[hotkey]\nhold_key = 'Ctrl+KEY_F6'\ntoggle_key = 'Shift+KEY_F6'\n")
+            .unwrap();
+    assert_eq!(
+        distinct_chords.hotkey.toggle_key.as_deref(),
+        Some("Shift+KEY_F6")
+    );
 }

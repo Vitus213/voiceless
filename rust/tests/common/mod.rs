@@ -42,6 +42,7 @@ pub fn ok_fake_injection() -> InjectionResult {
     InjectionResult {
         ok: true,
         method: "fake".to_owned(),
+        delivery: voiceless::coordinator::Delivery::Unconfirmed,
         message: String::new(),
     }
 }
@@ -69,6 +70,8 @@ pub struct FakeCapture {
     pub tail: Option<Vec<u8>>,
     /// Return `Ok(None)` once `chunks` is exhausted instead of pending.
     pub eof_on_empty: bool,
+    /// Report a read error once the queued chunks are exhausted.
+    pub end_error: Option<String>,
     /// Make `start` fail with this message (simulates a missing device).
     pub start_error: Option<String>,
     /// Make `stop_capture` fail with this message.
@@ -85,6 +88,7 @@ impl FakeCapture {
             chunks: chunks.into(),
             tail,
             eof_on_empty: false,
+            end_error: None,
             start_error: None,
             stop_error: None,
             chunk_interval: Duration::ZERO,
@@ -111,6 +115,9 @@ impl AudioCapture for FakeCapture {
                 .push(format!("capture.chunk:{}", chunk.len()));
             return Ok(Some(chunk));
         }
+        if let Some(error) = self.end_error.take() {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, error));
+        }
         if self.eof_on_empty {
             return Ok(None);
         }
@@ -126,7 +133,7 @@ impl AudioCapture for FakeCapture {
         Ok(self.tail.take())
     }
 
-    fn abort(&mut self) {
+    async fn abort(&mut self) {
         self.log.lock().push("capture.abort".to_owned());
     }
 }
@@ -302,6 +309,11 @@ impl TextInjector for RecordingInjector {
             ok: self.result_ok,
             method: "fake".to_owned(),
             message: String::new(),
+            delivery: if self.result_ok {
+                voiceless::coordinator::Delivery::Unconfirmed
+            } else {
+                voiceless::coordinator::Delivery::NotDelivered
+            },
         }
     }
 }

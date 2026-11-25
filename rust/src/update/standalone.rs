@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{symlink, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -14,6 +14,12 @@ use semver::Version;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
+
+use super::{
+    at, check_owner_and_mode, copy_and_hash, create_directories, create_file,
+    create_private_directory, data, effective_uid, exists, owned_directory, parent, parse_json,
+    sync_directory, valid_digest,
+};
 
 const REPOSITORY: &str = "Vitus213/voiceless";
 const COMMAND: &str = "bin/voiceless";
@@ -98,14 +104,14 @@ impl InstallPaths {
 
 // Each activation owns the rollback record and the link to its active payload.
 // Renaming `current` commits both changes with one filesystem operation.
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Activation {
     current: PinnedRelease,
     previous: Option<PinnedRelease>,
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PinnedRelease {
     version: String,
@@ -141,7 +147,11 @@ struct Candidate {
     release: PinnedRelease,
 }
 
-pub(super) fn install(archive: &Path, sha256: &str) -> Result<(), String> {
+pub(super) fn install(
+    archive: &Path,
+    sha256: &str,
+    before_switch: super::BeforeSwitch<'_>,
+) -> Result<(), String> {
     let paths = InstallPaths::from_environment()?;
     let digest = sha256.to_ascii_lowercase();
     if !valid_digest(&digest) {
@@ -166,6 +176,7 @@ pub(super) fn install(archive: &Path, sha256: &str) -> Result<(), String> {
         &digest,
         env::var_os("PATH").as_deref(),
         super::verify_executable,
+        before_switch,
     )
 }
 
@@ -195,16 +206,68 @@ fn owns_at(paths: &InstallPaths, executable: &Path, version: &Version) -> Result
     Ok(true)
 }
 
-pub(super) fn update(executable: &Path, rollback: bool) -> Result<(), String> {
+/// Update the standalone installation that owns `executable`, or roll it
+/// back; the report says which version the command runs now.
+pub(super) fn update(
+    executable: &Path,
+    rollback: bool,
+    before_switch: super::BeforeSwitch<'_>,
+) -> Result<super::Outcome, String> {
     let paths = InstallPaths::from_environment()?.canonical()?;
-    update_at(
+    let running_version = super::version();
+    let switched = update_at(
         &paths,
         executable,
-        &super::version(),
+        &running_version,
         rollback,
         super::verify_executable,
         |paths, version| fetch_candidate(paths, version, super::verify_executable),
-    )
+        before_switch,
+    )?;
+    let active = &switched.active.current.version;
+    let left = match (&switched.active.previous, switched.switched) {
+        (Some(release), true) => Some(release.version()?),
+        _ => None,
+    };
+    let lines = if switched.switched {
+        let left = left
+            .as_ref()
+            .expect("a switch leaves the release it replaces");
+        vec![
+            format!(
+                "Standalone Voiceless {active} is active at {}.",
+                paths.command.display()
+            ),
+            format!(
+                "Installed: Voiceless {active} (was {left}); target: the {} standalone release.",
+                if rollback { "previous" } else { "latest" }
+            ),
+        ]
+    } else {
+        vec![
+            format!("Standalone Voiceless {running_version} is already up to date."),
+            format!(
+                "Installed: Voiceless {running_version}; target: {running_version} (the latest stable release)."
+            ),
+        ]
+    };
+    Ok(super::Outcome {
+        lines,
+        installed: switched.active.current.version()?,
+        previous: left,
+        command: paths.command.canonicalize().ok(),
+        immutable: vec![paths.root.join("payloads")],
+        snapshot: switched.snapshot,
+    })
+}
+
+/// What `update_at` left: the activation in force and, when the command
+/// changed, the snapshot taken just before.
+#[derive(Debug)]
+struct Switched {
+    active: Activation,
+    switched: bool,
+    snapshot: Option<data::Saved>,
 }
 
 fn install_at(
@@ -213,6 +276,7 @@ fn install_at(
     digest: &str,
     search_path: Option<&OsStr>,
     verify: VerifyExecutable,
+    before_switch: super::BeforeSwitch<'_>,
 ) -> Result<(), String> {
     supported_target()?;
     let paths = paths.create()?;
@@ -247,7 +311,8 @@ fn install_at(
             if !has_command {
                 return Err("standalone installation is missing its stable command link; retry with the active archive".into());
             }
-            if active.previous.as_ref() != Some(&candidate.release) {
+            let rollback = active.previous.as_ref() == Some(&candidate.release);
+            if !rollback {
                 if version.cmp_precedence(&active.current.version()?) != Ordering::Greater {
                     return Err(format!(
                         "standalone {} is already active; release {version} cannot replace it",
@@ -257,6 +322,19 @@ fn install_at(
                 validate_payload(&paths.payload(&active.current), &active.current)?;
             }
             let current = retain_candidate(&paths, candidate, verify)?;
+            // The data as the release being left wrote it, before the command changes.
+            if let Some(saved) = before_switch(data::Request {
+                reason: if rollback {
+                    data::Reason::Rollback
+                } else {
+                    data::Reason::Upgrade
+                },
+                channel: "standalone",
+                from: active.current.version()?,
+                to: Some(version.clone()),
+            })? {
+                println!("{saved}");
+            }
             let next = Activation {
                 current,
                 previous: Some(active.current),
@@ -301,34 +379,49 @@ fn update_at(
     rollback: bool,
     verify: VerifyExecutable,
     fetch: impl FnOnce(&InstallPaths, &Version) -> Result<Option<Candidate>, String>,
-) -> Result<(), String> {
+    before_switch: super::BeforeSwitch<'_>,
+) -> Result<Switched, String> {
     let _lock = lock(&paths.root)?;
     let active = check_active_run(paths, executable, running_version)?;
     validate_payload(&paths.payload(&active.current), &active.current)?;
     let current = if rollback {
         let previous = active
             .previous
+            .clone()
             .ok_or("no previous standalone release is available")?;
         validate_pinned(paths, &previous, verify)?;
         previous
     } else {
         let Some(candidate) = fetch(paths, running_version)? else {
-            println!("Standalone Voiceless {running_version} is already up to date.");
-            return Ok(());
+            return Ok(Switched {
+                active,
+                switched: false,
+                snapshot: None,
+            });
         };
         retain_candidate(paths, candidate, verify)?
     };
+    // The data as the release being left wrote it, saved before the command changes.
+    let snapshot = before_switch(data::Request {
+        reason: if rollback {
+            data::Reason::Rollback
+        } else {
+            data::Reason::Upgrade
+        },
+        channel: "standalone",
+        from: running_version.clone(),
+        to: Some(current.version()?),
+    })?;
     let next = Activation {
         current,
         previous: Some(active.current),
     };
     activate(paths, &next)?;
-    println!(
-        "Standalone Voiceless {} is active at {}.",
-        next.current.version,
-        paths.command.display()
-    );
-    Ok(())
+    Ok(Switched {
+        active: next,
+        switched: true,
+        snapshot,
+    })
 }
 
 fn check_active_run(
@@ -962,31 +1055,6 @@ fn supported_target() -> Result<String, String> {
     }
 }
 
-fn valid_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn copy_and_hash(mut source: impl Read, mut output: impl Write) -> io::Result<(u64, String)> {
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65536];
-    let mut size = 0;
-    loop {
-        let count = match source.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        output.write_all(&buffer[..count])?;
-        hash.update(&buffer[..count]);
-        size += count as u64;
-    }
-    Ok((size, format!("{:x}", hash.finalize())))
-}
-
 fn lock(directory: &Path) -> Result<File, String> {
     let path = directory.join(".lock");
     let file = at(
@@ -1010,30 +1078,6 @@ fn lock(directory: &Path) -> Result<File, String> {
             return Err(format!("locking {}: {error}", path.display()));
         }
     }
-}
-
-fn effective_uid() -> u32 {
-    // geteuid has no arguments and does not mutate process state.
-    unsafe { libc::geteuid() }
-}
-
-fn check_owner_and_mode(path: &Path, meta: &fs::Metadata, private: bool) -> Result<(), String> {
-    let forbidden = if private { 0o7077 } else { 0o7022 };
-    if meta.uid() != effective_uid() || meta.mode() & forbidden != 0 {
-        return Err(format!(
-            "unsafe owner or permissions for {}",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-fn owned_directory(path: &Path, private: bool) -> Result<(), String> {
-    let meta = at(path, fs::symlink_metadata(path))?;
-    if !meta.is_dir() {
-        return Err(format!("{} is not a standalone directory", path.display()));
-    }
-    check_owner_and_mode(path, &meta, private)
 }
 
 fn owned_link(path: &Path) -> Result<(), String> {
@@ -1073,53 +1117,6 @@ fn open_read(path: &Path) -> Result<File, String> {
     Ok(file)
 }
 
-fn create_file(path: &Path, mode: u32) -> Result<File, String> {
-    at(
-        path,
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(path),
-    )
-}
-
-fn exists(path: &Path) -> Result<bool, String> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("{}: {error}", path.display())),
-    }
-}
-
-fn create_private_directory(path: &Path) -> Result<(), String> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => sync_directory(parent(path)),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => owned_directory(path, true),
-        Err(error) => Err(format!("creating {}: {error}", path.display())),
-    }
-}
-
-fn create_directories(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
-        create_directories(parent(path))?;
-        match fs::DirBuilder::new().mode(0o755).create(path) {
-            Ok(()) => sync_directory(parent(path))?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {}
-            Err(error) => return Err(format!("creating {}: {error}", path.display())),
-        }
-    }
-    Ok(())
-}
-
-fn sync_directory(path: &Path) -> Result<(), String> {
-    at(path, File::open(path).and_then(|file| file.sync_all()))
-}
-
-fn parent(path: &Path) -> &Path {
-    path.parent().expect("standalone path has a parent")
-}
-
 fn bounded_bytes(source: impl Read, limit: u64) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     source.take(limit + 1).read_to_end(&mut bytes)?;
@@ -1136,16 +1133,8 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     at(path, bounded_bytes(open_read(path)?, limit))
 }
 
-fn parse_json<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, String> {
-    serde_json::from_slice(bytes).map_err(|error| format!("invalid {label}: {error}"))
-}
-
 fn json_from_path<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T, String> {
     parse_json(&read_bounded(path, limit)?, &path.display().to_string())
-}
-
-fn at<T>(path: &Path, result: io::Result<T>) -> Result<T, String> {
-    result.map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn private_tempdir(root: &Path, prefix: &str) -> Result<TempDir, String> {
@@ -1216,14 +1205,64 @@ mod tests {
     }
 
     fn install_fixture(paths: &InstallPaths, bytes: &[u8]) {
-        install_at(paths, bytes, &digest(bytes), None, verify_stub).unwrap();
+        install_at(
+            paths,
+            bytes,
+            &digest(bytes),
+            None,
+            verify_stub,
+            &no_snapshot,
+        )
+        .unwrap();
     }
 
-    fn offline_rollback(paths: &InstallPaths, version: Version) -> Result<(), String> {
+    /// No data to save, as on a machine that has not used Voiceless yet.
+    fn no_snapshot(_: data::Request) -> Result<Option<data::Saved>, String> {
+        Ok(None)
+    }
+
+    fn refuse_snapshot(_: data::Request) -> Result<Option<data::Saved>, String> {
+        panic!("nothing is switched, so no snapshot is taken")
+    }
+
+    fn offline_rollback(paths: &InstallPaths, version: Version) -> Result<Switched, String> {
         let executable = paths.command.canonicalize().unwrap();
-        update_at(paths, &executable, &version, true, verify_stub, |_, _| {
-            panic!("offline rollback attempted to fetch a release")
-        })
+        update_at(
+            paths,
+            &executable,
+            &version,
+            true,
+            verify_stub,
+            |_, _| panic!("offline rollback attempted to fetch a release"),
+            &no_snapshot,
+        )
+    }
+
+    /// Install 1.1.0 over the active 1.0.0 without a snapshot, as an update
+    /// from before them did.
+    fn upgrade_without_snapshot(paths: &InstallPaths, executable: &Path, next: &[u8]) -> Version {
+        let next_version = Version::new(1, 1, 0);
+        update_at(
+            paths,
+            executable,
+            &Version::new(1, 0, 0),
+            false,
+            verify_stub,
+            |paths, _| {
+                stage_candidate(
+                    paths,
+                    next,
+                    Some(next.len() as u64),
+                    &digest(next),
+                    Some(&next_version),
+                    verify_stub,
+                )
+                .map(Some)
+            },
+            &no_snapshot,
+        )
+        .unwrap();
+        next_version
     }
 
     #[test]
@@ -1235,11 +1274,25 @@ mod tests {
         let active = paths.command.canonicalize().unwrap();
 
         let bad = archive("1.1.0", b"expected library", b"corrupt library");
-        let incorrect_sha =
-            install_at(&paths, bad.as_slice(), &digest(&initial), None, verify_stub).unwrap_err();
+        let incorrect_sha = install_at(
+            &paths,
+            bad.as_slice(),
+            &digest(&initial),
+            None,
+            verify_stub,
+            &refuse_snapshot,
+        )
+        .unwrap_err();
         assert!(incorrect_sha.contains("archive SHA-256 mismatch"));
-        let incorrect_library =
-            install_at(&paths, bad.as_slice(), &digest(&bad), None, verify_stub).unwrap_err();
+        let incorrect_library = install_at(
+            &paths,
+            bad.as_slice(),
+            &digest(&bad),
+            None,
+            verify_stub,
+            &refuse_snapshot,
+        )
+        .unwrap_err();
         assert!(incorrect_library.contains("release file SHA-256 mismatch for lib/libfixture.so"));
 
         let good = archive("1.1.0", b"next library", b"next library");
@@ -1251,6 +1304,7 @@ mod tests {
             &digest(&trailing_bytes),
             None,
             verify_stub,
+            &refuse_snapshot,
         )
         .unwrap_err();
         assert!(error.contains("unexpected data after release gzip stream"));
@@ -1291,6 +1345,7 @@ mod tests {
                 )
                 .map(Some)
             },
+            &no_snapshot,
         )
         .unwrap();
         let second = paths.command.canonicalize().unwrap();
@@ -1303,8 +1358,10 @@ mod tests {
         assert_eq!(paths.command.canonicalize().unwrap(), second);
 
         fs::write(&rollback_library, b"first library").unwrap();
-        offline_rollback(&paths, next_version).unwrap();
+        let rolled_back = offline_rollback(&paths, next_version).unwrap();
         assert_eq!(paths.command.canonicalize().unwrap(), first);
+        assert!(rolled_back.switched);
+        assert_eq!(rolled_back.active.current.version, "1.0.0");
         assert_eq!(
             read_activation(&paths).unwrap().previous.unwrap().version,
             "1.1.0"
@@ -1327,7 +1384,15 @@ mod tests {
         assert!(paths.command.canonicalize().is_err());
 
         let older = archive("0.9.0", b"older library", b"older library");
-        assert!(install_at(&paths, older.as_slice(), &digest(&older), None, verify_stub).is_err());
+        let refused = install_at(
+            &paths,
+            older.as_slice(),
+            &digest(&older),
+            None,
+            verify_stub,
+            &refuse_snapshot,
+        );
+        assert!(refused.is_err());
         install_fixture(&paths, &initial);
         assert_eq!(paths.command.canonicalize().unwrap(), first);
     }
@@ -1344,8 +1409,197 @@ mod tests {
         install_fixture(&paths, &initial);
         let active = paths.command.canonicalize().unwrap();
         assert!(owns_at(&paths, &active, &version).unwrap());
-        fs::remove_file(&paths.root.join("current")).unwrap();
+        fs::remove_file(paths.root.join("current")).unwrap();
         assert!(owns_at(&paths, &active, &version).is_err());
         assert!(!owns_at(&paths, &foreign, &version).unwrap());
+    }
+
+    #[test]
+    fn an_upgrade_snapshots_the_data_before_the_command_changes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let paths = paths(&scratch);
+        let initial = archive("1.0.0", b"first library", b"first library");
+        install_fixture(&paths, &initial);
+        let paths = paths.canonical().unwrap();
+        let first = paths.command.canonicalize().unwrap();
+        let initial_version = Version::new(1, 0, 0);
+        let next_version = Version::new(1, 1, 0);
+        let next = archive("1.1.0", b"next library", b"next library");
+        let requests = std::cell::RefCell::new(Vec::new());
+
+        let switched = update_at(
+            &paths,
+            &first,
+            &initial_version,
+            false,
+            verify_stub,
+            |paths, running| {
+                assert_eq!(running, &initial_version);
+                stage_candidate(
+                    paths,
+                    next.as_slice(),
+                    Some(next.len() as u64),
+                    &digest(&next),
+                    Some(&next_version),
+                    verify_stub,
+                )
+                .map(Some)
+            },
+            &|request| {
+                // The candidate is verified and retained; the command still leads to 1.0.0.
+                let payloads = fs::read_dir(paths.root.join("payloads")).unwrap().count();
+                assert_eq!(payloads, 2);
+                assert_eq!(paths.command.canonicalize().unwrap(), first);
+                requests.borrow_mut().push(request);
+                Ok(None)
+            },
+        )
+        .unwrap();
+        let requests = requests.into_inner();
+
+        assert!(switched.switched);
+        assert!(switched.snapshot.is_none());
+        let command = paths.command.canonicalize().unwrap();
+        assert_eq!(
+            command.parent().unwrap().parent().unwrap(),
+            paths.payload(&read_activation(&paths).unwrap().current)
+        );
+        let request = &requests[0];
+        assert_eq!(requests.len(), 1);
+        assert_eq!(request.reason, data::Reason::Upgrade);
+        assert_eq!(request.channel, "standalone");
+        assert_eq!(request.from, initial_version);
+        assert_eq!(request.to, Some(next_version));
+    }
+
+    #[test]
+    fn a_rollback_snapshots_the_data_of_the_version_it_leaves() {
+        let scratch = tempfile::tempdir().unwrap();
+        let paths = paths(&scratch);
+        let initial = archive("1.0.0", b"first library", b"first library");
+        install_fixture(&paths, &initial);
+        let paths = paths.canonical().unwrap();
+        let first = paths.command.canonicalize().unwrap();
+        let next = archive("1.1.0", b"next library", b"next library");
+        let next_version = upgrade_without_snapshot(&paths, &first, &next);
+        let second = paths.command.canonicalize().unwrap();
+        let requests = std::cell::RefCell::new(Vec::new());
+
+        update_at(
+            &paths,
+            &second,
+            &next_version,
+            true,
+            verify_stub,
+            |_, _| panic!("a rollback fetches nothing"),
+            &|request| {
+                // Still on the release the user is leaving.
+                assert_eq!(paths.command.canonicalize().unwrap(), second);
+                requests.borrow_mut().push(request);
+                Ok(None)
+            },
+        )
+        .unwrap();
+        let requests = requests.into_inner();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].reason, data::Reason::Rollback);
+        assert_eq!(requests[0].from, next_version);
+        assert_eq!(requests[0].to, Some(Version::new(1, 0, 0)));
+        assert_eq!(paths.command.canonicalize().unwrap(), first);
+    }
+
+    #[test]
+    fn a_failing_snapshot_keeps_the_command_on_its_release() {
+        let scratch = tempfile::tempdir().unwrap();
+        let paths = paths(&scratch);
+        let initial = archive("1.0.0", b"first library", b"first library");
+        install_fixture(&paths, &initial);
+        let paths = paths.canonical().unwrap();
+        let first = paths.command.canonicalize().unwrap();
+        let next_version = Version::new(1, 1, 0);
+        let next = archive("1.1.0", b"next library", b"next library");
+
+        let error = update_at(
+            &paths,
+            &first,
+            &Version::new(1, 0, 0),
+            false,
+            verify_stub,
+            |paths, _| {
+                stage_candidate(
+                    paths,
+                    next.as_slice(),
+                    Some(next.len() as u64),
+                    &digest(&next),
+                    Some(&next_version),
+                    verify_stub,
+                )
+                .map(Some)
+            },
+            &|_| Err("no space left for the snapshot".to_owned()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("no space left for the snapshot"), "{error}");
+        assert_eq!(paths.command.canonicalize().unwrap(), first);
+        assert!(read_activation(&paths).unwrap().previous.is_none());
+    }
+
+    #[test]
+    fn a_current_release_is_not_snapshotted() {
+        let scratch = tempfile::tempdir().unwrap();
+        let paths = paths(&scratch);
+        let initial = archive("1.0.0", b"first library", b"first library");
+        install_fixture(&paths, &initial);
+        let paths = paths.canonical().unwrap();
+        let first = paths.command.canonicalize().unwrap();
+
+        let switched = update_at(
+            &paths,
+            &first,
+            &Version::new(1, 0, 0),
+            false,
+            verify_stub,
+            |_, _| Ok(None),
+            &refuse_snapshot,
+        )
+        .unwrap();
+
+        assert!(!switched.switched);
+        assert_eq!(switched.active.current.version, "1.0.0");
+        assert_eq!(paths.command.canonicalize().unwrap(), first);
+    }
+
+    #[test]
+    fn installing_a_newer_release_over_an_activation_snapshots_first() {
+        let scratch = tempfile::tempdir().unwrap();
+        let paths = paths(&scratch);
+        let initial = archive("1.0.0", b"first library", b"first library");
+        install_fixture(&paths, &initial);
+        let first = paths.command.canonicalize().unwrap();
+        let next = archive("1.1.0", b"next library", b"next library");
+        let requests = std::cell::RefCell::new(Vec::new());
+
+        install_at(
+            &paths,
+            next.as_slice(),
+            &digest(&next),
+            None,
+            verify_stub,
+            &|request| {
+                assert_eq!(paths.command.canonicalize().unwrap(), first);
+                requests.borrow_mut().push(request);
+                Ok(None)
+            },
+        )
+        .unwrap();
+        let requests = requests.into_inner();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].reason, data::Reason::Upgrade);
+        assert_eq!(requests[0].from, Version::new(1, 0, 0));
+        assert_eq!(requests[0].to, Some(Version::new(1, 1, 0)));
+        assert_ne!(paths.command.canonicalize().unwrap(), first);
     }
 }

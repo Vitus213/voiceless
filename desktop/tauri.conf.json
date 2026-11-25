@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Voiceless",
+  "version": "0.2.0",
+  "identifier": "dev.voiceless.Desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage"],
+    "publisher": "Vitus213 <Vitus213@users.noreply.github.com>",
+    "homepage": "https://github.com/Vitus213/voiceless",
+    "category": "Utility",
+    "shortDescription": "Voiceless desktop window and tray over the running daemon",
+    "longDescription": "One window over the console the Voiceless daemon serves, and a tray\nwhere the desktop has one. The matching voiceless command, daemon and web\nconsole are installed with it.",
+    "icon": ["icons/32x32.png", "icons/128x128.png"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "pipewire-bin",
+          "pipewire-bin (>= 1.0.5) | gstreamer1.0-tools",
+          "pipewire-bin (>= 1.0.5) | gstreamer1.0-pipewire",
+          "wtype",
+          "wl-clipboard",
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1 | libappindicator3-1"
+        ],
+        "desktopTemplate": "packaging/voiceless-desktop.desktop",
+        "section": "utils",
+        "priority": "optional",
+        "changelog": "../CHANGELOG.md"
+      }
+    }
+  }
+}

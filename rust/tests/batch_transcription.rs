@@ -8,6 +8,7 @@
 mod common;
 
 use std::io::Write;
+use std::process::Command;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -39,6 +40,30 @@ fn write_wav(path: &std::path::Path, samples: &[i16]) {
     file.write_all(b"data").unwrap();
     file.write_all(&data_len.to_le_bytes()).unwrap();
     file.write_all(&data_bytes).unwrap();
+}
+
+#[test]
+fn unsupported_batch_override_fails_before_recording_or_wav_io() {
+    let root = tempdir().expect("temporary root");
+    let missing_wav = root.path().join("missing.wav");
+    for args in [
+        vec!["transcribe", missing_wav.to_str().unwrap()],
+        vec!["record", "--seconds", "0.1", "--no-inject"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_voiceless"))
+            .args(args)
+            .args(["--backend", "hybrid"])
+            .env("XDG_CONFIG_HOME", root.path())
+            .env("PATH", root.path())
+            .output()
+            .expect("run batch command");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            error.contains("hybrid") && error.contains("cloud or local"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -250,65 +275,61 @@ fn empty_content_array_maps_to_empty_text() {
     assert_eq!(client.transcribe_wav_bytes(b"x").expect("silent"), "");
 }
 
-// A concurrent spawn can inherit the other fixture's writable descriptor
-// until exec closes it, briefly making that script unexecutable on Linux.
-static RECORDER_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
-
-/// Writes an executable shell script and returns its path.
-fn fake_recorder(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+/// Keep a partial chunk across the timer and append PCM flushed on SIGINT.
+#[cfg(target_os = "linux")]
+#[test]
+fn timed_recorder_preserves_samples_and_reports_early_exit() {
     use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-pw-record");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
-
-/// `record_seconds_with` stops the recorder after the requested time: the
-/// fake runs until SIGINT, then writes the destination (its last argument)
-/// and exits 0, like pw-cat finalizing the WAV. The call returns close to
-/// the requested length instead of waiting for the recorder to end itself.
-#[test]
-fn record_seconds_interrupts_the_recorder_after_the_requested_time() {
-    use voiceless::batch::record_seconds_with;
-    let _fixture = RECORDER_FIXTURE_LOCK.lock();
-
+    if let Some(destination) = std::env::var_os("VOICELESS_TEST_CAPTURE_WAV") {
+        let result = voiceless::batch::record_seconds(0.3, destination.as_ref());
+        if std::env::var_os("VOICELESS_TEST_RECORDER_EXIT").is_some() {
+            assert!(result.unwrap_err().to_string().contains("recorder"));
+        } else {
+            result.unwrap();
+        }
+        return;
+    }
     let dir = tempdir().unwrap();
-    let recorder = fake_recorder(
-        dir.path(),
-        "#!/bin/sh\nfor arg; do dest=\"$arg\"; done\ntrap 'printf RIFF > \"$dest\"; exit 0' INT\nwhile :; do sleep 0.02; done\n",
-    );
+    // The stand-in answers `--help` as `pw-record` does on Ubuntu 24.04,
+    // which is how the recorder tells it can be talked to. The graph is
+    // never read for the system default's stream; a read would fail loudly.
+    for (name, script) in [
+        (
+            "pw-record",
+            "#!/bin/sh\ncase \"$1\" in --help) echo '  -P  --properties   Set node properties'; exit 0;; esac\n\
+             [ -z \"$VOICELESS_TEST_RECORDER_EXIT\" ] || exit 3\ntrap 'printf BC; exit 0' INT\n\
+             printf '\\001\\002'\nwhile :; do sleep 0.01; done",
+        ),
+        ("pw-dump", "#!/bin/sh\necho 'no graph in this test' >&2\nexit 1\n"),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let destination = dir.path().join("take.wav");
-
-    let started = std::time::Instant::now();
-    record_seconds_with(recorder.to_str().unwrap(), 0.3, &destination).unwrap();
-    let elapsed = started.elapsed();
-
-    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "the recorder was not interrupted: {elapsed:?}"
-    );
-    assert_eq!(std::fs::read(&destination).unwrap(), b"RIFF");
-}
-
-/// A recorder that exits on its own before the timer (no device, bad
-/// destination) is reported immediately with its exit status.
-#[test]
-fn record_seconds_reports_a_recorder_that_exits_early() {
-    use voiceless::batch::record_seconds_with;
-    let _fixture = RECORDER_FIXTURE_LOCK.lock();
-
-    let dir = tempdir().unwrap();
-    let recorder = fake_recorder(dir.path(), "#!/bin/sh\nexit 3\n");
-    let started = std::time::Instant::now();
-    let error = record_seconds_with(recorder.to_str().unwrap(), 5.0, &dir.path().join("x.wav"))
-        .unwrap_err();
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "must not wait out the timer"
-    );
-    assert!(
-        matches!(error, BatchError::Local(ref message) if message.contains("exited")),
-        "{error:?}"
-    );
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "timed_recorder_preserves_samples_and_reports_early_exit",
+        ])
+        .env("VOICELESS_TEST_CAPTURE_WAV", &destination)
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("XDG_DATA_HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(dir.path().to_owned())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        );
+    assert!(command.status().unwrap().success());
+    assert_eq!(load_wav_pcm16(&destination).unwrap(), [1, 2, b'B', b'C']);
+    assert!(command
+        .env("VOICELESS_TEST_RECORDER_EXIT", "1")
+        .status()
+        .unwrap()
+        .success());
 }

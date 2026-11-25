@@ -33,6 +33,9 @@ use regex::Regex;
 
 use crate::config::TextConfig;
 
+pub(crate) mod vocabulary;
+pub use vocabulary::{ScopedVocabulary, Terms};
+
 /// Compiled `[text]` rules; built once per session. Immutable afterwards
 /// and shareable across threads. Construction fails only for a `text.rules`
 /// pattern that does not compile.
@@ -131,32 +134,53 @@ impl TextCleaner {
     /// the final transcript only.
     pub fn clean(&self, text: &str) -> String {
         let mut text = text.to_owned();
-        if self.remove_fillers {
-            text = self.filler.replace_all(&text, "").into_owned();
-            // `$1` keeps the anchor (start of text or the punctuation before
-            // 嗯); the mark after 嗯 goes with it, e.g. "嗯，好的" -> "好的".
-            text = self.lone_filler.replace_all(&text, "$1").into_owned();
-            text = tidy_punctuation(&text);
+        for &step in crate::output::CLEANUP {
+            self.apply(step, &mut text);
         }
-        text = self.correct_hotwords(&text);
-        for (from, to) in &self.replacements {
-            // `str::replace` with an empty needle would insert `to` between
-            // every character.
-            if !from.is_empty() {
-                text = text.replace(from.as_str(), to);
+        text
+    }
+
+    pub(crate) fn apply(&self, step: crate::output::Step, text: &mut String) {
+        use crate::output::Step;
+        match step {
+            Step::Fillers if self.remove_fillers => {
+                let cleaned = self.filler.replace_all(text, "");
+                // Keep the punctuation preceding an isolated 嗯.
+                let cleaned = self.lone_filler.replace_all(&cleaned, "$1");
+                *text = tidy_punctuation(&cleaned);
+            }
+            Step::Hotwords if !self.hotwords.is_empty() => *text = self.correct_hotwords(text),
+            Step::Replace => {
+                for (from, to) in &self.replacements {
+                    if !from.is_empty() && text.contains(from.as_str()) {
+                        *text = text.replace(from.as_str(), to);
+                    }
+                }
+            }
+            Step::Regex => {
+                for (regex, replace) in &self.rules {
+                    if let std::borrow::Cow::Owned(updated) =
+                        regex.replace_all(text, replace.as_str())
+                    {
+                        *text = updated;
+                    }
+                }
+            }
+            Step::Ending if self.strip_trailing_period => {
+                if let Some(period) = text.chars().next_back().filter(|&c| c == '。' || c == '.') {
+                    text.truncate(text.len() - period.len_utf8());
+                }
+            }
+            Step::Trim => {
+                text.truncate(text.trim_end().len());
+                let leading = text.len() - text.trim_start().len();
+                text.drain(..leading);
+            }
+            Step::Fillers | Step::Hotwords | Step::Ending => {}
+            Step::Model | Step::Script => {
+                unreachable!("the output executor handles extension steps")
             }
         }
-        for (regex, replace) in &self.rules {
-            text = regex.replace_all(&text, replace.as_str()).into_owned();
-        }
-        // One period only: a deliberate "……" or "..." is not touched beyond
-        // its last character.
-        if self.strip_trailing_period {
-            if let Some(stripped) = text.strip_suffix('。').or_else(|| text.strip_suffix('.')) {
-                text = stripped.to_owned();
-            }
-        }
-        text.trim().to_owned()
     }
 
     /// Replace spans that sound like a hotword (same pinyin syllable count,
