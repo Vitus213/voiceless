@@ -22,6 +22,11 @@ func paste(_ text: String, into key: UInt64) -> Int32 {
     return vl_paste(bytes, bytes.count, key)
 }
 
+/// What a field holds, read from its editor while it is being edited.
+func held(_ field: NSTextField) -> String {
+    field.currentEditor()?.string ?? field.stringValue
+}
+
 func guardCheck(_ text: String) -> Never {
     let editor = launch()
     let fields = editor.fields
@@ -36,28 +41,32 @@ func guardCheck(_ text: String) -> Never {
     settle(0.5)
     report["second_after_refusal"] = fields[1].stringValue
     report["first_after_refusal"] = fields[0].stringValue
-    // The original field has focus again: the text arrives, the clipboard is put back.
+    // The original field has focus again: the identity was read again, as Voiceless does for each
+    // delivery; the text arrives, the clipboard is put back.
     editor.show(0)
     settle(0.6)
+    let again = focusKey()
+    report["identity_read_again"] = again
     let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
     pasteboard.setString("unchanged clipboard", forType: .string)
-    report["delivered"] = paste(text, into: first)
+    report["delivered"] = paste(text, into: again)
     settle(0.7)
     report["first_after_delivery"] = fields[0].stringValue
     report["second_after_delivery"] = fields[1].stringValue
     report["clipboard_after_delivery"] = pasteboard.string(forType: .string) ?? ""
+
     // A protected field is never read as a target: Voiceless sees no identity for it,
     // and its own caller refuses to paste without one.
     editor.show(2)
     settle(0.6)
     let protected = focusKey()
     report["protected_focus_key"] = protected
-    report["protected_before"] = fields[2].stringValue
+    report["protected_before"] = held(fields[2])
     // Evidence for a hardening note only: what the bridge entry point does with that identity.
     report["bridge_result_for_key_zero"] = paste("key zero probe", into: 0)
     settle(0.5)
-    report["protected_after_bridge_call_with_key_zero"] = fields[2].stringValue
+    report["protected_after_bridge_call_with_key_zero"] = held(fields[2])
     report["fixture_accessibility"] = AXIsProcessTrusted()
     report["fixture_post"] = CGPreflightPostEventAccess()
     emit(report)

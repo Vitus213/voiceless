@@ -614,7 +614,7 @@ def accept(guest, here, repository, arguments, evidence, root, consent):
         reported = subprocess.check_output([str(core), '--version'], env=env, text=True, timeout=60).strip()
         refuse(reported == f'voiceless {version}', f'unexpected installed version: {reported}')
         verify_recognition(core, speech, env)
-        return {'version': reported, 'core': str(core.relative_to(home)), 'fixture': 'transcribed offline'}
+        return {'version': reported, 'core': str(core.relative_to(home.resolve())), 'fixture': 'transcribed offline'}
     evidence.check('installed CLI: version and offline transcription of the fixture', True, lambda: install('cli'))
     evidence.check('installed desktop core: version and offline transcription of the fixture', True, lambda: install('desktop'))
 
@@ -716,9 +716,11 @@ def accept(guest, here, repository, arguments, evidence, root, consent):
             guest.remove(OUTPUT)
             try:
                 def ended():
+                    # "stopping" still holds the capture: a start attempted then is refused as active.
                     view = daemon.api(path)[1]
-                    return view if view['state'] != 'recording' else None
-                view = wait_for(ended, 'the meeting to end with the removed output', timeout=30)
+                    return view if view['state'] in ('interrupted', 'completed') else None
+                view = wait_for(ended, 'the meeting to end with the removed output', timeout=45)
+                evidence.note('meeting after the output was removed', view)
                 _, missing = daemon.api('meetings/start', selection, 409)
                 refuse('unavailable' in missing['error'].lower(), f'unexpected refusal for the removed output: {missing}')
                 refuse('recover' in view['actions'] and view['failure'], f'the interrupted meeting offers no recovery: {view}')
@@ -756,17 +758,39 @@ def accept(guest, here, repository, arguments, evidence, root, consent):
             def inject():
                 return daemon.api('inject/test', {'text': TEXT, 'delay_ms': 0})[1]
 
+            def focused():
+                """What the system's own automation finds focused, for the record."""
+                script = ('tell application "System Events"\n'
+                          'set front to name of first application process whose frontmost is true\n'
+                          'tell application process "voiceless-editor"\n'
+                          'set element to value of attribute "AXFocusedUIElement"\n'
+                          'return {front, role of element, subrole of element}\n'
+                          'end tell\n'
+                          'end tell')
+                try:
+                    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=30)
+                except (OSError, subprocess.SubprocessError) as error:  # a diagnostic, never the check
+                    return f'{type(error).__name__}: {error}'
+                return (result.stdout + result.stderr).strip()
+
             def delivered():
                 editor.command(0)
-                reply = inject()
-                refuse(reply['ok'], f'not delivered: {reply}')
+                seen = focused()
+                replies = []
+                for attempt in range(3):  # the first query of a freshly activated application can come too early
+                    if attempt:
+                        time.sleep(1)
+                    replies.append(inject())
+                    if replies[-1]['ok']:
+                        break
+                refuse(replies[-1]['ok'], f'not delivered: {replies[-1]}; System Events saw {seen}; fixture {editor.status()}')
 
                 def arrived():
                     fields = editor.status().get('fields')
                     return fields if fields and fields[0] == TEXT else None
                 fields = wait_for(arrived, 'the text to arrive in the first field')
                 screenshot(evidence.directory / 'editor-after-delivery.png')
-                return {'reply': reply, 'fields': fields, 'fixture': editor.status()}
+                return {'replies': replies, 'fields': fields, 'system_events': seen, 'fixture': editor.status()}
             evidence.check('delivery: the installed daemon pastes into the native editor', True, delivered)
 
             def protected():

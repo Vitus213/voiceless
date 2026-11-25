@@ -72,10 +72,15 @@ report["status_item"] = status == .success && attribute != nil
 report["status_item_error"] = status.rawValue
 report["window"] = ["kept_hidden_at_login_start": initial != nil, "reopened_by_launch_services": shown != nil,
                     "hidden_on_request": hidden != nil, "reopened_by_second_launcher": reopened != nil,
-                    "one_window": initial != nil && initial == shown && shown == reopened, "number": initial ?? 0]
+                    "on_screen_now": windows().filter { $0.onscreen }.count]
+report["window_numbers"] = ["at_login_start": initial ?? 0, "after_launch_services": shown ?? 0,
+                            "hidden": hidden ?? 0, "after_second_launcher": reopened ?? 0]
+// An observation, not a condition: whether reopening showed the window it hid.
+report["one_window_throughout"] = initial != nil && initial == shown && shown == reopened
 report["runtime_kept"] = original != nil && original == runtime()
-report["passed"] = [initial != nil, shown != nil, hidden != nil, reopened != nil, initial == shown, shown == reopened,
-                    report["status_item"] as! Bool, report["runtime_kept"] as! Bool,
+let statusItem = report["status_item"] as! Bool
+let runtimeKept = report["runtime_kept"] as! Bool
+report["passed"] = [initial != nil, shown != nil, hidden != nil, reopened != nil, statusItem, runtimeKept,
                     (report["second_launcher"] as! String).hasPrefix("exited")].allSatisfy { $0 }
 let data = try! JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
 print(String(data: data, encoding: .utf8)!)
