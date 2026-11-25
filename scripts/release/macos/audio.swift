@@ -1,0 +1,99 @@
+import CoreAudio
+import Foundation
+
+// The CoreAudio devices of this guest, as JSON, for the acceptance to pick its
+// test-owned endpoints; or the choice of the default input device. Device
+// properties only: nothing here opens a stream, so no consent dialog can appear.
+//   audio list
+//   audio default-input <device UID>
+//   audio wait <device UID> <present|absent> <seconds>
+
+func address(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
+    AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+}
+
+func number(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> UInt32? {
+    var property = address(selector, scope)
+    var value: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(object, &property, 0, nil, &size, &value) == noErr else { return nil }
+    return value
+}
+
+func text(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+    var property = address(selector)
+    var value: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(object, &property, 0, nil, &size, &value) == noErr, let value else { return nil }
+    return value.takeRetainedValue() as String
+}
+
+func streams(_ device: AudioObjectID, _ scope: AudioObjectPropertyScope) -> Int {
+    var property = address(kAudioDevicePropertyStreams, scope)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(device, &property, 0, nil, &size) == noErr else { return 0 }
+    return Int(size) / MemoryLayout<AudioStreamID>.size
+}
+
+func devices() -> [AudioObjectID] {
+    var property = address(kAudioHardwarePropertyDevices)
+    var size: UInt32 = 0
+    let system = AudioObjectID(0)
+    guard AudioObjectGetPropertyDataSize(system, &property, 0, nil, &size) == noErr else { return [] }
+    var identifiers = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(system, &property, 0, nil, &size, &identifiers) == noErr else { return [] }
+    return identifiers
+}
+
+func describe(_ device: AudioObjectID) -> [String: Any] {
+    let transport = number(device, kAudioDevicePropertyTransportType).map { String(format: "%c%c%c%c", ($0 >> 24) & 255, ($0 >> 16) & 255, ($0 >> 8) & 255, $0 & 255) } ?? "?"
+    return [
+        "uid": text(device, kAudioDevicePropertyDeviceUID) ?? "",
+        "name": text(device, kAudioObjectPropertyName) ?? "",
+        "id": Int(device),
+        "input_channels": streams(device, kAudioObjectPropertyScopeInput),
+        "output_channels": streams(device, kAudioObjectPropertyScopeOutput),
+        "transport": transport,
+    ]
+}
+
+func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(1)
+}
+
+func emit(_ value: Any) {
+    let data = try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+    print(String(data: data, encoding: .utf8)!)
+}
+
+let arguments = CommandLine.arguments
+switch arguments.count > 1 ? arguments[1] : "list" {
+case "list":
+    emit(devices().map(describe))
+case "default-input":
+    guard arguments.count == 3, let chosen = devices().first(where: { text($0, kAudioDevicePropertyDeviceUID) == arguments[2] }) else {
+        fail("usage: audio default-input <device UID> of a present device")
+    }
+    var property = address(kAudioHardwarePropertyDefaultInputDevice)
+    var value = chosen
+    let status = AudioObjectSetPropertyData(AudioObjectID(0), &property, 0, nil, UInt32(MemoryLayout<AudioObjectID>.size), &value)
+    guard status == noErr else { fail("setting the default input device failed (OSStatus \(status))") }
+    emit(["default_input": describe(chosen)])
+case "wait":
+    guard arguments.count == 5, arguments[3] == "present" || arguments[3] == "absent", let limit = Double(arguments[4]) else {
+        fail("usage: audio wait <device UID> <present|absent> <seconds>")
+    }
+    let wanted = arguments[3] == "present"
+    let deadline = Date(timeIntervalSinceNow: limit)
+    var found = false
+    while true {
+        found = devices().contains { text($0, kAudioDevicePropertyDeviceUID) == arguments[2] }
+        if found == wanted || Date() >= deadline { break }
+        Thread.sleep(forTimeInterval: 0.25)
+    }
+    emit(["uid": arguments[2], "wanted": arguments[3], "found": found])
+    if found != wanted { exit(2) }
+default:
+    fail("usage: audio list | default-input <UID> | wait <UID> <present|absent> <seconds>")
+}

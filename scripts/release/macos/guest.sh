@@ -22,8 +22,7 @@ xcrun swiftc -module-cache-path "$RUNNER_TEMP/module-cache" scripts/release/maco
 
 echo "== UI scripting through System Events"
 # Twenty seconds at most: a consent prompt that cannot be answered must not hold the job.
-if perl -e 'alarm shift; exec @ARGV' 20 osascript -e 'tell application "System Events" to get {name, unix id} of every application process whose background only is false' 2>&1; then :; else echo "System Events did not answer (exit $?)"; fi
-
+if perl -e 'alarm shift; exec @ARGV' 20 osascript -e 'tell application "System Events" to get name of every application process whose background only is false' 2>&1; then :; else echo "System Events did not answer (exit $?)"; fi
 
 echo "== audio endpoints"
 system_profiler SPAudioDataType -json 2>/dev/null | python3 -B -c '
@@ -38,9 +37,12 @@ for item in json.load(sys.stdin).get("SPAudioDataType", []):
             if key in device})
 ' || echo "system_profiler listed no audio device"
 
-echo "== privacy entries of this image (read-only)"
-if rows=$(sqlite3 -readonly "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
-    'select service, client, client_type, auth_value from access order by service, client' 2>&1); then
+echo "== privacy entries of this image for microphone, input, screen and automation (read-only)"
+if rows=$(sqlite3 -readonly "$HOME/Library/Application Support/com.apple.TCC/TCC.db" '
+    select service, client, auth_value from access
+    where service in ("kTCCServiceMicrophone", "kTCCServiceSystemAudioCapture", "kTCCServiceAccessibility",
+                      "kTCCServiceListenEvent", "kTCCServicePostEvent", "kTCCServiceScreenCapture", "kTCCServiceAppleEvents")
+    order by service, client' 2>&1); then
   echo "$rows"
 else
   echo "the user privacy database is not readable by this job: $rows"
