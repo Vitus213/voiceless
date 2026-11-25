@@ -328,9 +328,21 @@ try {
     $started = Invoke-Step desktop-start 'The standard user could not start the installed desktop'
     $desktopId = [uint32]$started.process
     $window = Wait-For { [AcceptanceDesktop]::VisibleWindow($desktopId) } 'The installed desktop showed no window for the standard user' 75
-    $runtime = Get-RuntimeId
-    if (!$runtime) { throw 'The desktop left no runtime identity' }
+    $desktopAttempt = $script:run
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    while (!(Get-RuntimeId) -and $timer.Elapsed.TotalSeconds -lt 75) { Start-Sleep -Milliseconds 250 }
     Save-Screen 'desktop-window-standard-user'
+    if (!(Get-RuntimeId)) {
+        $running = @(Get-Process -Name voiceless, voiceless-desktop -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and $_.Path.StartsWith($script:installed, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "$($_.Name) $($_.Id)" })
+        $probe = Start-Worker ctl
+        $null = Wait-Worker $probe ctl 90
+        $status = try { (Get-WorkerResult ctl).status } catch { "could not run: $($_.Exception.Message)" }
+        $stderrPath = Join-Path $Evidence "desktop-stderr-$desktopAttempt.log"
+        $stderrText = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -Raw -LiteralPath $stderrPath).Trim() } else { '<no log>' }
+        throw "The desktop left no runtime identity within 75 seconds; running: $($running -join ', '); voiceless ctl status said: $($status -join ' '); the desktop printed: $stderrText"
+    }
+    $runtime = Get-RuntimeId
     . (Join-Path $PSScriptRoot 'tray.ps1')
     $firstAttempt = $null
     $tray = $null
