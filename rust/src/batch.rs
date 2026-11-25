@@ -461,8 +461,12 @@ pub fn transcribe(
         .transcribe(wav_path, config, model_dir)
 }
 
-/// Record N seconds of microphone audio to a mono PCM16 WAV file.
-pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError> {
+/// Record the selected microphone (or the system default) to a mono PCM16 WAV.
+pub fn record_seconds(
+    seconds: f64,
+    destination: &Path,
+    source: Option<&str>,
+) -> Result<(), BatchError> {
     use crate::capture::{wav_header, RawCapture};
     use std::io::{Seek as _, Write as _};
 
@@ -470,14 +474,10 @@ pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let selected = crate::config::load_default_config()
-            .map_err(|error| BatchError::Local(error.to_string()))?
-            .audio
-            .source;
         #[cfg(not(target_os = "linux"))]
-        let target = match selected {
+        let target = match source {
             Some(source) => Some(
-                crate::desktop::audio::require_source(&source)
+                crate::desktop::audio::require_source(source)
                     .await
                     .map_err(BatchError::Local)?,
             ),
@@ -488,7 +488,7 @@ pub fn record_seconds(seconds: f64, destination: &Path) -> Result<(), BatchError
         )?;
         output.write_all(&wav_header(0, SAMPLE_RATE))?;
         #[cfg(target_os = "linux")]
-        let mut capture = RawCapture::start(selected.as_deref()).await?;
+        let mut capture = RawCapture::start(source).await?;
         #[cfg(not(target_os = "linux"))]
         let mut capture = RawCapture::start(target)?;
         let end = tokio::time::sleep(Duration::from_secs_f64(seconds.max(0.0)));

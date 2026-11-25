@@ -1014,8 +1014,7 @@ pub fn default_config_path() -> PathBuf {
 }
 
 /// Load the Voiceless XDG config file when present, otherwise defaults.
-/// Missing files are valid; unreadable or invalid files are errors. Used by
-/// the commands that take no `--config` flag (batch, benchmarks, doctor).
+/// Missing default files are valid. Unreadable or invalid files are errors.
 pub fn load_default_config() -> Result<AppConfig, ConfigError> {
     let path = default_config_path();
     if !path.exists() {
