@@ -148,12 +148,7 @@ pub(super) struct TrackHandle {
 
 /// One track to start.
 pub(super) struct Spec<'a> {
-    pub kind: TrackKind,
-    /// `node.name`, for what the recorder reports.
-    pub node: &'a str,
-    /// The node's `object.serial`, what the recorder is pointed at.
-    #[cfg(target_os = "linux")]
-    pub serial: u64,
+    pub source: super::TrackSpec,
     /// The recorder programs, from the runtime's `Tools`.
     #[cfg(target_os = "linux")]
     pub recorder: &'a RecorderProfile,
@@ -176,8 +171,8 @@ pub(super) enum PrepareError {
     Native(Failure),
 }
 
-/// A track whose recorder runs and whose files are open, with nothing
-/// reading it yet.
+/// A track whose recorder runs and whose files are open, for the thread
+/// that reads it next.
 pub(super) struct Prepared {
     pub kind: TrackKind,
     node: String,
@@ -201,33 +196,33 @@ struct SourceLink {
 }
 
 impl Prepared {
-    /// Start the recorder of `spec` and open its files. Nothing reads the
-    /// recorder until `start`: a start that fails half-way has nothing
-    /// running to unwind.
+    /// Open the selected stream and its files. Start the reader immediately
+    /// so it drains the native device while the other track starts.
     pub fn prepare(
-        spec: &Spec<'_>,
+        spec: Spec<'_>,
         journal: Arc<Journal>,
         notices: UnboundedSender<TrackNotice>,
     ) -> Result<Self, PrepareError> {
+        let source = spec.source;
         let mut file = journal::private()
-            .open(journal::partial_path(spec.directory, spec.kind))
+            .open(journal::partial_path(spec.directory, source.kind))
             .map_err(PrepareError::Storage)?;
         // The header of an empty recording; the real one is written when the track is finalized.
         let header = crate::capture::wav_header(0, SAMPLE_RATE);
         file.write_all(&header).map_err(PrepareError::Storage)?;
         file.sync_data().map_err(PrepareError::Storage)?;
-        let log = journal::log_path(spec.directory, spec.kind);
+        let log = journal::log_path(spec.directory, source.kind);
         #[cfg(target_os = "linux")]
         let stream = format!(
             "voiceless-meeting-{}-{}",
             std::process::id(),
-            spec.kind.name()
+            source.kind.name()
         );
         #[cfg(target_os = "linux")]
         let target = Target::Node {
-            name: spec.node,
-            serial: spec.serial,
-            monitor: spec.kind == TrackKind::System,
+            name: &source.node,
+            serial: source.serial,
+            monitor: source.kind == TrackKind::System,
         };
         #[cfg(target_os = "linux")]
         let (child, stdout, pid) = {
@@ -250,17 +245,20 @@ impl Prepared {
             (Some(child), stdout, pid)
         };
         #[cfg(not(target_os = "linux"))]
-        let (child, stdout) = (None, AudioInput::open(spec)?);
+        let (child, stdout) = (
+            None,
+            source.device.open(source.kind, &source.node, spec.lease)?,
+        );
         Ok(Self {
-            kind: spec.kind,
+            kind: source.kind,
             #[cfg(target_os = "linux")]
             link: SourceLink {
                 recorder: spec.recorder.clone(),
                 pid,
-                serial: spec.serial,
+                serial: source.serial,
                 stream,
             },
-            node: spec.node.to_owned(),
+            node: source.node,
             directory: spec.directory.to_path_buf(),
             stdout,
             file,
@@ -270,23 +268,7 @@ impl Prepared {
         })
     }
 
-    /// Undo a prepared track: end its recorder and remove what it created.
-    pub fn kill(self) {
-        let Self {
-            kind,
-            directory,
-            file,
-            log,
-            shared,
-            ..
-        } = self;
-        shared.kill();
-        drop(file);
-        let _ = fs::remove_file(log);
-        let _ = fs::remove_file(journal::partial_path(&directory, kind));
-    }
-
-    /// Hand the track to its thread.
+    /// Hand the track to its thread, which reads it from now on.
     pub fn start(self) -> io::Result<TrackHandle> {
         let Self {
             kind,
