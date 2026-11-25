@@ -1,13 +1,12 @@
-name: Installed Windows microphone refusal
+name: Installed Windows meeting permission guidance
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-candidate/prepared-denial-0.2.0']
+    branches: ['ci/windows-candidate/meeting-permission-guidance-0.2.0']
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   installers:
@@ -17,6 +16,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -32,13 +35,19 @@ jobs:
             audioEndpoints = @($endpoints | ForEach-Object Name)
             graphics = @($graphics | ForEach-Object Name)
           } | ConvertTo-Json -Depth 3
-      - name: Reuse the exact installers from the dual-track run
-        uses: actions/download-artifact@v4
+      - name: Build candidates with the corrected startup message
+        run: |
+          rustup default 1.99.1-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
+      - name: Record the tested core installer
+        run: Get-FileHash "$env:RUNNER_TEMP/candidates/voiceless-core-*.exe" -Algorithm SHA256 | Format-List Hash,Path
+      - uses: actions/upload-artifact@v4
         with:
-          github-token: ${{ github.token }}
-          run-id: 45707934020
-          name: voiceless-windows-prepared-stream-installers
-          path: ${{ runner.temp }}/candidates
+          name: voiceless-windows-meeting-permission-core
+          path: ${{ runner.temp }}/candidates/voiceless-core-*.exe
+          if-no-files-found: error
+          compression-level: 0
       - name: Set up two independent WASAPI endpoint pairs on the disposable guest
         run: ./scripts/release/windows/lines.ps1
       - name: Install the audio signal generator
