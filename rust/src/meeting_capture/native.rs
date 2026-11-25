@@ -1,8 +1,9 @@
 //! CPAL endpoints are selected by host-qualified ID. Enumeration never opens a stream.
-//! The meeting obtains consent for every selected source before creating its journal or
-//! starting a stream. On macOS, the selected output's process tap holds that consent.
+//! Start the selected native devices before creating a journal. Their callbacks
+//! discard audio until the meeting gives each worker its capture lease.
 use super::track::PrepareError;
 use super::{Failure, SourceCatalog, SourceRef, Tools, TrackKind, TrackSpec};
+pub(super) use crate::desktop::audio::shared::PreparedCapture;
 use crate::desktop::audio::shared::{query_devices, RawCapture};
 use cpal::traits::{DeviceTrait, HostTrait};
 use std::io;
@@ -69,13 +70,7 @@ impl SourceCatalog {
         match sources.iter().find(|source| source.node == node) {
             Some(source) => Ok(TrackSpec {
                 kind,
-                device: Endpoint {
-                    id: node
-                        .parse::<cpal::DeviceId>()
-                        .map_err(|error| unconnected(kind, &node, error.to_string()))?,
-                    #[cfg(target_os = "macos")]
-                    tap: None,
-                },
+                input: None,
                 node,
                 label: source.label.clone(),
             }),
@@ -84,28 +79,23 @@ impl SourceCatalog {
     }
 }
 
-pub(super) struct Endpoint {
-    id: cpal::DeviceId,
-    #[cfg(target_os = "macos")]
-    tap: Option<crate::desktop::native::MeetingTap>,
-}
-
-impl TrackSpec {
-    pub(super) fn authorize(&mut self) -> Result<(), Failure> {
-        match self.kind {
-            TrackKind::Microphone => crate::desktop::native::request_microphone_permission()
-                .map_err(|reason| refused(self.kind, &self.node, reason)),
-            TrackKind::System => {
-                #[cfg(target_os = "macos")]
-                {
-                    let tap = crate::desktop::native::open_meeting_tap(&self.device.id)
-                        .map_err(|error| open_error(self.kind, &self.node, error))?;
-                    self.device.tap = Some(tap);
-                }
-                Ok(())
-            }
-        }
+pub(super) fn prepare_inputs(specs: &mut [TrackSpec]) -> Result<(), Failure> {
+    // A meeting always selects its microphone first and optionally an output.
+    let microphone = &specs[0];
+    crate::desktop::native::request_microphone_permission()
+        .map_err(|reason| refused(microphone.kind, &microphone.node, reason))?;
+    // Starting Core Audio I/O can display the system audio dialog even after tap
+    // creation succeeded. Leave the microphone closed until that request returns.
+    for spec in specs.iter_mut().rev() {
+        let id = spec
+            .node
+            .parse::<cpal::DeviceId>()
+            .map_err(|error| unconnected(spec.kind, &spec.node, error.to_string()))?;
+        let input = PreparedCapture::open(Some(id), spec.kind == TrackKind::System)
+            .map_err(|error| open_error(spec.kind, &spec.node, error))?;
+        spec.input = Some(input);
     }
+    Ok(())
 }
 
 pub(super) struct AudioInput {
@@ -148,23 +138,18 @@ fn open_error(source: TrackKind, node: &str, error: io::Error) -> Failure {
     }
 }
 
-impl Endpoint {
-    pub(super) fn open(
-        self,
+impl AudioInput {
+    pub(super) fn start(
+        input: PreparedCapture,
         kind: TrackKind,
         node: &str,
         lease: &std::fs::File,
-    ) -> Result<AudioInput, PrepareError> {
+    ) -> Result<Self, PrepareError> {
         let lease = lease.try_clone().map_err(PrepareError::Storage)?;
-        let stream = RawCapture::open(
-            Some(self.id),
-            kind == TrackKind::System,
-            lease,
-            #[cfg(target_os = "macos")]
-            self.tap,
-        )
-        .map_err(|error| PrepareError::Native(open_error(kind, node, error)))?;
-        Ok(AudioInput {
+        let stream = input
+            .record(lease)
+            .map_err(|error| PrepareError::Native(open_error(kind, node, error)))?;
+        Ok(Self {
             stream,
             runtime: None,
             drained: false,
@@ -172,9 +157,7 @@ impl Endpoint {
             last_audio: Instant::now(),
         })
     }
-}
 
-impl AudioInput {
     /// Runs on the journal writer thread, including when the daemon runtime is shutting down.
     pub(super) fn read(
         &mut self,

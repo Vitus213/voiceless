@@ -247,7 +247,14 @@ impl Prepared {
         #[cfg(not(target_os = "linux"))]
         let (child, stdout) = (
             None,
-            source.device.open(source.kind, &source.node, spec.lease)?,
+            AudioInput::start(
+                source
+                    .input
+                    .expect("native input prepared before journaling"),
+                source.kind,
+                &source.node,
+                spec.lease,
+            )?,
         );
         Ok(Self {
             kind: source.kind,

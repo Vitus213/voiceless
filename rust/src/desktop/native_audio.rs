@@ -4,7 +4,7 @@
 use std::io;
 use std::str::FromStr;
 use std::sync::{mpsc as control, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, DeviceId, FromSample, Sample, SizedSample};
@@ -84,39 +84,29 @@ pub(crate) async fn require_source(source: &str) -> Result<DeviceId, String> {
 }
 
 pub struct RawCapture {
-    stop: Option<control::Sender<()>>,
+    control: Option<control::Sender<std::fs::File>>,
     done: Option<oneshot::Receiver<Vec<u8>>>,
     frames: mpsc::Receiver<Vec<u8>>,
     health: watch::Receiver<Option<String>>,
 }
 
-impl RawCapture {
-    pub fn start(target: Option<DeviceId>) -> io::Result<Self> {
-        let lease = crate::runtime::lock_capture()?;
-        Self::open(
-            target,
-            false,
-            lease,
-            #[cfg(target_os = "macos")]
-            None,
-        )
-    }
+/// A running device that discards its callbacks until the owner commits to
+/// recording. Its worker owns no capture lease while macOS waits for consent.
+pub(crate) struct PreparedCapture {
+    activate: control::Sender<std::fs::File>,
+    capture: RawCapture,
+}
 
-    /// The capture thread holds the lease and, on macOS, the permitted output's
-    /// tap until it has stopped the stream.
-    pub(crate) fn open(
-        target: Option<DeviceId>,
-        system: bool,
-        lease: std::fs::File,
-        #[cfg(target_os = "macos")] tap: Option<crate::desktop::native::MeetingTap>,
-    ) -> io::Result<Self> {
+impl PreparedCapture {
+    pub(crate) fn open(target: Option<DeviceId>, system: bool) -> io::Result<Self> {
+        let deadline = Instant::now() + Duration::from_secs(5);
         #[cfg(target_os = "macos")]
-        if system && tap.is_none() {
-            return Err(io::Error::other(
-                "a system recording needs the tap of its output",
-            ));
-        }
-        let (stop, commands) = control::channel();
+        let pending = system
+            .then(crate::desktop::native::SystemAudioStart::acquire)
+            .transpose()?;
+        #[cfg(target_os = "macos")]
+        let deadline = pending.as_ref().map_or(deadline, |guard| guard.deadline);
+        let (activate, commands) = control::channel();
         let (started, ready) = control::sync_channel(1);
         let (finished, done) = oneshot::channel();
         let (samples, frames) = mpsc::channel(16);
@@ -124,46 +114,76 @@ impl RawCapture {
         std::thread::Builder::new()
             .name("voiceless-input".to_owned())
             .spawn(move || {
-                let _lease = lease;
+                let result = open_stream(target, system, samples, &errors);
                 #[cfg(target_os = "macos")]
-                let tapped_device = tap.as_ref().map(|tap| tap.device());
-                #[cfg(windows)]
-                let tapped_device = None;
-                let result = open_stream(target, tapped_device, system, samples, &errors);
-                let (stream, encoder, id) = match result {
+                drop(pending);
+                let capture = match result {
                     Ok(capture) => capture,
                     Err(error) => {
                         let _ = started.send(Err(error));
                         return;
                     }
                 };
-                if !system {
-                    *CAPTURING.lock() = Some(id);
+                if started.send(Ok(())).is_err() {
+                    return;
                 }
-                let _ = started.send(Ok(()));
+                let Ok(lease) = commands.recv() else { return };
+                if !system {
+                    *CAPTURING.lock() = capture.microphone_id;
+                }
+                capture.encoder.lock().recording = true;
+                // The owner drops the sole sender to stop the device.
                 let _ = commands.recv();
-                drop(stream);
+                drop(capture.stream);
                 #[cfg(target_os = "macos")]
-                drop(tap);
+                drop(capture.tap);
                 if !system {
                     *CAPTURING.lock() = None;
                 }
-                let tail = encoder.lock().flush();
-                drop(_lease);
+                let tail = capture.encoder.lock().flush();
+                drop(lease);
                 let _ = finished.send(tail);
             })?;
-        ready.recv_timeout(Duration::from_secs(5)).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "the selected audio device did not start",
-            )
-        })??;
+        match ready.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(result) => result?,
+            Err(control::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the audio startup worker exited"));
+            }
+            Err(control::RecvTimeoutError::Timeout) => {
+                #[cfg(target_os = "macos")]
+                if system {
+                    return Err(crate::desktop::native::unanswered());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the selected audio device did not start",
+                ));
+            }
+        }
         Ok(Self {
-            stop: Some(stop),
-            done: Some(done),
-            frames,
-            health,
+            activate,
+            capture: RawCapture {
+                control: None,
+                done: Some(done),
+                frames,
+                health,
+            },
         })
+    }
+
+    pub(crate) fn record(mut self, lease: std::fs::File) -> io::Result<RawCapture> {
+        self.activate
+            .send(lease)
+            .map_err(|_| io::Error::other("the audio device closed before recording"))?;
+        self.capture.control = Some(self.activate);
+        Ok(self.capture)
+    }
+}
+
+impl RawCapture {
+    pub fn start(target: Option<DeviceId>) -> io::Result<Self> {
+        let lease = crate::runtime::lock_capture()?;
+        PreparedCapture::open(target, false)?.record(lease)
     }
 
     pub async fn next_chunk(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -203,9 +223,7 @@ impl RawCapture {
     }
 
     fn request_stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
+        drop(self.control.take());
     }
 }
 
@@ -215,16 +233,34 @@ impl Drop for RawCapture {
     }
 }
 
-type Capture = (cpal::Stream, Arc<Mutex<Encoder>>, String);
+struct Capture {
+    stream: cpal::Stream,
+    #[cfg(target_os = "macos")]
+    tap: Option<crate::desktop::native::MeetingTap>,
+    encoder: Arc<Mutex<Encoder>>,
+    microphone_id: Option<String>,
+}
 
 fn open_stream(
     target: Option<DeviceId>,
-    tapped_device: Option<Device>,
     system: bool,
     frames: mpsc::Sender<Vec<u8>>,
     errors: &watch::Sender<Option<String>>,
 ) -> io::Result<Capture> {
     let host = cpal::default_host();
+    #[cfg(target_os = "macos")]
+    let tap = if system {
+        let output = target
+            .as_ref()
+            .ok_or_else(|| io::Error::other("a system recording needs a selected output"))?;
+        Some(crate::desktop::native::MeetingTap::open(output)?)
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let tapped_device = tap.as_ref().map(|tap| tap.device());
+    #[cfg(windows)]
+    let tapped_device: Option<Device> = None;
     let device = tapped_device
         .or_else(|| match target.as_ref() {
             Some(id) => host.device_by_id(id),
@@ -262,9 +298,19 @@ fn open_stream(
         }
     }
     .map_err(io::Error::other)?;
-    let id = device.id().map_err(io::Error::other)?.to_string();
+    let microphone_id = if system {
+        None
+    } else {
+        Some(device.id().map_err(io::Error::other)?.to_string())
+    };
     stream.play().map_err(io::Error::other)?;
-    Ok((stream, encoder, id))
+    Ok(Capture {
+        stream,
+        #[cfg(target_os = "macos")]
+        tap,
+        encoder,
+        microphone_id,
+    })
 }
 
 fn input<T: SizedSample>(
@@ -297,6 +343,7 @@ where
 }
 
 struct Encoder {
+    recording: bool,
     channels: usize,
     convert: Option<LinearResampler>,
     mono: Vec<f32>,
@@ -323,6 +370,7 @@ impl Encoder {
             )
         };
         Ok(Self {
+            recording: false,
             channels: usize::from(channels),
             convert,
             mono: Vec::new(),
@@ -334,6 +382,9 @@ impl Encoder {
     where
         f32: FromSample<T>,
     {
+        if !self.recording {
+            return true;
+        }
         self.mono.clear();
         let scale = 1.0 / self.channels as f32;
         self.mono

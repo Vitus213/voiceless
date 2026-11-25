@@ -8,18 +8,15 @@
 //! `MeetingService` owns a single `MeetingRuntime`, serializes commands, reaps
 //! recorders independently of console clients, and links local jobs to their tracks.
 //!
-//! Lifecycle. `start` refreshes the device catalog, refuses a source that
-//! left since it was selected, takes the data directory's capture lock (the
-//! dictation's `runtime::lock_capture`: the same file, so a dictation
-//! session and a meeting exclude each other in every process), creates the
-//! meeting directory and opens one recorder per selected track, each read
-//! from the moment it is open, so that a later track's opening that waits
-//! (the system's first consent to record an output) cannot overrun what an
-//! earlier one delivered. Linux runs `pw-record`, macOS and Windows open
-//! native streams. A failed start leaves nothing on disk. `stop` asks the
-//! recorders to drain. `poll` returns the meeting once every track settled,
-//! as `Completed` when it ran to its stop or as `Interrupted` when a
-//! failure ended it, and releases the capture lock. `sources` lists what
+//! `start` resolves the selected sources and takes the data directory's capture
+//! lock, shared with dictation. On macOS and Windows it prepares all selected
+//! devices before creating the meeting directory. With a system output selected,
+//! its stream must start before the microphone opens. Native callbacks only
+//! retain audio once their track is recording. Linux opens its selected PipeWire
+//! sources through the recorder. A failed start leaves no meeting on disk.
+//! `stop` asks the recorders to drain. `poll` returns the meeting once all tracks
+//! settle, as `Completed` after a normal stop or `Interrupted` after a failure,
+//! and releases the capture lock. `sources` lists what
 //! can be selected.
 //!
 //! Recovery. A track's audio is kept in committed ranges (`track`); a
@@ -183,9 +180,7 @@ impl MeetingRuntime {
         })?;
         // A pending consent dialog must not leave a journal or capture the other source.
         #[cfg(not(target_os = "linux"))]
-        for spec in &mut specs {
-            spec.authorize()?;
-        }
+        graph::prepare_inputs(&mut specs)?;
         let (notices, receiver) = mpsc::unbounded_channel();
         let recording = Recording::start(
             &self.meetings,
@@ -513,7 +508,7 @@ struct TrackSpec {
     #[cfg(target_os = "linux")]
     serial: u64,
     #[cfg(not(target_os = "linux"))]
-    device: graph::Endpoint,
+    input: Option<graph::PreparedCapture>,
 }
 
 /// One meeting while its recorders run, owned by the runtime alone.
@@ -530,9 +525,8 @@ struct Recording {
 }
 
 impl Recording {
-    /// Start each permitted track with its reader before opening the next stream.
-    /// A native stream can fill its queue in half a second. A failed start joins
-    /// the readers and removes the partial meeting.
+    /// Start a reader as each track begins retaining samples. A failed start
+    /// joins any readers already running and removes the partial meeting.
     fn start(
         meetings: &Path,
         #[cfg(target_os = "linux")] recorder: &crate::capture::recorder::RecorderProfile,
