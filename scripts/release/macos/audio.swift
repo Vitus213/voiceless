@@ -9,7 +9,7 @@ import Foundation
 //   audio wait <device UID> <present|absent> <seconds>
 
 func address(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
-    AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+    AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMaster)
 }
 
 func number(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> UInt32? {
@@ -42,14 +42,24 @@ func code(_ status: OSStatus) -> String {
 func devices() -> [AudioObjectID] {
     var property = address(kAudioHardwarePropertyDevices)
     var size: UInt32 = 0
-    let system = AudioObjectID(0)
-    var status = AudioObjectGetPropertyDataSize(system, &property, 0, nil, &size)
+    var status = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, &size)
     guard status == noErr else { fail("the size of the device list could not be read (OSStatus \(status) \(code(status)))") }
     var identifiers = [AudioObjectID](repeating: 0, count: max(Int(size) / MemoryLayout<AudioObjectID>.size, 1))
     size = UInt32(identifiers.count * MemoryLayout<AudioObjectID>.size)
-    status = AudioObjectGetPropertyData(system, &property, 0, nil, &size, &identifiers)
+    status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, &size, &identifiers)
     guard status == noErr else { fail("the device list could not be read (OSStatus \(status) \(code(status)))") }
     return Array(identifiers.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+}
+
+func probe() {
+    var size: UInt32 = 0
+    var literal = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMaster)
+    let first = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &literal, 0, nil, &size)
+    print("literal address \(literal) status \(first) \(code(first)) size \(size)")
+    var made = address(kAudioHardwarePropertyDevices)
+    let second = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &made, 0, nil, &size)
+    print("helper address \(made) status \(second) \(code(second)) size \(size)")
+    emit(devices().map(describe))
 }
 
 func describe(_ device: AudioObjectID) -> [String: Any] {
@@ -76,6 +86,8 @@ func emit(_ value: Any) {
 
 let arguments = CommandLine.arguments
 switch arguments.count > 1 ? arguments[1] : "list" {
+case "probe":
+    probe()
 case "list":
     emit(devices().map(describe))
 case "default-input":
