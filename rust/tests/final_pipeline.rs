@@ -14,7 +14,9 @@ use common::{
 };
 use std::time::Duration;
 use tokio::sync::mpsc;
-use voiceless::coordinator::{run_session, ControlCommand, OutputEvent, SessionPlan};
+use voiceless::coordinator::{
+    run_session, ControlCommand, OutputEvent, SessionPhase, SessionPlan, TextProcessor,
+};
 use voiceless::realtime::RealtimeEvent;
 
 /// Flatten events to their kind names; a final snapshot counts as `final`.
@@ -23,9 +25,13 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .iter()
         .map(|event| match event {
             OutputEvent::Ready => "ready",
+            OutputEvent::BackendSelected(_) => "backend-selected",
+            OutputEvent::DevicesLoaded(_) => "devices-loaded",
             OutputEvent::Level(_) => "level",
             OutputEvent::Transcript(snapshot) if snapshot.is_final => "final",
             OutputEvent::Transcript(_) => "transcript",
+            OutputEvent::Phase(_) => "phase",
+            OutputEvent::Output(_) => "output",
             OutputEvent::Finalized { .. } => "finalized",
             OutputEvent::Warning(_) => "warning",
             OutputEvent::Error(_) => "error",
@@ -37,17 +43,11 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
 
 /// Fixture: ready -> one completed segment -> stop after first append ->
 /// finished with the same text. Drives the success final pipeline.
-async fn run_success_session(
+async fn run_success_session<P: TextProcessor + Clone>(
     plan: SessionPlan,
-    processor: CountingProcessor,
+    processor: P,
     history: RecordingHistory,
-) -> (
-    i32,
-    Vec<OutputEvent>,
-    Vec<String>,
-    CountingProcessor,
-    RecordingHistory,
-) {
+) -> (i32, Vec<OutputEvent>, Vec<String>, P, RecordingHistory) {
     let log = new_log();
     let mut transport = ScriptedTransport::new(log.clone());
     transport.before_finish(Ok(RealtimeEvent::Ready));
@@ -105,6 +105,40 @@ async fn quick_mode_never_calls_the_processor_and_injects_raw_text() {
     assert_eq!(records[0].final_text, "原始识别文本");
     assert_eq!(records[0].processing_mode, "quick");
     assert!(event_kinds(&events).contains(&"finalized"));
+}
+
+#[derive(Clone)]
+struct RejectProcessing;
+
+impl TextProcessor for RejectProcessing {
+    fn cleanup(&mut self, _text: &str) -> String {
+        panic!("raw dictation must skip text cleanup");
+    }
+
+    async fn process(&mut self, _mode: &str, _text: &str) -> Result<String, String> {
+        panic!("raw dictation must skip remote processing");
+    }
+}
+
+#[tokio::test]
+async fn raw_mode_delivers_and_stores_the_authoritative_text() {
+    let mut plan = SessionPlan::new("cloud-realtime", true);
+    plan.mode_id = "raw".to_owned();
+    let (code, _, log, _, history) =
+        run_success_session(plan, RejectProcessing, RecordingHistory::new()).await;
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        log.iter()
+            .filter(|line| line.starts_with("injector.inject:"))
+            .collect::<Vec<_>>(),
+        ["injector.inject:原始识别文本"]
+    );
+    let records = history.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].final_text, records[0].raw_text);
+    assert_eq!(records[0].processed_text, None);
+    assert_eq!(records[0].processing_mode, "raw");
 }
 
 #[tokio::test]
@@ -232,11 +266,75 @@ async fn cancelled_and_empty_sessions_write_no_history() {
     )
     .await;
     assert_eq!(code2, 0);
+    assert!(sink2
+        .events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::Phase(SessionPhase::NoSpeech))));
+    assert!(!entries(&log2)
+        .iter()
+        .any(|entry| entry.starts_with("injector.inject:")));
     assert!(
         history2_probe.records().is_empty(),
         "{:?}",
         history2_probe.records()
     );
+}
+
+#[tokio::test]
+async fn cancellation_during_processing_releases_capture_and_skips_delivery() {
+    struct PendingProcessor(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl TextProcessor for PendingProcessor {
+        async fn process(&mut self, _mode: &str, _text: &str) -> Result<String, String> {
+            self.0.take().unwrap().send(()).unwrap();
+            std::future::pending().await
+        }
+    }
+
+    let log = new_log();
+    let mut transport = ScriptedTransport::new(log.clone());
+    transport.before_finish(Ok(RealtimeEvent::Ready));
+    transport.trigger(1, ControlCommand::Stop);
+    transport.after_finish(Ok(RealtimeEvent::Finished {
+        transcript: "原文".to_owned(),
+    }));
+    let capture = FakeCapture::new(log.clone(), vec![vec![1; 1024]], None);
+    let (tx, rx) = mpsc::channel(8);
+    transport.control_tx = Some(tx.clone());
+    let (started, processing) = tokio::sync::oneshot::channel();
+    let mut plan = SessionPlan::new("cloud-realtime", true);
+    plan.mode_id = "voice-polish".to_owned();
+    let history = RecordingHistory::new();
+    let mut sink = RecordingSink::default();
+    let session = run_session(
+        plan,
+        capture,
+        transport,
+        PendingProcessor(Some(started)),
+        RecordingInjector::new(log.clone()),
+        history.clone(),
+        rx,
+        &mut sink,
+    );
+    let (code, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(session, async {
+            processing.await.unwrap();
+            tx.send(ControlCommand::Cancel).await.unwrap();
+        })
+    })
+    .await
+    .expect("cancel during processing must finish the session");
+    assert_eq!(code, 130);
+    assert!(history.records().is_empty());
+    let effects = entries(&log);
+    assert!(effects.iter().any(|entry| entry == "capture.abort"));
+    assert!(!effects
+        .iter()
+        .any(|entry| entry.starts_with("injector.inject:")));
+    assert!(sink
+        .events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::Cancelled)));
 }
 
 #[tokio::test]

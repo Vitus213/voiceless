@@ -9,9 +9,20 @@ set dotenv-load := false
 # The crate lives in rust/; the flake (and nix develop) at the repository root.
 manifest := "--manifest-path rust/Cargo.toml"
 
+# The console's TypeScript/Vite bundle, embedded in the binary at compile
+# time: build it before anything that compiles the crate.
+console:
+    nix develop -c npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+    nix develop -c npm --prefix frontend run build
+
 # Full cargo test suite (unit, contract, integration, examples compile).
-test:
-    nix develop -c cargo test {{manifest}} --all-targets
+test: console
+    nix develop -c sh -c 'exec cargo test --config "$VOICELESS_CARGO_CONFIG" {{manifest}} --all-targets'
+
+# Browser tests against the binary `just test` built; extra arguments are
+# playwright's, e.g. `just e2e --grep accessibility`.
+e2e *ARGS:
+    nix develop -c npm --prefix frontend run test:e2e -- {{ARGS}}
 
 # End-to-end Fcitx5 bridge test in a private D-Bus session.
 bridge-test:
@@ -20,10 +31,7 @@ bridge-test:
 # rustfmt check plus clippy over all targets and features with warnings as errors.
 lint:
     nix develop -c cargo fmt {{manifest}} --check
-    # Own target dir: sherpa-onnx-sys copies read-only Nix store libraries
-    # into the profile dir and cannot overwrite them when clippy reruns its
-    # build script over the test build.
-    CARGO_TARGET_DIR=rust/target/clippy nix develop -c cargo clippy {{manifest}} --all-targets --all-features -- -D warnings
+    nix develop -c sh -c 'exec cargo clippy --config "$VOICELESS_CARGO_CONFIG" {{manifest}} --all-targets --all-features -- -D warnings'
 
 # Everything CI does: lint, test, then the sandboxed CPU package build with its tests.
 check:

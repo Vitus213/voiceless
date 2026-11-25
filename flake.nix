@@ -147,6 +147,33 @@
           "-DSPIRV-Headers_DIR=${pkgs.lib.getDev pkgs.spirv-headers}/share/cmake/SPIRV-Headers"
         ];
 
+        consoleAssets = pkgs.buildNpmPackage {
+          pname = "voiceless-console";
+          version = (builtins.fromJSON (builtins.readFile ./frontend/package.json)).version;
+          nodejs = pkgs.nodejs_22;
+          src = pkgs.lib.fileset.toSource {
+            root = ./frontend;
+            fileset = pkgs.lib.fileset.unions [
+              ./frontend/index.html
+              ./frontend/package.json
+              ./frontend/package-lock.json
+              ./frontend/scripts
+              ./frontend/src
+              ./frontend/tsconfig.json
+              ./frontend/vite.config.ts
+            ];
+          };
+          npmDeps = pkgs.importNpmLock { npmRoot = ./frontend; };
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+          npmRebuildFlags = [ "--ignore-scripts" ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out"
+            cp dist/index.html dist/app.js dist/style.css "$out/"
+            runHook postInstall
+          '';
+        };
+
         mkVoiceless =
           {
             stack,
@@ -165,8 +192,18 @@
             {
               pname = "voiceless";
               version = (builtins.fromTOML (builtins.readFile ./rust/Cargo.toml)).package.version;
-              src = ./rust;
+              # Rust and browser tests replay the same PCM and PipeWire fixtures.
+              src = pkgs.lib.fileset.toSource {
+                root = ./.;
+                fileset = pkgs.lib.fileset.unions [
+                  ./rust
+                  ./frontend/e2e/fixtures
+                ];
+              };
+              cargoRoot = "rust";
+              buildAndTestSubdir = "rust";
               cargoLock.lockFile = ./rust/Cargo.lock;
+              VOICELESS_CONSOLE_DIST = "${consoleAssets}";
               buildFeatures =
                 if stack.gpu then
                   [ "cuda" ]
@@ -198,14 +235,16 @@
               # The tests spawn pw-record, wtype and wl-copy as subprocesses
               # (doctor and injection paths); they must resolve on PATH.
               nativeCheckInputs = [
+                pkgs.dbus
                 pkgs.pipewire
+                pkgs.procps
                 pkgs.wtype
                 pkgs.wl-clipboard
               ];
               # Read by the sherpa-onnx-sys build script to find the shared
               # libraries instead of building its own copy.
               SHERPA_ONNX_LIB_DIR = stack.sherpaRuntimeLib + "/lib";
-              # The binary execs the same three tools at runtime and dlopens
+              # The binary execs the desktop tools and dlopens
               # the sherpa/onnxruntime libraries; the GPU provider also needs
               # the host driver from /run/opengl-driver/lib (suffix, so a
               # user-set LD_LIBRARY_PATH wins over it).
@@ -214,6 +253,7 @@
                   --prefix PATH : ${
                     pkgs.lib.makeBinPath [
                       pkgs.pipewire
+                      pkgs.wayland-utils
                       pkgs.wtype
                       pkgs.wl-clipboard
                     ]
@@ -251,10 +291,68 @@
         voicelessCpu = mkVoiceless { stack = stackCpu; };
         fcitx5Bridge = pkgs.callPackage ./nix/fcitx5-bridge.nix { };
 
+        # The desktop host's system libraries: WebKitGTK, GTK and the tray
+        # indicator. They stay out of the core package, which needs none.
+        desktopLibs = with pkgs; [
+          webkitgtk_4_1
+          gtk3
+          libsoup_3
+          libayatana-appindicator
+        ];
+        voicelessDesktop = pkgs.rustPlatform.buildRustPackage {
+          pname = "voiceless-desktop";
+          version = (builtins.fromTOML (builtins.readFile ./desktop/Cargo.toml)).package.version;
+          # The host links the core crate as a library from ../rust: the source
+          # is the repository and the crate is built from desktop/.
+          src = ./.;
+          cargoRoot = "desktop";
+          buildAndTestSubdir = "desktop";
+          cargoLock.lockFile = ./desktop/Cargo.lock;
+          VOICELESS_CONSOLE_DIST = "${consoleAssets}";
+          SHERPA_ONNX_LIB_DIR = "${stackCpu.sherpaRuntimeLib}/lib";
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.makeWrapper
+            pkgs.wrapGAppsHook3
+          ];
+          buildInputs = desktopLibs ++ [
+            stackCpu.sherpaOnnx
+            stackCpu.onnxruntime
+          ];
+          # The host's decisions are tested with the core: `cargo test --test desktop_contract`.
+          doCheck = false;
+          postInstall = ''
+            # The host keeps its file name: GTK reports it as the program name,
+            # by which the launcher finds its window. So the executable lives
+            # under libexec, and bin holds its environment wrapper.
+            mkdir -p "$out/libexec/voiceless-desktop"
+            mv "$out/bin/voiceless-desktop" "$out/libexec/voiceless-desktop/voiceless-desktop"
+            makeWrapper "$out/libexec/voiceless-desktop/voiceless-desktop" "$out/bin/voiceless-desktop" \
+              --inherit-argv0 \
+              --prefix LD_LIBRARY_PATH : ${stackCpu.sherpaRuntimeLib}/lib \
+              --suffix LD_LIBRARY_PATH : /run/opengl-driver/lib
+            # The launcher and the icons: the files the Debian package installs too.
+            install -Dm644 ${./desktop/packaging/voiceless-desktop.desktop} \
+              "$out/share/applications/voiceless-desktop.desktop"
+            install -Dm644 ${./desktop/icons/32x32.png} \
+              "$out/share/icons/hicolor/32x32/apps/voiceless-desktop.png"
+            install -Dm644 ${./desktop/icons/128x128.png} \
+              "$out/share/icons/hicolor/128x128/apps/voiceless-desktop.png"
+          '';
+          meta = {
+            description = "Voiceless desktop window and tray over the running daemon";
+            license = pkgs.lib.licenses.mit;
+            platforms = pkgs.lib.platforms.linux;
+            mainProgram = "voiceless-desktop";
+          };
+        };
+
         mkShell =
           {
             stack,
             vulkan ? false,
+            extra ? [ ],
+            env ? { },
           }:
           (if stack.gpu then pkgs.mkShell.override { stdenv = cuda.backendStdenv; } else pkgs.mkShell) (
             {
@@ -268,23 +366,36 @@
                 pkgs.just
                 pkgs.nixfmt
                 pkgs.cargo
+                pkgs.nodejs_22
                 pkgs.rustc
                 # Same toolchain as rustc: a clippy from the user profile
                 # rejects crates built here (E0514).
                 pkgs.clippy
                 pkgs.rustfmt
                 pkgs.pipewire
+                pkgs.procps
+                pkgs.wayland-utils
                 stack.sherpaOnnx
                 stack.onnxruntime
                 pkgs.wl-clipboard
                 pkgs.wtype
                 pkgs.dbus
                 pkgs.systemd
-              ];
+              ]
+              ++ extra;
 
               # Used by scripts/fcitx5-bridge-test.sh.
               VOICELESS_FCITX5 = pkgs.fcitx5;
               VOICELESS_FCITX5_BRIDGE = fcitx5Bridge;
+              VOICELESS_CONSOLE_DIST = "${consoleAssets}";
+              # Cargo's links override uses the packaged libraries directly. The
+              # upstream shared build script copies their read-only store modes
+              # into target/debug and then fails when it needs to overwrite them.
+              VOICELESS_CARGO_CONFIG = pkgs.writeText "voiceless-sherpa.toml" ''
+                [target.${pkgs.stdenv.hostPlatform.rust.rustcTarget}.sherpa-onnx]
+                rustc-link-search = ["native=${stack.sherpaRuntimeLib}/lib"]
+                rustc-link-lib = ["dylib=sherpa-onnx-c-api", "dylib=onnxruntime"]
+              '';
               SHERPA_ONNX_LIB_DIR = "${stack.sherpaRuntimeLib}/lib";
               LD_LIBRARY_PATH = "${stack.sherpaRuntimeLib}/lib:/run/opengl-driver/lib";
             }
@@ -294,6 +405,7 @@
                 pkgs.lib.optionals stack.gpu cudaCmakeArgs ++ pkgs.lib.optionals vulkan vulkanCmakeArgs
               );
             }
+            // env
           );
       in
       {
@@ -302,6 +414,7 @@
           inherit voiceless;
           voiceless-cpu = voicelessCpu;
           voiceless-fcitx5-bridge = fcitx5Bridge;
+          voiceless-desktop = voicelessDesktop;
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           voiceless-cpu-avx2 = mkVoiceless {
@@ -326,6 +439,17 @@
             vulkan = stack.gpu;
           };
           cpu = mkShell { stack = stackCpu; };
+          # `voiceless-desktop` (Tauri 2): the same toolchain plus WebKitGTK and the tray indicator.
+          desktop = mkShell {
+            stack = stackCpu;
+            extra = desktopLibs ++ [
+              pkgs.pkg-config
+              pkgs.wrapGAppsHook3
+            ];
+            env = {
+              LD_LIBRARY_PATH = "${stackCpu.sherpaRuntimeLib}/lib:${pkgs.lib.makeLibraryPath desktopLibs}:/run/opengl-driver/lib";
+            };
+          };
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           vulkan = mkShell {

@@ -28,6 +28,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::benchmark_cmd::{next_replay_event, wait_ready};
 use crate::config::{load_default_config, AppConfig};
 use crate::latency::{LatencyThresholds, TrialOutcome, TrialStage};
 use crate::realtime::{RealtimeEvent, RealtimeSession};
@@ -282,10 +283,10 @@ async fn run_trial(
             if now >= pace_until {
                 break;
             }
-            match tokio::time::timeout(pace_until - now, session.next_event()).await {
+            match tokio::time::timeout(pace_until - now, next_replay_event(&session)).await {
                 Ok(Ok(event)) => collect(&mut stages, &mut confirmed, event, start),
                 Ok(Err(error)) => {
-                    return failed(id, sample_id, &stages, start, error.to_string());
+                    return failed(id, sample_id, &stages, start, error);
                 }
                 Err(_) => break,
             }
@@ -309,7 +310,7 @@ async fn run_trial(
     // final; collect them so an empty Finished still yields text.
     let mut final_text: Option<String> = None;
     loop {
-        match session.next_event().await {
+        match next_replay_event(&session).await {
             Ok(RealtimeEvent::Finished { transcript }) => {
                 if !transcript.is_empty() {
                     final_text = Some(transcript);
@@ -319,7 +320,7 @@ async fn run_trial(
             }
             Ok(event) => collect(&mut stages, &mut confirmed, event, start),
             Err(error) => {
-                return failed(id, sample_id, &stages, start, error.to_string());
+                return failed(id, sample_id, &stages, start, error);
             }
         }
     }
@@ -418,14 +419,6 @@ fn chunk_is_voiced(chunk: &[u8]) -> bool {
     rms > VOICE_RMS_THRESHOLD
 }
 
-/// Block until the session reports `Ready`; events before it are ignored,
-/// a transport error is returned as text.
-async fn wait_ready(session: &RealtimeSession) -> Result<(), String> {
-    loop {
-        match session.next_event().await {
-            Ok(RealtimeEvent::Ready) => return Ok(()),
-            Ok(_) => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-}
+#[cfg(test)]
+#[path = "../tests/common/cloud_benchmark_replay.rs"]
+mod cloud_benchmark_replay;

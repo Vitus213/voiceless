@@ -1,15 +1,7 @@
-//! Push-to-talk key read straight from evdev (`/dev/input`, needs the
-//! `input` group), so it works on compositors without key-release bindings
-//! (niri, KDE). The listener reports presses and releases; the daemon turns
-//! them into hold-to-talk or tap-to-toggle (see `daemon::HotkeyMachine`).
-//! Events are only read, never grabbed: the key still reaches applications,
-//! so pick one nothing else uses (ScrollLock, Pause, a spare F-key).
-//!
-//! Only `voiceless daemon` uses this module (`daemon::start_hotkey`), for
-//! the `[hotkey] key` config value; `config` validates that value with
-//! `parse_key`. No key is configured by default. The listener is
-//! best-effort: a device that cannot be opened is skipped silently, and the
-//! daemon reports "no readable keyboard" while nothing is watched.
+//! Linux shortcuts read from evdev. Input devices remain available to the
+//! compositor and other apps, so action bindings should use spare chords.
+//! The daemon owns gestures and session identity. This module discovers
+//! keyboards and emits transitions of configured chords only.
 //!
 //! Keyboards are followed across hotplug: an inotify watch on `/dev/input`
 //! picks up nodes that appear (a keyboard plugged in, or re-enumerated after
@@ -24,24 +16,153 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use evdev::{EventStream, EventSummary, KeyCode};
 use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{AbortHandle, JoinSet};
 
 const INPUT_DIR: &str = "/dev/input";
 
-/// A transition of the configured key, with the Ctrl modifier sampled at
-/// press time (autorepeat is filtered out).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyEvent {
-    /// The push-to-talk key went down; `ctrl` if a Ctrl key was held.
+pub(crate) enum Action {
+    Legacy,
+    Hold,
+    Toggle,
+    Cancel,
+    Raw,
+    Repaste,
+}
+
+const ACTION_COUNT: usize = 6;
+const ACTIONS: [Action; ACTION_COUNT] = [
+    Action::Legacy,
+    Action::Hold,
+    Action::Toggle,
+    Action::Cancel,
+    Action::Raw,
+    Action::Repaste,
+];
+
+impl Action {
+    pub(crate) fn field(self) -> &'static str {
+        match self {
+            Self::Legacy => "key",
+            Self::Hold => "hold_key",
+            Self::Toggle => "toggle_key",
+            Self::Cancel => "cancel_key",
+            Self::Raw => "raw_key",
+            Self::Repaste => "repaste_key",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Transition {
     Press { ctrl: bool },
-    /// The push-to-talk key went up.
     Release,
+    Disconnected,
+}
+
+/// A configured chord transition timed at the input device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyEvent {
+    pub(crate) action: Action,
+    pub(crate) transition: Transition,
+    pub(crate) at: Instant,
+}
+
+const CTRL: u8 = 1;
+const ALT: u8 = 2;
+const SHIFT: u8 = 4;
+const SUPER: u8 = 8;
+
+#[derive(Debug)]
+pub(crate) struct Binding {
+    pub(crate) action: Action,
+    key: KeyCode,
+    // The legacy key reacts with or without Ctrl for the two old modes.
+    modifiers: Option<u8>,
+}
+
+pub(crate) fn configured_keys(
+    config: &crate::config::HotkeyConfig,
+) -> [Option<&str>; ACTION_COUNT] {
+    [
+        config.key.as_deref(),
+        config.hold_key.as_deref(),
+        config.toggle_key.as_deref(),
+        config.cancel_key.as_deref(),
+        config.raw_key.as_deref(),
+        config.repaste_key.as_deref(),
+    ]
+}
+
+pub(crate) fn bindings(config: &crate::config::HotkeyConfig) -> Result<Vec<Binding>, String> {
+    let mut bindings: Vec<Binding> = Vec::new();
+    let names = configured_keys(config);
+    for (action, name) in ACTIONS.into_iter().zip(names) {
+        let Some(name) = name else { continue };
+        let (key, modifiers) = if action == Action::Legacy {
+            (
+                parse_key(name).map_err(|error| format!("hotkey.key: {error}"))?,
+                None,
+            )
+        } else {
+            let (key, modifiers) =
+                parse_chord(name).map_err(|error| format!("hotkey.{}: {error}", action.field()))?;
+            (key, Some(modifiers))
+        };
+        if let Some(other) = bindings.iter().find(|other| {
+            other.key == key && (other.modifiers == modifiers || other.modifiers.is_none())
+        }) {
+            return Err(format!(
+                "hotkey.{} conflicts with hotkey.{} on {name}",
+                action.field(),
+                other.action.field()
+            ));
+        }
+        bindings.push(Binding {
+            action,
+            key,
+            modifiers,
+        });
+    }
+    Ok(bindings)
+}
+
+fn parse_chord(name: &str) -> Result<(KeyCode, u8), String> {
+    let mut parts = name.rsplit('+');
+    let key = parse_key(parts.next().unwrap_or_default())?;
+    let mut modifiers = 0;
+    for part in parts {
+        let bit = match part {
+            "Ctrl" => CTRL,
+            "Alt" => ALT,
+            "Shift" => SHIFT,
+            "Super" => SUPER,
+            _ => return Err(format!("unknown modifier {part:?}")),
+        };
+        if modifiers & bit != 0 {
+            return Err(format!("duplicate modifier {part}"));
+        }
+        modifiers |= bit;
+    }
+    Ok((key, modifiers))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KeyboardSupport {
+    pub(crate) total: usize,
+    counts: [usize; ACTION_COUNT],
+}
+
+impl KeyboardSupport {
+    pub(crate) fn for_action(self, action: Action) -> usize {
+        self.counts[action as usize]
+    }
 }
 
 /// Parse an evdev key name such as `KEY_SCROLLLOCK` (the `KEY_*` constants
@@ -51,71 +172,92 @@ pub fn parse_key(name: &str) -> Result<KeyCode, String> {
     KeyCode::from_str(name).map_err(|_| format!("unknown evdev key name: {name}"))
 }
 
-/// Watch every keyboard that has `key` and forward its presses and
-/// releases. Returns one task; aborting it stops every device watch. It
-/// also ends when `events` is closed.
-///
-/// `on_count` receives the number of watched devices: once synchronously
-/// before this returns, then whenever hotplug changes it. 0 usually means
-/// no read access to /dev/input (join the `input` group) or no keyboard
-/// with the key plugged in. Without inotify the initial set is kept and a
-/// device whose event stream fails (unplug) is only dropped.
-///
-/// The Ctrl state is one counter shared by all devices, so Ctrl on one
-/// keyboard qualifies a press on another; it can never go below zero even
-/// if Ctrl was already down when the listener started.
-pub fn listen(
-    key: KeyCode,
-    events: mpsc::Sender<KeyEvent>,
-    mut on_count: impl FnMut(usize) + Send + 'static,
-) -> tokio::task::JoinHandle<()> {
-    // Watch before scanning so a node created in between is not missed;
-    // `add` ignores one already watched.
-    let mut notify = watch_input_dir().ok();
-    let mut watcher = Watcher {
-        key,
-        events,
-        ctrl_down: Arc::new(AtomicUsize::new(0)),
-        devices: JoinSet::new(),
-        paths: HashMap::new(),
-    };
-    watcher.scan();
-    let mut reported = watcher.paths.len();
-    on_count(reported);
-    tokio::spawn(async move {
-        let closed = watcher.events.clone();
-        let mut buf = [0u8; 4096];
-        loop {
-            tokio::select! {
-                // The daemon dropped its receiver (reload or shutdown);
-                // dropping `watcher` aborts the device tasks.
-                () = closed.closed() => return,
-                // Reap device tasks that ended (unplug); `None` when there
-                // are none disables this branch for this round.
-                Some(_) = watcher.devices.join_next() => {}
-                len = read_events(&mut notify, &mut buf) => watcher.apply(&buf[..len]),
+/// Owns the actual keyboard streams discovered during a scan. A config
+/// change can reject an empty set before stopping the current listener.
+pub(crate) struct Listener {
+    watcher: Watcher,
+    notify: Option<AsyncFd<File>>,
+}
+
+impl Listener {
+    pub fn open(bindings: Arc<[Binding]>, events: mpsc::Sender<KeyEvent>) -> Self {
+        // Watch before scanning so a node created in between is not missed.
+        let notify = watch_input_dir().ok();
+        let mut watcher = Watcher {
+            bindings,
+            events,
+            keys: Arc::new(Mutex::new(PressedKeys::default())),
+            devices: JoinSet::new(),
+            paths: HashMap::new(),
+        };
+        watcher.scan();
+        Self { watcher, notify }
+    }
+
+    pub fn support(&self) -> KeyboardSupport {
+        self.watcher.support()
+    }
+
+    /// Aborting the returned task or closing the channel stops every watch.
+    pub fn start(
+        self,
+        mut on_count: impl FnMut(KeyboardSupport) + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut reported = self.support();
+        on_count(reported);
+        let Self {
+            mut watcher,
+            mut notify,
+        } = self;
+        tokio::spawn(async move {
+            let closed = watcher.events.clone();
+            let mut buf = [0u8; 4096];
+            loop {
+                tokio::select! {
+                    () = closed.closed() => return,
+                    Some(_) = watcher.devices.join_next() => {}
+                    len = read_events(&mut notify, &mut buf) => watcher.apply(&buf[..len]),
+                }
+                watcher.paths.retain(|_, device| !device.task.is_finished());
+                let count = watcher.support();
+                if count != reported {
+                    reported = count;
+                    on_count(count);
+                }
             }
-            watcher.paths.retain(|_, task| !task.is_finished());
-            let count = watcher.paths.len();
-            if count != reported {
-                reported = count;
-                on_count(count);
-            }
-        }
-    })
+        })
+    }
 }
 
 struct Watcher {
-    key: KeyCode,
+    bindings: Arc<[Binding]>,
     events: mpsc::Sender<KeyEvent>,
-    ctrl_down: Arc<AtomicUsize>,
+    keys: Arc<Mutex<PressedKeys>>,
     devices: JoinSet<()>,
-    /// Watched device node → its task; the task may have finished (stream
-    /// failed) until the next prune.
-    paths: HashMap<PathBuf, AbortHandle>,
+    paths: HashMap<PathBuf, WatchedDevice>,
+}
+
+struct WatchedDevice {
+    task: AbortHandle,
+    supports: u8,
+    // Dropping this stops the reader and releases the keys that it contributed.
+    _disconnect: oneshot::Sender<()>,
 }
 
 impl Watcher {
+    fn support(&self) -> KeyboardSupport {
+        let mut support = KeyboardSupport {
+            total: self.paths.len(),
+            ..Default::default()
+        };
+        for device in self.paths.values() {
+            for (index, count) in support.counts.iter_mut().enumerate() {
+                *count += usize::from(device.supports & (1 << index) != 0);
+            }
+        }
+        support
+    }
+
     /// Try every `event*` node under /dev/input.
     fn scan(&mut self) {
         let Ok(entries) = std::fs::read_dir(INPUT_DIR) else {
@@ -141,9 +283,7 @@ impl Watcher {
             }
             let path = Path::new(INPUT_DIR).join(name);
             if mask & libc::IN_DELETE != 0 {
-                if let Some(task) = self.paths.remove(&path) {
-                    task.abort();
-                }
+                self.paths.remove(&path);
             } else {
                 self.add(path);
             }
@@ -156,77 +296,203 @@ impl Watcher {
         if self
             .paths
             .get(&path)
-            .is_some_and(|task| !task.is_finished())
+            .is_some_and(|device| !device.task.is_finished())
         {
             return;
         }
-        let Some(stream) = open_keyboard(&path, self.key) else {
+        let Some((stream, supports)) = open_keyboard(&path, &self.bindings) else {
             return;
         };
+        let (disconnect, disconnected) = oneshot::channel();
         let task = self.devices.spawn(forward(
             stream,
-            self.key,
+            self.bindings.clone(),
             self.events.clone(),
-            self.ctrl_down.clone(),
+            self.keys.clone(),
+            disconnected,
         ));
-        self.paths.insert(path, task);
+        self.paths.insert(
+            path,
+            WatchedDevice {
+                task,
+                supports,
+                _disconnect: disconnect,
+            },
+        );
     }
 }
 
-/// Open `path` as an event stream if the device reports `key` at all; this
-/// skips mice, touchpads and other non-keyboard nodes with no extra probing.
-fn open_keyboard(path: &Path, key: KeyCode) -> Option<EventStream> {
+fn open_keyboard(path: &Path, bindings: &[Binding]) -> Option<(EventStream, u8)> {
     let device = evdev::Device::open(path).ok()?;
-    let has_key = device
-        .supported_keys()
-        .is_some_and(|keys| keys.contains(key));
-    if !has_key {
+    let keys = device.supported_keys()?;
+    let supports = bindings
+        .iter()
+        .filter(|binding| keys.contains(binding.key))
+        .fold(0, |mask, binding| mask | (1 << binding.action as usize));
+    if supports == 0 {
         return None;
     }
-    device.into_event_stream().ok()
+    Some((device.into_event_stream().ok()?, supports))
 }
 
-/// Forward one device's transitions of `key` until its stream fails
-/// (unplug) or `events` is closed.
+#[derive(Default)]
+struct PressedKeys {
+    modifiers: [usize; 4],
+    actions: [usize; ACTION_COUNT],
+}
+
+impl PressedKeys {
+    fn modifier_mask(&self) -> u8 {
+        self.modifiers
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (index, count)| {
+                mask | (u8::from(*count > 0) << index)
+            })
+    }
+}
+
+#[derive(Default)]
+struct DeviceKeys {
+    modifiers: u8,
+    actions: [bool; ACTION_COUNT],
+}
+
+impl DeviceKeys {
+    fn update_modifier(&mut self, side: usize, down: bool, pressed: &mut PressedKeys) {
+        let bit = 1 << side;
+        if down != (self.modifiers & bit != 0) {
+            self.modifiers ^= bit;
+            if down {
+                pressed.modifiers[side / 2] += 1;
+            } else {
+                pressed.modifiers[side / 2] -= 1;
+            }
+        }
+    }
+
+    fn release(&mut self, action: Action, pressed: &mut PressedKeys) -> bool {
+        let index = action as usize;
+        if !std::mem::take(&mut self.actions[index]) {
+            return false;
+        }
+        pressed.actions[index] -= 1;
+        pressed.actions[index] == 0
+    }
+
+    fn transition(
+        &mut self,
+        bindings: &[Binding],
+        pressed: &mut PressedKeys,
+        key: KeyCode,
+        value: i32,
+        at: Instant,
+    ) -> Option<KeyEvent> {
+        if value != 0 && value != 1 {
+            return None;
+        }
+        let modifiers = pressed.modifier_mask();
+        if let Some(side) = modifier_side(key) {
+            self.update_modifier(side, value == 1, pressed);
+        }
+        let mut same_key = bindings.iter().filter(|binding| binding.key == key);
+        if value == 0 {
+            let action = same_key
+                .find(|binding| self.actions[binding.action as usize])?
+                .action;
+            return self.release(action, pressed).then_some(KeyEvent {
+                action,
+                at,
+                transition: Transition::Release,
+            });
+        }
+        if same_key
+            .clone()
+            .any(|binding| self.actions[binding.action as usize])
+        {
+            return None;
+        }
+        let action = same_key
+            .find(|binding| {
+                binding
+                    .modifiers
+                    .is_none_or(|required| required == modifiers)
+            })?
+            .action;
+        let index = action as usize;
+        self.actions[index] = true;
+        pressed.actions[index] += 1;
+        (pressed.actions[index] == 1).then_some(KeyEvent {
+            action,
+            at,
+            transition: Transition::Press {
+                ctrl: modifiers & CTRL != 0,
+            },
+        })
+    }
+}
+
+fn modifier_side(key: KeyCode) -> Option<usize> {
+    Some(match key {
+        KeyCode::KEY_LEFTCTRL => 0,
+        KeyCode::KEY_RIGHTCTRL => 1,
+        KeyCode::KEY_LEFTALT => 2,
+        KeyCode::KEY_RIGHTALT => 3,
+        KeyCode::KEY_LEFTSHIFT => 4,
+        KeyCode::KEY_RIGHTSHIFT => 5,
+        KeyCode::KEY_LEFTMETA => 6,
+        KeyCode::KEY_RIGHTMETA => 7,
+        _ => return None,
+    })
+}
+
 async fn forward(
     mut stream: EventStream,
-    key: KeyCode,
+    bindings: Arc<[Binding]>,
     events: mpsc::Sender<KeyEvent>,
-    ctrl_down: Arc<AtomicUsize>,
+    keys: Arc<Mutex<PressedKeys>>,
+    mut disconnected: oneshot::Receiver<()>,
 ) {
-    while let Ok(event) = stream.next_event().await {
+    let mut device = DeviceKeys::default();
+    loop {
+        let next_event = tokio::select! {
+            event = stream.next_event() => event,
+            _ = &mut disconnected => break,
+        };
+        let Ok(event) = next_event else { break };
         let EventSummary::Key(_, code, value) = event.destructure() else {
             continue;
         };
-        // Track Ctrl ourselves (value 1 = down, 0 = up, 2 = repeat):
-        // there is no modifier state in raw evdev events.
-        if matches!(code, KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL) {
-            match value {
-                1 => {
-                    ctrl_down.fetch_add(1, Ordering::Relaxed);
-                }
-                0 => {
-                    let _ = ctrl_down.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-                        held.checked_sub(1)
-                    });
-                }
-                _ => {}
+        if modifier_side(code).is_none() && !bindings.iter().any(|binding| binding.key == code) {
+            continue;
+        }
+        let at = Instant::now();
+        // Send under the same lock so presses and releases from different
+        // devices reach the gateway in the order they changed the aggregate.
+        let mut pressed = keys.lock().await;
+        if let Some(event) = device.transition(&bindings, &mut pressed, code, value, at) {
+            if events.send(event).await.is_err() {
+                return;
             }
-            continue;
         }
-        if code != key {
-            continue;
-        }
-        // value 2 is autorepeat: neither a new press nor a release.
-        let forwarded = match value {
-            1 => KeyEvent::Press {
-                ctrl: ctrl_down.load(Ordering::Relaxed) > 0,
-            },
-            0 => KeyEvent::Release,
-            _ => continue,
-        };
-        if events.send(forwarded).await.is_err() {
-            return;
+    }
+    let mut pressed = keys.lock().await;
+    for side in 0..8 {
+        device.update_modifier(side, false, &mut pressed);
+    }
+    let at = Instant::now();
+    for action in ACTIONS {
+        if device.release(action, &mut pressed)
+            && events
+                .send(KeyEvent {
+                    action,
+                    at,
+                    transition: Transition::Disconnected,
+                })
+                .await
+                .is_err()
+        {
+            break;
         }
     }
 }
@@ -297,6 +563,48 @@ fn parse_inotify<'a>(batch: &'a [u8]) -> impl Iterator<Item = (u32, &'a OsStr)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_shortcut_suppresses_repeat_and_releases_after_its_modifiers() {
+        let config = crate::config::HotkeyConfig {
+            hold_key: Some("Ctrl+KEY_F6".to_owned()),
+            ..Default::default()
+        };
+        let bindings = bindings(&config).unwrap();
+        let mut pressed = PressedKeys::default();
+        let mut first = DeviceKeys::default();
+        let mut second = DeviceKeys::default();
+        let now = Instant::now();
+        first.transition(&bindings, &mut pressed, KeyCode::KEY_LEFTCTRL, 1, now);
+        assert_eq!(
+            first.transition(&bindings, &mut pressed, KeyCode::KEY_F6, 1, now),
+            Some(KeyEvent {
+                action: Action::Hold,
+                at: now,
+                transition: Transition::Press { ctrl: true }
+            }),
+        );
+        for repeat in [1, 2] {
+            assert!(first
+                .transition(&bindings, &mut pressed, KeyCode::KEY_F6, repeat, now)
+                .is_none());
+        }
+        assert!(second
+            .transition(&bindings, &mut pressed, KeyCode::KEY_F6, 1, now)
+            .is_none());
+        first.transition(&bindings, &mut pressed, KeyCode::KEY_LEFTCTRL, 0, now);
+        assert!(first
+            .transition(&bindings, &mut pressed, KeyCode::KEY_F6, 0, now)
+            .is_none());
+        assert_eq!(
+            second.transition(&bindings, &mut pressed, KeyCode::KEY_F6, 0, now),
+            Some(KeyEvent {
+                action: Action::Hold,
+                at: now,
+                transition: Transition::Release
+            }),
+        );
+    }
 
     fn record(mask: u32, name: &[u8], padded: usize) -> Vec<u8> {
         let mut bytes = Vec::new();

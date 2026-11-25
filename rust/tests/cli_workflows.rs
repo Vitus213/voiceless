@@ -203,3 +203,58 @@ fn stream_rejects_unknown_mode_before_capture() {
         "{stderr}"
     );
 }
+
+#[test]
+fn mode_preview_applies_the_matching_pipeline_without_a_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+[output]
+rules = [{app_id = "editor", mode = "voice-polish"}]
+pipelines = [{mode = "voice-polish", steps = ["replace"]}]
+[text]
+replacements = [{from = "SDK", to = "API"}]
+"#,
+    )
+    .unwrap();
+    let output = voiceless()
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "mode",
+            "preview",
+            "--json",
+            "--app-id",
+            "editor",
+            "--text",
+            "SDK\n/tmp/v1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["text"], "API\n/tmp/v1");
+    assert_eq!(result["trace"]["selection"]["source"], "application-rule");
+    assert_eq!(result["trace"]["steps"][0]["before"], "SDK\n/tmp/v1");
+    assert!(!dir.path().join("data").exists());
+}
+
+#[test]
+fn mode_mcp_requires_user_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = voiceless()
+        .args(["mode", "mcp"])
+        .env("XDG_CONFIG_HOME", dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("output.allow_opencode"));
+}

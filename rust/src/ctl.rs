@@ -16,9 +16,21 @@
 //! process relays the `Event` signal to stdout/stderr and Ctrl-C to
 //! `Stop`/`Cancel`, reproducing the standalone `stream` exit codes.
 
+#[cfg(target_os = "linux")]
 use futures_util::StreamExt;
 
+#[cfg(target_os = "linux")]
+use crate::coordinator::ControlCommand;
+#[cfg(target_os = "linux")]
 use crate::daemon::{BUS_NAME, INTERFACE, OBJECT_PATH};
+
+#[cfg(not(target_os = "linux"))]
+#[path = "desktop/native_ctl.rs"]
+mod native;
+#[cfg(not(target_os = "linux"))]
+use native::execute;
+#[cfg(not(target_os = "linux"))]
+pub use native::stream_via_daemon;
 
 /// One `voiceless ctl` subcommand, mapped from the clap variants in `main`.
 #[derive(Debug, Clone)]
@@ -32,6 +44,12 @@ pub enum CtlAction {
     Stop,
     /// `Cancel()`: abort without typing.
     Cancel,
+    /// `Pause()`: refuse every start until `Resume()`; a session in progress is left alone.
+    Pause,
+    /// `Resume()`: accept starts again.
+    Resume,
+    /// `Repaste()`: deliver the last completed text to the current input target.
+    Repaste,
     /// `Status()`: print `idle`, `recording` or `stopping`.
     Status,
     /// Subscribe to the `Event` signal and print each line until killed.
@@ -53,6 +71,7 @@ pub async fn run(action: CtlAction) -> i32 {
 /// Open the session bus and perform `action`. Method calls take `(s)` for
 /// the mode-carrying commands and `()` otherwise; `Status` deserializes the
 /// `s` reply, the others discard the `"queued"` string.
+#[cfg(target_os = "linux")]
 async fn execute(action: CtlAction) -> zbus::Result<()> {
     let connection = zbus::Connection::session().await?;
     let call = |method: &'static str, mode: Option<String>| {
@@ -84,6 +103,21 @@ async fn execute(action: CtlAction) -> zbus::Result<()> {
         CtlAction::Start(mode) => drop(call("Start", Some(mode)).await?),
         CtlAction::Stop => drop(call("Stop", None).await?),
         CtlAction::Cancel => drop(call("Cancel", None).await?),
+        CtlAction::Repaste => drop(call("Repaste", None).await?),
+        CtlAction::Pause | CtlAction::Resume => {
+            let paused = matches!(action, CtlAction::Pause);
+            let reply = connection
+                .call_method(
+                    Some(BUS_NAME),
+                    OBJECT_PATH,
+                    Some(INTERFACE),
+                    "SetPaused",
+                    &(paused,),
+                )
+                .await
+                .map_err(explain)?;
+            drop(reply);
+        }
         CtlAction::Status => {
             let state: String = call("Status", None).await?.body().deserialize()?;
             println!("{state}");
@@ -112,6 +146,7 @@ async fn execute(action: CtlAction) -> zbus::Result<()> {
 
 /// Replace the bus's `ServiceUnknown` error (nobody owns `BUS_NAME`) with a
 /// message that says how to start the daemon; other errors pass through.
+#[cfg(target_os = "linux")]
 fn explain(error: zbus::Error) -> zbus::Error {
     match &error {
         zbus::Error::MethodError(name, _, _)
@@ -125,100 +160,123 @@ fn explain(error: zbus::Error) -> zbus::Error {
     }
 }
 
-/// `voiceless stream` while the daemon runs: the daemon already holds the
-/// local model and a second copy would not fit in VRAM, so the session runs
-/// there and this process relays its events and the Ctrl-C stop/cancel.
-/// `None` when no daemon owns the bus name (or the session bus itself is
-/// unreachable), in which case `main` runs `stream` standalone; `Some` is
-/// the relayed session's exit code or a relay error (daemon busy, outdated
-/// daemon, bus failure), which `main` reports as exit 1.
+/// Delegate streaming to the runtime that owns this data directory.
+/// With no matching daemon, `main` starts a standalone session.
+#[cfg(target_os = "linux")]
 pub async fn stream_via_daemon(
     mode: &str,
     inject: bool,
     json: bool,
+    context: &crate::stream::DictationContext,
 ) -> Option<Result<i32, String>> {
     let connection = zbus::Connection::session().await.ok()?;
     let dbus = zbus::fdo::DBusProxy::new(&connection).await.ok()?;
     let name = zbus::names::BusName::try_from(BUS_NAME).ok()?;
-    if !dbus.name_has_owner(name).await.ok()? {
-        return None;
-    }
+    let owner = dbus.get_name_owner(name).await.ok()?;
+    let proxy = match zbus::Proxy::new(&connection, owner.as_str(), OBJECT_PATH, INTERFACE).await {
+        Ok(proxy) => proxy,
+        Err(error) => return Some(Err(error.to_string())),
+    };
+    let directory: zbus::Result<Vec<u8>> = proxy.call("DataDirectory", &()).await;
+    let scoped = match directory {
+        Ok(directory) => {
+            let local = crate::models::default_data_dir().canonicalize().ok()?;
+            if directory != local.as_os_str().as_encoded_bytes() {
+                return None;
+            }
+            true
+        }
+        Err(error) if unknown_method(&error) => {
+            // Previous releases delegated only local streaming sessions.
+            let config = crate::config::load_default_config().ok()?;
+            if !matches!(
+                config.asr.streaming_backend.as_str(),
+                "local-offline" | "local-streaming"
+            ) {
+                return None;
+            }
+            false
+        }
+        Err(error) => return Some(Err(error.to_string())),
+    };
     Some(
-        relay(&connection, mode, inject, json)
+        relay(&proxy, mode, inject, json, scoped, context)
             .await
             .map_err(|error| error.to_string()),
     )
 }
 
-/// Run one session inside the daemon and follow it to its end.
-///
-/// Steps: refuse unless the daemon is idle; subscribe to `Event`; call
-/// `StartSession(mode, inject)`; then loop over the local SIGINT/SIGTERM
-/// control channel (first Ctrl-C -> `Stop`, second or SIGTERM -> `Cancel`)
-/// and the event stream, printing session events like standalone `stream`
-/// and returning once `RelayedSession` sees the daemon idle again. The
-/// idle check and the start are two calls, so another client could start a
-/// session in between; the daemon would then reject this start (logged
-/// only) and the relay would follow that other session instead.
+#[cfg(target_os = "linux")]
+fn unknown_method(error: &zbus::Error) -> bool {
+    matches!(error, zbus::Error::MethodError(name, _, _) if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod")
+}
+
+/// Subscribe before requesting a session. Use its D-Bus owner's unique
+/// name for both events and controls, so a restart cannot claim this relay.
+#[cfg(target_os = "linux")]
 async fn relay(
-    connection: &zbus::Connection,
+    proxy: &zbus::Proxy<'_>,
     mode: &str,
     inject: bool,
     json: bool,
+    scoped: bool,
+    context: &crate::stream::DictationContext,
 ) -> zbus::Result<i32> {
-    let state: String = connection
-        .call_method(Some(BUS_NAME), OBJECT_PATH, Some(INTERFACE), "Status", &())
-        .await?
-        .body()
-        .deserialize()?;
-    if state != "idle" {
-        return Err(zbus::Error::Failure(format!(
-            "the daemon is busy ({state}); try again when it is idle"
-        )));
-    }
     // Subscribe before starting so the session's first events are not lost.
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
+        .sender(proxy.destination().clone())?
         .interface(INTERFACE)?
         .member("Event")?
         .path(OBJECT_PATH)?
         .build();
-    let mut events = zbus::MessageStream::for_match_rule(rule, connection, None).await?;
-    connection
-        .call_method(
-            Some(BUS_NAME),
-            OBJECT_PATH,
-            Some(INTERFACE),
-            "StartSession",
-            &(mode, inject),
-        )
-        .await
-        .map_err(|error| match &error {
-            // `StartSession` was added with stream delegation; an older
-            // daemon still answers the other methods but not this one.
-            zbus::Error::MethodError(name, _, _)
-                if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" =>
-            {
-                zbus::Error::Failure(format!(
-                    "the running daemon predates `stream` delegation; upgrade voiceless and restart it (`systemctl --user restart voiceless`) ({error})"
-                ))
+    let mut events = zbus::MessageStream::for_match_rule(rule, proxy.connection(), None).await?;
+    let dbus = zbus::fdo::DBusProxy::new(proxy.connection()).await?;
+    let mut owner_changes = dbus
+        .receive_name_owner_changed_with_args(&[(0, proxy.destination().as_str())])
+        .await?;
+    let session_id = if !context.is_empty() {
+        let site = context.site.as_deref().unwrap_or_default();
+        let project = context.project.as_deref().unwrap_or_default();
+        Some(proxy.call("StartSessionWithContext", &(mode, inject, site, project)).await.map_err(|error| {
+            if unknown_method(&error) {
+                zbus::Error::Failure("restart the daemon with a Voiceless version that supports session context".to_owned())
+            } else { error }
+        })?)
+    } else if scoped {
+        Some(proxy.call("StartSessionWithId", &(mode, inject)).await?)
+    } else {
+        let _: String = proxy.call("StartSession", &(mode, inject)).await.map_err(|error| {
+            if unknown_method(&error) {
+                zbus::Error::Failure("restart the daemon with a Voiceless version that supports stream delegation".to_owned())
+            } else {
+                error
             }
-            _ => error,
         })?;
+        None
+    };
     // Same signal mapping as standalone `stream`, forwarded as D-Bus calls.
     let mut control = crate::stream::control_receiver();
-    let mut session = RelayedSession::default();
+    let mut session = session_id
+        .map(RelayedSession::for_session)
+        .unwrap_or_default();
     let mut preview = crate::stream::TerminalPreview::default();
     loop {
         tokio::select! {
+            _ = owner_changes.next() => {
+                preview.clear();
+                return Err(zbus::Error::Failure("the runtime disconnected during this session".to_owned()));
+            }
             Some(command) = control.recv() => {
-                let method = match command {
-                    crate::coordinator::ControlCommand::Stop => "Stop",
-                    crate::coordinator::ControlCommand::Cancel => "Cancel",
+                let (scoped_method, legacy_method) = match command {
+                    ControlCommand::Stop => ("StopSession", "Stop"),
+                    ControlCommand::Cancel => ("CancelSession", "Cancel"),
                 };
-                connection
-                    .call_method(Some(BUS_NAME), OBJECT_PATH, Some(INTERFACE), method, &())
-                    .await?;
+                if let Some(id) = session_id {
+                    proxy.call::<_, _, ()>(scoped_method, &(id,)).await?;
+                } else {
+                    let _: String = proxy.call(legacy_method, &()).await?;
+                }
             }
             message = events.next() => {
                 // The stream only ends when the bus connection drops; the
@@ -231,9 +289,13 @@ async fn relay(
                     continue;
                 };
                 if let Some(code) = session.observe(&event) {
+                    preview.clear();
+                    if let Some(error) = event["error"].as_str().filter(|_| !session.failed) {
+                        eprintln!("Voiceless: {error}");
+                    }
                     return Ok(code);
                 }
-                if RelayedSession::is_session_event(&event) {
+                if session.accepts(&event) && RelayedSession::is_session_event(&event) {
                     print_event(&event, &line, json, &mut preview);
                 }
             }
@@ -250,6 +312,7 @@ async fn relay(
 /// `completed` events for the outcome.
 #[derive(Debug, Default)]
 pub struct RelayedSession {
+    session_id: Option<u64>,
     /// A `recording` state was seen: the session we started is running.
     /// An `idle` before that is a leftover from before our start.
     recording: bool,
@@ -261,14 +324,36 @@ pub struct RelayedSession {
 }
 
 impl RelayedSession {
+    /// Track the ID returned by an acknowledged start request.
+    pub fn for_session(session_id: u64) -> Self {
+        Self {
+            session_id: Some(session_id),
+            ..Self::default()
+        }
+    }
+
+    fn accepts(&self, event: &serde_json::Value) -> bool {
+        self.session_id.is_none() || event["session_id"].as_u64() == self.session_id
+    }
+
     /// Feed one event; returns the exit code once the daemon is idle again
     /// after this session started. Cancellation wins over failure, failure
     /// (or a missing `completed`) over success.
     pub fn observe(&mut self, event: &serde_json::Value) -> Option<i32> {
+        if !self.accepts(event) {
+            return None;
+        }
         match event["type"].as_str() {
             Some("state") => match event["state"].as_str() {
                 Some("recording") => self.recording = true,
-                Some("idle") if self.recording => {
+                Some("idle") if self.recording || self.session_id.is_some() => {
+                    if let Some(code) = event["exit_code"].as_i64() {
+                        return Some(match code {
+                            0 => 0,
+                            130 => 130,
+                            _ => 1,
+                        });
+                    }
                     return Some(if self.cancelled {
                         130
                     } else if self.failed || !self.completed {
@@ -292,7 +377,7 @@ impl RelayedSession {
     pub fn is_session_event(event: &serde_json::Value) -> bool {
         !matches!(
             event["type"].as_str(),
-            Some("state" | "log" | "session" | "level")
+            Some("state" | "log" | "session" | "level" | "engine")
         )
     }
 }

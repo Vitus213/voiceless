@@ -17,19 +17,18 @@
 //   ClearPreedit() -> (b, s)        Remove the preedit; always (true, "").
 //   Status() -> (b, s)              (true, program) while a context has
 //       focus, (false, "no focused input context") otherwise. No effects.
+//   FocusedContext() returns the stable id of the focused input context.
+//   CommitToContext(s id, s text) and PreeditToContext(s id, s text) refuse
+//       when that context no longer has focus. Use these for dictation.
 // Calls are dispatched on Fcitx5's single event loop in bus order, so a
 // client that sends SetPreedit then CommitString on one connection sees
 // them applied in that order: a stale partial never lands after the final.
 //
-// Preedit lifecycle. SetPreedit remembers the context it drew into
-// (preeditContext_, a tracking reference that turns null when Fcitx5
-// destroys the context, so no dangling pointer is ever touched). The
-// preedit is cleared from that context before any of: a SetPreedit while a
-// different context has focus, a SetPreedit with no focused context, a
-// CommitString, or a ClearPreedit. Clearing resets both the client-side
-// and the panel preedit and refreshes the UI. The module is loaded at
-// Fcitx5 start (OnDemand=False in voiceless-bridge.conf) and uses the dbus
-// addon's bus connection to register the object.
+// Preedit lifecycle. The bridge tracks the context it drew into with a
+// reference that becomes null when Fcitx5 destroys the context. Each new
+// preview clears the previous context if necessary. A refused preview or
+// commit also clears the old preedit, as does an explicit ClearPreedit.
+// Fcitx5 loads this module at startup and registers it on the addon bus.
 
 #include <string>
 #include <tuple>
@@ -61,16 +60,17 @@ public:
     // this bridge showed. Returns (ok, detail): detail is the target program
     // on success, the reason on failure.
     std::tuple<bool, std::string> commitString(const std::string &text) {
-        clearPreedit();
-        if (text.empty()) {
-            return {false, "empty text"};
-        }
+        return commit(focusedInputContext(), text);
+    }
+
+    std::tuple<bool, std::string> commitToContext(const std::string &id,
+                                                 const std::string &text) {
         auto *ic = focusedInputContext();
-        if (!ic) {
-            return {false, "no focused input context"};
+        if (!ic || contextId(ic) != id) {
+            clearPreedit();
+            return {false, "the original Fcitx5 input context no longer has focus"};
         }
-        ic->commitString(text);
-        return {true, describe(ic)};
+        return commit(ic, text);
     }
 
     // Show `text` as underlined preedit in the focused input context:
@@ -78,7 +78,41 @@ public:
     // Focus moving elsewhere clears it from the old context; empty text
     // clears it.
     std::tuple<bool, std::string> setPreedit(const std::string &text) {
+        return showPreedit(focusedInputContext(), text);
+    }
+
+    std::tuple<bool, std::string> preeditToContext(const std::string &id,
+                                                  const std::string &text) {
         auto *ic = focusedInputContext();
+        if (!ic || contextId(ic) != id) {
+            clearPreedit();
+            return {false, "the original Fcitx5 input context no longer has focus"};
+        }
+        return showPreedit(ic, text);
+    }
+
+    std::tuple<bool, std::string> focusedContext() {
+        auto *ic = focusedInputContext();
+        if (!ic) {
+            return {false, "no focused input context"};
+        }
+        return {true, contextId(ic)};
+    }
+
+private:
+    std::tuple<bool, std::string> commit(fcitx::InputContext *ic, const std::string &text) {
+        clearPreedit();
+        if (text.empty()) {
+            return {false, "empty text"};
+        }
+        if (!ic) {
+            return {false, "no focused input context"};
+        }
+        ic->commitString(text);
+        return {true, describe(ic)};
+    }
+
+    std::tuple<bool, std::string> showPreedit(fcitx::InputContext *ic, const std::string &text) {
         if (!ic || ic != preeditContext_.get()) {
             clearPreedit();
         }
@@ -104,6 +138,7 @@ public:
         return {true, describe(ic)};
     }
 
+public:
     // D-Bus ClearPreedit: idempotent, never fails.
     std::tuple<bool, std::string> clearPreeditMethod() {
         clearPreedit();
@@ -148,6 +183,17 @@ private:
         return ic && ic->hasFocus() ? ic : nullptr;
     }
 
+    static std::string contextId(const fcitx::InputContext *ic) {
+        constexpr char hex[] = "0123456789abcdef";
+        std::string id;
+        id.reserve(ic->uuid().size() * 2);
+        for (auto byte : ic->uuid()) {
+            id.push_back(hex[byte >> 4]);
+            id.push_back(hex[byte & 0xf]);
+        }
+        return id;
+    }
+
     // "program (frontend)": the client-reported program name ("unknown"
     // when it reported none) and the Fcitx5 frontend addon it connected
     // through. Returned as the detail string of every successful call.
@@ -169,6 +215,9 @@ private:
     FCITX_OBJECT_VTABLE_METHOD(setPreedit, "SetPreedit", "s", "bs");
     FCITX_OBJECT_VTABLE_METHOD(clearPreeditMethod, "ClearPreedit", "", "bs");
     FCITX_OBJECT_VTABLE_METHOD(status, "Status", "", "bs");
+    FCITX_OBJECT_VTABLE_METHOD(commitToContext, "CommitToContext", "ss", "bs");
+    FCITX_OBJECT_VTABLE_METHOD(preeditToContext, "PreeditToContext", "ss", "bs");
+    FCITX_OBJECT_VTABLE_METHOD(focusedContext, "FocusedContext", "", "bs");
 };
 
 // Addon instance: resolves the dbus addon (declared as a dependency in

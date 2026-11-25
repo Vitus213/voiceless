@@ -27,7 +27,14 @@ fi
 
 # Temp HOME is removed and the throwaway Fcitx5 killed on any exit path.
 home=$(mktemp -d)
-trap 'kill "${fcitx_pid:-}" 2>/dev/null && wait "$fcitx_pid" 2>/dev/null; rm -rf "$home"' EXIT
+cleanup() {
+  if [[ -n ${fcitx_pid:-} ]]; then
+    kill "$fcitx_pid" 2>/dev/null || :
+    wait "$fcitx_pid" 2>/dev/null || :
+  fi
+  rm -rf "$home"
+}
+trap cleanup EXIT
 # --disable=all --enable=... loads only what the test needs: keyboard
 # (a real input method so contexts activate), dbus (bus connection the
 # bridge registers on), dbusfrontend (lets the test create contexts) and
@@ -43,7 +50,7 @@ fcitx_pid=$!
 # (busctl --user follows the DBUS_SESSION_BUS_ADDRESS dbus-run-session
 # set). If it never does, cargo test fails with a bus error, not a hang.
 for _ in $(seq 50); do
-  busctl --user call org.fcitx.Fcitx5 /voiceless dev.voiceless.Fcitx5Bridge1 Status \
+  busctl --user --auto-start=no call org.fcitx.Fcitx5 /voiceless dev.voiceless.Fcitx5Bridge1 Status \
     >/dev/null 2>&1 && break
   sleep 0.1
 done

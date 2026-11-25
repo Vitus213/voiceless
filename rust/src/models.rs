@@ -1,6 +1,7 @@
 //! Model supply chain: the pinned catalog, integrity-checked
-//! install/check/remove, and the versioned pointer layout (compatible with
-//! the Python manager) that every local backend reads its model from:
+//! install/check/remove, the import of local GGUF files, and the
+//! versioned pointer layout (compatible with the Python manager) that
+//! every local backend reads its model from:
 //! `<data>/models/versions/<id>/<version>-<digest12>/` payloads and
 //! `<data>/models/<id>/current` symlinks.
 //!
@@ -12,9 +13,15 @@
 //! - `engine.rs`: the daemon's warm engine verifies once at start and warm
 //!   sessions skip the per-session check;
 //! - `benchmark_cmd.rs`: `benchmark asr --backend local-streaming`;
-//! - `model_cmd.rs`: `voiceless model list|install|check|remove`;
-//! - `console/library.rs`: `GET/POST/DELETE /api/models` (installs run on a
-//!   blocking task; progress is read from `download_path`).
+//! - `model_cmd.rs`: `voiceless model list|install|import|check|remove`;
+//! - `console/library.rs`: `GET/POST/DELETE /api/models` and
+//!   `POST /api/models/import` (installs and imports run on a blocking
+//!   task; progress is read from `download_path`).
+//!
+//! Submodules: `import.rs` (importing a local GGUF file),
+//! `gguf.rs` (reading a GGUF header without an engine), `info.rs` (name,
+//! languages and devices the model lists show) and `lease.rs` (the
+//! locks that hold across processes).
 //!
 //! Supply-chain contract (README "Model catalog"):
 //! - every entry pins an HTTPS URL, the exact byte count, an SRI SHA-256 of
@@ -32,6 +39,12 @@
 //! - sessions resolve the pointer afresh and re-verify through
 //!   `installed_model_dir`; a corrupted install is reported, never used.
 //!
+//! A model imported from a local GGUF file is stored the same way under a
+//! content-addressed id (`imported-<architecture>-<digest12>-gguf`), once
+//! its header, its load through the production decoder and its identity
+//! were verified (`import.rs`). It is listed, checked, selected and
+//! removed like a catalog model, and never replaces one.
+//!
 //! Files: downloads are staged as
 //! `<cache>/model-downloads/<id>-<version>.partial`; the XDG helpers
 //! (`default_data_dir`, `default_cache_dir`, `default_config_dir`,
@@ -41,10 +54,15 @@
 //! Failure behaviour: every operation is synchronous (blocking filesystem
 //! and network I/O) and reports `ModelError`. A failed install leaves no
 //! half-installed payload: the `.partial` file and the staging directory
-//! are always removed. If a corrupt existing payload had to be wiped before
-//! the retry, the model reads as "not installed" until an install succeeds.
-//! There is no locking: concurrent installs of the same id are serialized
-//! by the console, not here.
+//! are always removed, and what was installed before stays in place until
+//! a replacement is verified. A corrupt payload that is being replaced
+//! reads as "not installed" until an install succeeds.
+//!
+//! Guards across processes (`lease.rs`): an engine or session holds a
+//! shared lease on the models it runs, so `remove` answers `InUse` from
+//! the CLI as from the console while they are loaded; one operation at a
+//! time changes a model (`Busy` for a second one); and the next install or
+//! import deletes the staging leftovers of one that was interrupted.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -54,23 +72,40 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod gguf;
+mod import;
+mod info;
+mod lease;
+
+pub(crate) use import::available_space;
+pub use import::{gguf_import_supported, import_filename, ImportedModel};
+pub use info::{model_info, ModelInfo};
+use lease::validate_id;
+pub use lease::ModelLeases;
+
 /// Per-payload manifest written at install time and re-read by `check`.
 const MANIFEST_NAME: &str = "manifest.json";
+
+/// File a GGUF model is stored as inside its payload, downloaded or
+/// imported (`gguf_asr::MODEL_FILE`).
+pub const GGUF_MODEL_FILE: &str = "model.gguf";
 
 /// One pinned catalog entry: everything needed to fetch, verify, unpack and
 /// later re-verify a model. Built by the `*_spec()` constructors below;
 /// tests construct their own entries around fixture archives.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     /// Stable catalog id: the value of `[local].model`, the argument of
     /// `voiceless model install <id>`, and the directory name under both
     /// `models/` (pointer) and `models/versions/` (payloads).
     pub id: String,
-    /// Upstream release label. It prefixes the payload directory name and
-    /// the `.partial` download name; a new version (or digest) therefore
-    /// lands in a new side-by-side directory.
+    /// Upstream release label (`imported` for an imported model). It
+    /// prefixes the payload directory name and the `.partial` download
+    /// name; a new version (or digest) therefore lands in a new
+    /// side-by-side directory.
     pub version: String,
-    /// Download source. `HttpDownloader` refuses anything but `https://`.
+    /// Download source. `HttpDownloader` refuses anything but `https://`;
+    /// empty for an imported model, which has none.
     pub url: String,
     /// Subresource-Integrity string `sha256-<base64>` of the download bytes
     /// (the whole tarball or the single file); decoded by `decode_sri`.
@@ -291,8 +326,8 @@ pub fn qwen3_asr_1_7b_gguf_spec() -> ModelSpec {
         size_bytes: 2_185_030_624,
         archive_type: ArchiveType::File,
         top_level_directory: None,
-        allowed_members: names(&["model.gguf"]),
-        required_paths: names(&["model.gguf"]),
+        allowed_members: names(&[GGUF_MODEL_FILE]),
+        required_paths: names(&[GGUF_MODEL_FILE]),
         license_status: "Apache-2.0 (Qwen3-ASR; GGUF conversion by handy-computer).".to_owned(),
     }
 }
@@ -312,8 +347,8 @@ pub fn qwen3_asr_0_6b_gguf_spec() -> ModelSpec {
         size_bytes: 850_423_456,
         archive_type: ArchiveType::File,
         top_level_directory: None,
-        allowed_members: names(&["model.gguf"]),
-        required_paths: names(&["model.gguf"]),
+        allowed_members: names(&[GGUF_MODEL_FILE]),
+        required_paths: names(&[GGUF_MODEL_FILE]),
         license_status: "Apache-2.0 (Qwen3-ASR; GGUF conversion by handy-computer).".to_owned(),
     }
 }
@@ -377,8 +412,9 @@ pub fn catalog() -> Vec<ModelSpec> {
 /// console surface to the user.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
-    /// The id is not in `catalog()`. (Defined for callers; the manager
-    /// itself takes a `ModelSpec` and never produces it.)
+    /// The id is not in `catalog()` or the store, or is not a plain model
+    /// name (the manager refuses ids that could name a path). `find_spec`
+    /// answers it for callers; the manager itself takes a `ModelSpec`.
     #[error("unknown model id: {0}")]
     UnknownId(String),
     /// No `current` pointer exists for the model (also after a dangling
@@ -399,6 +435,32 @@ pub enum ModelError {
     /// missing required member.
     #[error("model archive invalid: {0}")]
     Archive(String),
+    /// This build cannot run GGUF models and so cannot import one; the
+    /// text says which package can.
+    #[error("cannot import GGUF models: {0}")]
+    Unsupported(String),
+    /// An imported file is not a speech recognition model this build can
+    /// use: not a GGUF container, cut short, without tensors, or refused
+    /// by the engine's load (a VAD, a language-ID or a text model).
+    #[error("not a usable speech model: {0}")]
+    Invalid(String),
+    /// The data filesystem cannot hold the model: `required` is the size
+    /// announced for it, `available` what is free to the user. Nothing was
+    /// staged.
+    #[error("not enough free space for the model: {required} bytes needed, {available} available")]
+    NoSpace { required: u64, available: u64 },
+    /// The upload or copy ended before the announced size.
+    #[error("model upload is incomplete: {actual} of {expected} bytes arrived; retry")]
+    Incomplete { expected: u64, actual: u64 },
+    /// A running engine or session holds the model. It can be removed
+    /// once that ends.
+    #[error(
+        "model {0} is in use by a running engine or session; stop it or switch models, then retry"
+    )]
+    InUse(String),
+    /// Another operation is installing, importing or removing the model.
+    #[error("model {0} is being installed, imported or removed by another operation; retry when it finishes")]
+    Busy(String),
     /// Any other filesystem error (create, rename, remove, read).
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -496,6 +558,9 @@ struct Manifest {
     /// Relative path -> digest/size of every regular file except the
     /// manifest itself.
     files: BTreeMap<String, ManifestFile>,
+    /// What an imported model is (`import.rs`); absent for a download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported: Option<import::ImportedManifest>,
 }
 
 /// One payload file as recorded at install time.
@@ -507,12 +572,16 @@ struct ManifestFile {
 
 /// Filesystem-level manager over one data/cache directory pair. Stateless
 /// apart from the three roots: every call re-reads the disk, so several
-/// instances (CLI, console, sessions) can coexist. All methods block.
+/// instances (CLI, console, sessions) can coexist, and they coordinate
+/// through the lock files of `lease.rs` when they run in different
+/// processes. All methods block.
 pub struct ModelManager {
-    /// `<data>/models`: holds `<id>/current` pointers and `versions/`.
+    /// `<data>/models`: holds `<id>/current` pointers, `versions/` and
+    /// `.locks/`.
     models_root: PathBuf,
-    /// `<data>/models/versions`: `<id>/<version>-<digest12>/` payloads and
-    /// `<id>/.staging-*` directories during an install.
+    /// `<data>/models/versions`: `<id>/<version>-<digest12>/` payloads,
+    /// `<id>/.staging-*` directories during an install or import, and
+    /// `.import-*.partial` staged uploads.
     versions_root: PathBuf,
     /// `<cache>/model-downloads`: `.partial` downloads (disposable).
     downloads_root: PathBuf,
@@ -521,7 +590,9 @@ pub struct ModelManager {
 impl ModelManager {
     /// Bind the roots under `data_dir` and `cache_dir` (normally
     /// `default_data_dir()` / `default_cache_dir()`). Creates nothing; the
-    /// directories appear on the first install.
+    /// directories appear on the first install, import or lease, and the
+    /// lock files of `lease.rs` under `<data>/models/.locks/` on the first
+    /// one of those.
     pub fn new(data_dir: &Path, cache_dir: &Path) -> Self {
         Self {
             models_root: data_dir.join("models"),
@@ -536,20 +607,23 @@ impl ModelManager {
     /// Idempotent and self-healing: if that directory already exists and
     /// passes `check_payload`, no download happens and the pointer is simply
     /// (re)activated, which also repairs a missing or dangling `current`.
-    /// A corrupt existing payload is wiped first, then re-downloaded.
+    /// A corrupt existing payload is replaced only once the new download
+    /// is verified; until then it stays where it is.
     ///
     /// Download, verification, extraction, manifest and the final rename
     /// happen in `install_from_network`; on any error the `.partial` file
     /// and the staging directory are removed before the error is returned,
     /// so a failed install never leaves anything under the canonical
-    /// payload name. Errors: `Integrity` (bad SRI, hash or size mismatch),
-    /// `Archive` (member outside the allow-list, `..` paths, missing
-    /// required member, tar/bzip2 failure), `Download`, `Io`.
+    /// payload name. What an interrupted install left behind is deleted
+    /// first (`sweep_staging`). Errors: `Integrity` (bad SRI, hash or size
+    /// mismatch), `Archive` (member outside the allow-list, `..` paths,
+    /// missing required member, tar/bzip2 failure), `Download`, `Busy`
+    /// while another operation installs, imports or removes the same
+    /// model, `Io`.
     ///
     /// Blocking for the duration of the download and of hashing the payload
     /// (gigabytes for the GGUF models); the console runs it on
-    /// `spawn_blocking`. Not safe against a concurrent install of the same
-    /// id from another process (no lock); the console serializes its own.
+    /// `spawn_blocking`.
     pub fn install<D: Downloader>(
         &self,
         spec: &ModelSpec,
@@ -561,8 +635,12 @@ impl ModelManager {
         // belongs to this spec.
         let digest_hex = decode_sri(&spec.sha256_sri)?;
         let version_name = format!("{}-{}", spec.version, &digest_hex[..12]);
+        // One operation at a time changes this model, in this process as in
+        // any other; the lock lives until the pointer is swapped.
+        let _install = self.lock_mutation(&spec.id)?;
         let model_versions = self.versions_root.join(&spec.id);
         fs::create_dir_all(&model_versions)?;
+        self.sweep_staging(Some(&model_versions));
         let destination = model_versions.join(&version_name);
 
         if destination.exists() {
@@ -573,11 +651,9 @@ impl ModelManager {
                 self.activate(&spec.id, &destination)?;
                 return Ok(destination);
             }
-            // Corrupt: remove the whole directory before downloading again.
-            // From here until the new payload is renamed into place the
-            // `current` pointer dangles and the model reads as not
-            // installed, which is the safe state (never a half-valid one).
-            fs::remove_dir_all(&destination)?;
+            // Corrupt: `install_from_network` replaces it once the new
+            // download is verified. Until then the pointer keeps resolving
+            // to it and every check reports the corruption.
         }
 
         fs::create_dir_all(&self.downloads_root)?;
@@ -655,23 +731,75 @@ impl ModelManager {
         // `walk_relative` also rejects symlinks or other non-regular entries
         // an archive might have planted.
         let files = hash_staged_files(staging)?;
-        write_manifest(staging, spec, expected_digest_hex, &files)?;
+        write_manifest(staging, spec, expected_digest_hex, &files, None)?;
 
         let destination = staging.parent().unwrap().join(format!(
             "{}-{}",
             spec.version,
             &expected_digest_hex[..12]
         ));
-        // Atomic publish: only a fully extracted, hashed and manifested
-        // directory is renamed into the canonical name, and `rename` on one
-        // filesystem is atomic, so a concurrent `resolve`/`check` never sees
-        // a half-written payload under that name. A directory that appeared
-        // meanwhile (another installer) is replaced rather than merged.
-        if destination.exists() {
-            fs::remove_dir_all(&destination)?;
-        }
-        fs::rename(staging, &destination)?;
+        self.publish_payload(&spec.id, staging, &destination)?;
         Ok(destination)
+    }
+
+    /// Repairs exchange complete directories while no engine uses the
+    /// old one. The caller removes the displaced payload at `staging`.
+    fn publish_payload(
+        &self,
+        id: &str,
+        staging: &Path,
+        destination: &Path,
+    ) -> Result<(), ModelError> {
+        if !destination.exists() {
+            return fs::rename(staging, destination).map_err(ModelError::from);
+        }
+        let _unused = self.lock_in_use(id)?;
+        #[cfg(windows)]
+        {
+            // Windows cannot swap two nonempty directories. Hold the model
+            // lease until the verified repair is in place or the old path
+            // has been restored.
+            let previous = destination.with_file_name(format!(".replaced-{}", unique_suffix()));
+            fs::rename(destination, &previous)?;
+            if let Err(error) = fs::rename(staging, destination) {
+                fs::rename(&previous, destination).map_err(|restore| {
+                    io::Error::other(format!(
+                        "cannot publish repair: {error}; cannot restore {}: {restore}",
+                        previous.display()
+                    ))
+                })?;
+                return Err(error.into());
+            }
+            fs::remove_dir_all(previous)?;
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            let staging = std::ffi::CString::new(staging.as_os_str().as_encoded_bytes())
+                .map_err(io::Error::other)?;
+            let destination = std::ffi::CString::new(destination.as_os_str().as_encoded_bytes())
+                .map_err(io::Error::other)?;
+            // SAFETY: both pointers refer to live NUL-terminated path strings.
+            #[cfg(target_os = "linux")]
+            let swapped = unsafe {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    staging.as_ptr(),
+                    libc::AT_FDCWD,
+                    destination.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            };
+            #[cfg(target_os = "macos")]
+            let swapped = unsafe {
+                libc::renamex_np(staging.as_ptr(), destination.as_ptr(), libc::RENAME_SWAP)
+            };
+            if swapped == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error().into())
+            }
+        }
     }
 
     /// Where an in-flight download is written; its size over
@@ -700,7 +828,8 @@ impl ModelManager {
     }
 
     /// Resolve the current payload for an installed model without caching;
-    /// returns `None` when no pointer exists.
+    /// returns `None` when no pointer exists. `UnknownId` for an id that is
+    /// not a plain model name (see `lease::validate_id`).
     ///
     /// The `current` link is followed by hand (`symlink_metadata` +
     /// `read_link`) instead of canonicalized so that a pointer that is a
@@ -710,18 +839,31 @@ impl ModelManager {
     /// `check` does. Note that a dangling symlink reads as `None` (not
     /// installed), because `Path::exists` follows links.
     pub fn resolve(&self, model_id: &str) -> Result<Option<PathBuf>, ModelError> {
+        validate_id(model_id)?;
         let pointer = self.models_root.join(model_id).join("current");
         if !pointer.exists() {
             return Ok(None);
         }
         let metadata = fs::symlink_metadata(&pointer)?;
+        #[cfg(unix)]
         if !metadata.file_type().is_symlink() {
             return Err(ModelError::Integrity(
                 model_id.to_owned(),
                 "current pointer is not a symlink".to_owned(),
             ));
         }
+        #[cfg(unix)]
         let target = fs::read_link(&pointer)?;
+        #[cfg(windows)]
+        let target = {
+            if !metadata.is_file() || metadata.len() > 4096 {
+                return Err(ModelError::Integrity(
+                    model_id.to_owned(),
+                    "current pointer is not a valid path file".to_owned(),
+                ));
+            }
+            PathBuf::from(fs::read_to_string(&pointer)?)
+        };
         // Only the exact relative shape written by `activate` is accepted;
         // anything else could point a session at files outside the
         // versioned payload tree.
@@ -743,23 +885,70 @@ impl ModelManager {
     }
 
     /// Delete the pointer directory and every installed version of
-    /// `model_id`. Returns `Ok(false)` when neither existed. Does not touch
-    /// an in-flight `.partial` and does not know whether a running engine
-    /// still has the files open (the console refuses to remove the loaded
-    /// engine's model; the CLI does not).
+    /// `model_id`, catalog or imported. Returns `Ok(false)` when neither
+    /// existed. Nothing is deleted while a running engine or session holds
+    /// the model (`InUse`, from the CLI as from the console: the holder
+    /// took it with `lease`) or while another operation installs, imports
+    /// or removes it (`Busy`). Does not touch an in-flight `.partial`
+    /// download in the cache.
     pub fn remove(&self, model_id: &str) -> Result<bool, ModelError> {
+        validate_id(model_id)?;
         let pointer_dir = self.models_root.join(model_id);
-        if !pointer_dir.exists() && !self.versions_root.join(model_id).exists() {
+        let versions = self.versions_root.join(model_id);
+        if !pointer_dir.exists() && !versions.exists() {
+            return Ok(false);
+        }
+        // Both held until the files are gone: no engine or session takes
+        // the model meanwhile, and no other operation changes it.
+        let _install = self.lock_mutation(model_id)?;
+        let _in_use = self.lock_in_use(model_id)?;
+        if !pointer_dir.exists() && !versions.exists() {
             return Ok(false);
         }
         if pointer_dir.exists() {
             fs::remove_dir_all(&pointer_dir)?;
         }
-        let versions = self.versions_root.join(model_id);
         if versions.exists() {
             fs::remove_dir_all(&versions)?;
         }
         Ok(true)
+    }
+
+    /// The spec of `id` in this store: a catalog entry, else an imported
+    /// model. `None` for any other id.
+    pub fn find_spec(&self, id: &str) -> Option<ModelSpec> {
+        catalog()
+            .into_iter()
+            .find(|spec| spec.id == id)
+            .or_else(|| {
+                self.list_imported()
+                    .ok()?
+                    .into_iter()
+                    .find(|model| model.spec.id == id)
+                    .map(|model| model.spec)
+            })
+    }
+
+    /// Delete the staging directories of installs that no longer run:
+    /// those under `own` (the model the caller holds the mutation lock of)
+    /// and those of every other model whose lock is free. An install or
+    /// import in flight owns its lock, so its staging directory is kept.
+    fn sweep_staging(&self, own: Option<&Path>) {
+        if let Some(own) = own {
+            remove_staging_dirs(own);
+        }
+        let Ok(entries) = fs::read_dir(&self.versions_root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if let Ok(_guard) = self.lock_mutation(&id) {
+                remove_staging_dirs(&entry.path());
+            }
+        }
     }
 
     /// Compare a payload directory with its own `manifest.json` and with the
@@ -870,13 +1059,27 @@ impl ModelManager {
             .join("versions")
             .join(model_id)
             .join(destination.file_name().expect("destination name"));
-        let temporary = pointer_dir.join(format!(".current-{}", unique_suffix()));
-        std::os::unix::fs::symlink(&target, &temporary)?;
-        fs::rename(&temporary, &pointer)?;
-        // Defensive: after a successful rename the temporary name is gone;
-        // this only matters if rename somehow left it behind.
-        if temporary.exists() {
-            let _ = fs::remove_file(&temporary);
+        #[cfg(unix)]
+        {
+            let temporary = pointer_dir.join(format!(".current-{}", unique_suffix()));
+            std::os::unix::fs::symlink(&target, &temporary)?;
+            fs::rename(&temporary, &pointer)?;
+            // Defensive: after a successful rename the temporary name is gone;
+            // this only matters if rename somehow left it behind.
+            if temporary.exists() {
+                let _ = fs::remove_file(&temporary);
+            }
+        }
+        #[cfg(windows)]
+        {
+            let mut temporary = tempfile::NamedTempFile::new_in(&pointer_dir)?;
+            temporary.write_all(
+                target
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("model pointer is not UTF-8"))?
+                    .as_bytes(),
+            )?;
+            temporary.persist(&pointer).map_err(|error| error.error)?;
         }
         Ok(())
     }
@@ -992,11 +1195,13 @@ fn hash_staged_files(staging: &Path) -> Result<BTreeMap<String, ManifestFile>, M
 
 /// Write `manifest.json` into `staging` (compact JSON). Happens before the
 /// staging directory is renamed, so a published payload always has one.
+/// `imported` is the identity of an imported model; `None` for a download.
 fn write_manifest(
     staging: &Path,
     spec: &ModelSpec,
     digest_hex: &str,
     files: &BTreeMap<String, ManifestFile>,
+    imported: Option<&import::ImportedManifest>,
 ) -> Result<(), ModelError> {
     let manifest = Manifest {
         id: spec.id.to_owned(),
@@ -1005,6 +1210,7 @@ fn write_manifest(
         source_sri: spec.sha256_sri.clone(),
         source_sha256: digest_hex.to_owned(),
         files: (*files).clone(),
+        imported: imported.cloned(),
     };
     let mut file = fs::File::create(staging.join(MANIFEST_NAME))?;
     file.write_all(
@@ -1015,11 +1221,35 @@ fn write_manifest(
     Ok(())
 }
 
+/// Delete every `.staging-*` directory under `model_versions`. Only for a
+/// model whose mutation lock the caller holds or has just taken: an
+/// install in flight is writing to its own. One that cannot be removed is
+/// left for the next sweep.
+fn remove_staging_dirs(model_versions: &Path) {
+    let Ok(entries) = fs::read_dir(model_versions) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".staging-"))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if stale {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Sorted relative paths of all regular files under `root`, recursing into
-/// directories. Any other entry type (symlink, device, socket) is an
-/// `Integrity` error: payloads consist of regular files only, which is how
-/// a symlink smuggled in by an archive, or planted afterwards, fails both
-/// the install and every later `check` instead of being followed.
+/// directories. A path is spelled as the catalog's allow-list spells its
+/// members, with `/` between the directories, on every platform: it is the
+/// key of the manifest's file table and is compared with `allowed_members`
+/// as it is, so a Windows walk must not answer `test_wavs\en.wav` where the
+/// catalog says `test_wavs/en.wav`. Any other entry type (symlink, device,
+/// socket) is an `Integrity` error: payloads consist of regular files only,
+/// which is how a symlink smuggled in by an archive, or planted afterwards,
+/// fails both the install and every later `check` instead of being followed.
 fn walk_relative(root: &Path) -> Result<Vec<String>, ModelError> {
     let mut collected = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -1036,8 +1266,10 @@ fn walk_relative(root: &Path) -> Result<Vec<String>, ModelError> {
                 let relative = path
                     .strip_prefix(root)
                     .expect("walked under root")
-                    .to_string_lossy()
-                    .to_string();
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
                 collected.push(relative);
             } else {
                 return Err(ModelError::Integrity(
@@ -1093,6 +1325,26 @@ fn decode_sri(sri: &str) -> Result<String, ModelError> {
     Ok(hex_digest(&bytes))
 }
 
+/// The SRI string (`sha256-<standard base64>`) of a 64-character hex
+/// SHA-256: the form the catalog and the manifests keep digests in, and
+/// the one `decode_sri` reads back.
+fn encode_sri(digest_hex: &str) -> String {
+    use base64::Engine;
+    debug_assert_eq!(digest_hex.len(), 64);
+    let bytes: Vec<u8> = digest_hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).expect("hex digits"), 16)
+                .expect("hex pair")
+        })
+        .collect();
+    format!(
+        "sha256-{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
 /// Accept only a `current` link of the exact form `../versions/<id>/<dir>`
 /// and return `<dir>`. Absolute targets, a different model id, extra or
 /// missing components and `.`/`..` as the final component are all
@@ -1130,22 +1382,21 @@ fn unique_suffix() -> String {
     format!("{nanos:x}-{}", std::process::id())
 }
 
-/// Payload directory of an installed, intact catalog model.
+/// Payload directory of an installed, intact model, catalog or imported.
 ///
 /// The per-session re-verification entry point: `stream.rs` calls it for
 /// every `local-streaming` session and every cold `local-offline` session,
 /// `engine.rs` once when the daemon loads its warm engine. It resolves the
 /// pointer afresh and runs a full `check` (hashing the payload), so a model
 /// corrupted after installation is refused instead of loaded. Errors are
-/// user-facing strings: unknown id, "not installed; run `voiceless model
-/// install <id>`", a corruption summary with counts, or the manager error.
-/// Uses the default XDG directories.
+/// user-facing strings: unknown id, "not installed" with the command that
+/// installs or imports it, a corruption summary with counts, or the manager
+/// error. Uses the default XDG directories.
 pub fn installed_model_dir(id: &str) -> Result<PathBuf, String> {
-    let spec = catalog()
-        .into_iter()
-        .find(|spec| spec.id == id)
-        .ok_or_else(|| format!("unknown model id: {id}"))?;
     let manager = ModelManager::new(&default_data_dir(), &default_cache_dir());
+    let spec = manager
+        .find_spec(id)
+        .ok_or_else(|| format!("unknown model id: {id}"))?;
     match manager.check(&spec) {
         Ok((path, report)) if report.ok() => Ok(path),
         Ok((_, report)) => Err(format!(
@@ -1154,24 +1405,50 @@ pub fn installed_model_dir(id: &str) -> Result<PathBuf, String> {
             report.corrupt.len(),
             report.extra.len()
         )),
+        Err(ModelError::NotInstalled(_)) if spec.url.is_empty() => Err(format!(
+            "model {id} is not installed; import its file again with `voiceless model import <file>`"
+        )),
         Err(ModelError::NotInstalled(_)) => Err(format!(
             "model {id} is not installed; run `voiceless model install {id}`"
         )),
+        Err(ModelError::UnknownId(_)) => Err(format!("unknown model id: {id}")),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// Lease models of the default store for as long as the caller runs them
+/// (`ModelManager::lease`). The daemon's warm engine and every session do,
+/// so neither `voiceless model remove` nor the console can delete a model
+/// that is in use.
+pub fn lease_models<I, S>(ids: I) -> ModelLeases
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    ModelManager::new(&default_data_dir(), &default_cache_dir()).lease(ids)
 }
 
 /// `$XDG_DATA_HOME/voiceless` (default `~/.local/share/voiceless`): models,
 /// `history.sqlite3` and `audio/`. Only computed here; `install` and
 /// `doctor` create it on demand.
 pub fn default_data_dir() -> PathBuf {
-    xdg_dir("XDG_DATA_HOME", ".local/share").join("voiceless")
+    platform_dir(
+        "XDG_DATA_HOME",
+        ".local/share",
+        "Library/Application Support",
+    )
+    .join("voiceless")
 }
 
 /// `$XDG_CACHE_HOME/voiceless` (default `~/.cache/voiceless`): only
 /// disposable `.partial` downloads live here.
 pub fn default_cache_dir() -> PathBuf {
-    xdg_dir("XDG_CACHE_HOME", ".cache").join("voiceless")
+    let root = platform_dir("XDG_CACHE_HOME", ".cache", "Library/Caches");
+    #[cfg(windows)]
+    if std::env::var_os("XDG_CACHE_HOME").is_none() {
+        return root.join("voiceless").join("cache");
+    }
+    root.join("voiceless")
 }
 
 /// Retained WAV recordings from successful streaming sessions.
@@ -1182,15 +1459,24 @@ pub fn default_audio_dir() -> PathBuf {
 /// `$XDG_CONFIG_HOME/voiceless` (default `~/.config/voiceless`):
 /// `config.toml` and `modes.json`.
 pub fn default_config_dir() -> PathBuf {
-    xdg_dir("XDG_CONFIG_HOME", ".config").join("voiceless")
+    platform_dir("XDG_CONFIG_HOME", ".config", "Library/Application Support").join("voiceless")
 }
 
-/// Value of an XDG base-directory variable, or `$HOME/<fallback>`; falls
-/// back to the current directory when even `HOME` is unset.
-fn xdg_dir(variable: &str, fallback: &str) -> PathBuf {
-    std::env::var(variable)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned())).join(fallback)
-        })
+/// Prefer explicit XDG roots for portable and isolated installations.
+fn platform_dir(variable: &str, linux: &str, macos: &str) -> PathBuf {
+    if let Some(root) = std::env::var_os(variable) {
+        return root.into();
+    }
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+        return root.into();
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let fallback = if cfg!(target_os = "macos") {
+        macos
+    } else {
+        linux
+    };
+    home.map_or_else(|| PathBuf::from("."), PathBuf::from)
+        .join(fallback)
 }

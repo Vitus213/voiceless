@@ -45,13 +45,27 @@ jobs:
       - name: Cargo fmt
         working-directory: rust
         run: nix develop .#cpu -c cargo fmt --check
+      # The console's TypeScript/Vite bundle is embedded in the binary at
+      # compile time, so it is built before anything that compiles the crate.
+      - name: Console bundle
+        run: |
+          nix develop .#cpu -c npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+          nix develop .#cpu -c npm --prefix frontend run build
 
       # Unit, contract and integration tests with pipewire, wtype and
       # wl-clipboard from the shell on PATH; hardware-dependent and
       # credential-dependent tests skip themselves.
       - name: Cargo tests
         working-directory: rust
-        run: nix develop .#cpu -c cargo test --all-targets
+        run: nix develop .#cpu -c sh -c 'exec cargo test --config "$VOICELESS_CARGO_CONFIG" --all-targets'
+
+      # The whole browser suite against the binary cargo test built. The
+      # real-model onboarding test skips itself without
+      # VOICELESS_E2E_MODEL_STORE.
+      - name: Console in Chromium
+        run: |
+          nix develop .#cpu -c npm --prefix frontend exec -- playwright install --with-deps chromium
+          nix develop .#cpu -c npm --prefix frontend run test:e2e
 
       # Evaluates every flake output and builds checks.default, which is the
       # CPU package with doCheck on: a from-scratch sandboxed build of the

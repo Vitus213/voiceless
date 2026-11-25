@@ -362,11 +362,9 @@ fn replay_local(payload: &std::path::Path, pcm: &[u8]) -> Result<String, String>
 /// and wait for `Finished`.
 ///
 /// Result precedence: a non-empty `Finished` transcript wins; otherwise the
-/// concatenation of the non-empty `Completed` segments. A transport error
-/// after `finish` is tolerated when segments were already confirmed (the
-/// joined text is returned) and fails the sample otherwise. Errors before
-/// `finish` always fail the sample.
-async fn replay_cloud(
+/// concatenation of the non-empty `Completed` segments. Both require a
+/// successful `Finished` event.
+pub(crate) async fn replay_cloud(
     config: &AppConfig,
     pcm: &[u8],
     chunk_interval: Duration,
@@ -379,13 +377,7 @@ async fn replay_cloud(
     .await
     .map_err(|error| error.to_string())?;
 
-    loop {
-        match session.next_event().await {
-            Ok(RealtimeEvent::Ready) => break,
-            Ok(_) => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
+    wait_ready(&session).await?;
 
     let mut confirmed: Vec<String> = Vec::new();
     for chunk in pcm.chunks(crate::capture::CHUNK_BYTES) {
@@ -394,7 +386,7 @@ async fn replay_cloud(
             .await
             .map_err(|error| error.to_string())?;
         tokio::time::sleep(chunk_interval).await;
-        while let Ok(Some(event)) = next_available(&session).await {
+        while let Some(event) = next_available(&session).await? {
             if let RealtimeEvent::Completed { transcript } = event {
                 if !transcript.is_empty() {
                     confirmed.push(transcript);
@@ -405,26 +397,37 @@ async fn replay_cloud(
 
     session.finish().await.map_err(|error| error.to_string())?;
     loop {
-        match session.next_event().await {
-            Ok(RealtimeEvent::Finished { transcript }) => {
+        match next_replay_event(&session).await? {
+            RealtimeEvent::Finished { transcript } => {
                 if !transcript.is_empty() {
                     return Ok(transcript);
                 }
                 return Ok(confirmed.join(""));
             }
-            Ok(RealtimeEvent::Completed { transcript }) => {
+            RealtimeEvent::Completed { transcript } => {
                 if !transcript.is_empty() {
                     confirmed.push(transcript);
                 }
             }
-            Ok(_) => continue,
-            Err(error) => {
-                if !confirmed.is_empty() {
-                    return Ok(confirmed.join(""));
-                }
-                return Err(error.to_string());
-            }
+            _ => continue,
         }
+    }
+}
+
+pub(crate) async fn wait_ready(session: &RealtimeSession) -> Result<(), String> {
+    loop {
+        if matches!(next_replay_event(session).await?, RealtimeEvent::Ready) {
+            return Ok(());
+        }
+    }
+}
+
+/// A service rejection and a transport failure both invalidate the replay.
+pub(crate) async fn next_replay_event(session: &RealtimeSession) -> Result<RealtimeEvent, String> {
+    match session.next_event().await {
+        Ok(RealtimeEvent::Error(message)) => Err(message),
+        Ok(event) => Ok(event),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -435,9 +438,8 @@ async fn replay_cloud(
 /// receiver, so no event is lost. `Ok(None)` means nothing is queued right
 /// now; a transport error is surfaced as `Err`.
 async fn next_available(session: &RealtimeSession) -> Result<Option<RealtimeEvent>, String> {
-    match tokio::time::timeout(Duration::from_millis(1), session.next_event()).await {
-        Ok(Ok(event)) => Ok(Some(event)),
-        Ok(Err(error)) => Err(error.to_string()),
+    match tokio::time::timeout(Duration::from_millis(1), next_replay_event(session)).await {
+        Ok(result) => result.map(Some),
         Err(_) => Ok(None),
     }
 }

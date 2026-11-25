@@ -2,10 +2,11 @@
 """Voiceless streaming overlay watcher.
 
 Runs for the whole desktop session (systemd user service): follows
-`voiceless ctl watch` and mirrors every daemon session into an eww overlay
+`voiceless ctl watch` and mirrors daemon sessions into an eww overlay
 pill pinned bottom-center above everything (layer-shell, wm-ignore). The
-pill opens when a session starts recording and closes HIDE_AFTER_S after it
-ends; nothing is spawned per hotkey press.
+pill opens when a session starts recording, unless the daemon turned the
+overlay off for it (see "Gating"), and closes HIDE_AFTER_S after it ends;
+nothing is spawned per hotkey press.
 
 Silky path: instead of spawning `eww update` per event (~54 ms fork/exec),
 the watcher writes one JSON line per frame into a FIFO that eww consumes via
@@ -23,16 +24,36 @@ the `stream --json` session events (`type` = ready, level, transcript,
 finalized, warning, error, cancelled, completed; `transcript` carries
 `authoritative_text` and `is_final`, `error` carries `message`) plus the
 daemon's own `{"type": "state", "state": idle|recording|stopping,
-"mode": ...}` on every gateway transition and `{"type": "log", ...}`
-lines. `watch_loop` parses them and `handle` maps them to the overlay:
+"mode": ..., "overlay": true|false|null}` on every gateway transition and
+`{"type": "log", ...}` lines. Each line may also name the `runtime_id` of
+the daemon instance that published it (older daemons do not).
+`watch_loop` parses them and `handle` maps them to the overlay:
 `state: recording` opens the window and resets the pill, `transcript`
 updates the live text (throttled) or marks it final, `finalized`,
 `error` and `cancelled` paint the closing frame, `state: idle` schedules
 the close. Unknown types are ignored.
 
+Gating. One trigger opens the window: a `state: recording` event whose
+`overlay` field is absent (a daemon too old to send it) or not false. Null
+follows the desktop setting, and that setting is "show" wherever this
+watcher is installed. `overlay: false` names a session the pill must not
+mirror: a window left over from the previous session is closed, and that
+session's transcript and terminal events are ignored until it is idle.
+Events of a session whose start was never seen (the watcher connected
+halfway) are ignored the same way.
+
+Stale sessions. The pill must never outlive the session it mirrors, so it
+closes at once instead of after HIDE_AFTER_S when that session's end
+cannot arrive: a later event comes from another daemon instance (the
+daemon restarted and the session died with it), `ctl watch` exits (bus
+gone), or the watcher itself stops or starts again. The pill then stays
+closed until the next session starts, because only the `state: recording`
+event carries the `overlay` decision and the mode.
+
 Threads: `watch_loop` (reader) and `open_fifo` (blocks until eww connects)
-are daemon threads; `ease_loop` runs on the main thread. `handle` and the
-close check hold `session["lock"]`; frames cross threads through the
+are daemon threads; `ease_loop` runs on the main thread. `handle`, `drop`
+and the close check hold `session["lock"]`, which guards the session's
+`pill` (LIVE, CLOSING or CLOSED); frames cross threads through the
 `pending` queue, and `current_mode` is written only by the reader.
 
 eww variables: every frame is one JSON line with `text`, `width`,
@@ -48,7 +69,9 @@ from voiceless-overlay.conf next to this script.
 import json
 import os
 import queue
+import signal
 import subprocess
+import sys
 import threading
 import time
 
@@ -66,6 +89,12 @@ THROTTLE_S = 0.03          # min seconds between text frames
 FRAME_S = 1.0 / 30.0       # width easing loop rate
 EASE = 0.35                # per-frame approach factor toward target width
 HIDE_AFTER_S = 2.0
+
+# What the pill shows for the daemon session in progress. LIVE mirrors the
+# session in an open window, CLOSING keeps its last frame up until
+# `close_at`, CLOSED shows nothing: the overlay is off for the session or
+# there is no session to mirror.
+LIVE, CLOSING, CLOSED = "live", "closing", "closed"
 
 MAX_WIDTH_PX = 720
 MIN_WIDTH_PX = 170
@@ -162,39 +191,73 @@ def pill_width(text):
     return max(MIN_WIDTH_PX, min(MAX_WIDTH_PX, MIN_WIDTH_PX + len(text) * CHAR_PX))
 
 
+def drop(session):
+    """Forget the session in progress and close its window at once.
+
+    Caller holds `session["lock"]`. For a session that must not be mirrored
+    or whose end will never be seen (see "Stale sessions" above), so unlike
+    `state: idle` this leaves no closing frame up for HIDE_AFTER_S. The
+    ease loop is reset to a neutral idle frame once the close returned, so
+    nothing of the session is left to animate or to flash when the next
+    window opens.
+    """
+    session.update(pill=CLOSED, close_at=None, runtime=None)
+    eww("close", WINDOW)
+    pending.put(("idle", "", MIN_WIDTH_PX))
+
+
 def handle(event, session):
     """Translate one daemon event into pill frames and window commands.
 
     Runs on the reader thread under `session["lock"]`. `session` keeps
-    `last_text` (last transcript shown; also the text painted on
-    `finalized`), `last_frame` (monotonic time of the last live frame, for
-    throttling) and `close_at` (when the ease loop should close the window,
-    or None).
+    `pill` (LIVE, CLOSING or CLOSED), `runtime` (`runtime_id` of the daemon
+    instance whose session is on screen), `last_text` (last transcript
+    shown; also the text painted on `finalized`), `last_frame` (monotonic
+    time of the last live frame, for throttling) and `close_at` (when the
+    ease loop should close the window, or None).
     """
     global current_mode
     kind = event.get("type")
     now = time.monotonic()
+    runtime = event.get("runtime_id")
+    owner = session["runtime"]
+    if session["pill"] != CLOSED and runtime and owner and runtime != owner:
+        # Another daemon instance published this event: the session on
+        # screen ended with the previous one (restart, crash) and will
+        # send nothing more.
+        drop(session)
     if kind == "state":
         state = event.get("state")
         if state == "recording":
-            # New session: remember the mode (and persist it for the
-            # listener's fresh frame), reset the per-session state, show
-            # the listening pill and open the window. Any pending close
-            # from the previous session is cancelled.
-            current_mode = event.get("mode") or "quick"
-            try:
-                with open(MODEFILE, "w") as f:
-                    f.write(current_mode)
-            except OSError:
-                pass
-            session.update(last_text="", last_frame=0.0, close_at=None)
-            pending.put(("live", LISTENING, MIN_WIDTH_PX))
-            eww("open", WINDOW)
-        elif state == "idle":
+            if event.get("overlay") is False:
+                # Overlay off for this session (see "Gating"): whatever is
+                # on screen belongs to an earlier session and goes away.
+                drop(session)
+            else:
+                # New session (no `overlay` field, or not false): remember
+                # the mode (and persist it for the listener's fresh frame),
+                # reset the per-session state, show the listening pill and
+                # open the window. Any pending close from the previous
+                # session is cancelled.
+                current_mode = event.get("mode") or "quick"
+                try:
+                    with open(MODEFILE, "w") as f:
+                        f.write(current_mode)
+                except OSError:
+                    pass
+                session.update(last_text="", last_frame=0.0, close_at=None,
+                               pill=LIVE, runtime=runtime)
+                pending.put(("live", LISTENING, MIN_WIDTH_PX))
+                eww("open", WINDOW)
+        elif state == "idle" and session["pill"] == LIVE:
             # Session over (completed, cancelled or failed): keep the
             # closing frame visible for HIDE_AFTER_S, then close.
-            session["close_at"] = now + HIDE_AFTER_S
+            session.update(pill=CLOSING, close_at=now + HIDE_AFTER_S)
         # "stopping" needs no frame: the last live text stays until final.
+    elif session["pill"] == CLOSED:
+        # No window: events of a session that opened none (overlay off, or
+        # started before the watcher connected) change nothing on screen.
+        pass
     elif kind == "transcript":
         snap = event.get("transcript") or {}
         text = snap.get("authoritative_text") or ""
@@ -230,8 +293,9 @@ def watch_loop(session):
 
     Reader thread. Each stdout line is parsed as JSON and passed to
     `handle`; blank or malformed lines are skipped. When the child exits
-    (daemon or bus gone) it is respawned after 1 s; if the binary cannot
-    be started at all, after 2 s.
+    (bus gone; a daemon restart alone does not end `ctl watch`) the session
+    on screen can no longer be followed, so `drop` closes it. The child is
+    respawned after 1 s; if the binary cannot be started at all, after 2 s.
     """
     while True:
         try:
@@ -251,6 +315,9 @@ def watch_loop(session):
             with session["lock"]:
                 handle(event, session)
         child.wait()
+        with session["lock"]:
+            if session["pill"] != CLOSED:
+                drop(session)
         time.sleep(1)
 
 
@@ -262,7 +329,8 @@ def ease_loop(session):
     within 0.6 px), animates the "processing" dots every 0.4 s, writes a
     frame only when something changed, and closes the window once
     `session["close_at"]` has passed. A fresh listening frame jumps to its
-    width instead of gliding from the previous session's.
+    width instead of gliding from the previous session's; the idle frame
+    that follows a `drop` settles the loop with the window closed.
     """
     state, text, target = "live", LISTENING, float(MIN_WIDTH_PX)
     width = float(MIN_WIDTH_PX)
@@ -296,7 +364,7 @@ def ease_loop(session):
         with session["lock"]:
             close_at = session["close_at"]
             if close_at is not None and time.monotonic() >= close_at:
-                session["close_at"] = None
+                session.update(close_at=None, pill=CLOSED, runtime=None)
                 eww("close", WINDOW)
         time.sleep(FRAME_S)
 
@@ -306,12 +374,25 @@ def main():
     load_conf()
     os.makedirs(RUNTIME, exist_ok=True)
     session = {"lock": threading.Lock(), "last_text": "", "last_frame": 0.0,
-               "close_at": None}
-    # The FIFO writer stays open for the whole run; eww's deflisten reader
-    # connects once when the eww daemon loads this config.
-    threading.Thread(target=open_fifo, daemon=True).start()
-    threading.Thread(target=watch_loop, args=(session,), daemon=True).start()
-    ease_loop(session)
+               "close_at": None, "pill": CLOSED, "runtime": None}
+    # A previous incarnation (service restart) may have left its window
+    # open. Its session started before this one connected, so for this run
+    # that pill is stale: close it before following events.
+    eww("close", WINDOW)
+    # systemd stops the service with SIGTERM. Leaving through `finally`
+    # closes the window on screen, so it cannot outlive the watcher (see
+    # "Stale sessions"); an error in the ease loop takes the same exit.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        # The FIFO writer stays open for the whole run; eww's deflisten
+        # reader connects once when the eww daemon loads this config.
+        threading.Thread(target=open_fifo, daemon=True).start()
+        threading.Thread(target=watch_loop, args=(session,), daemon=True).start()
+        ease_loop(session)
+    finally:
+        with session["lock"]:
+            if session["pill"] != CLOSED:
+                drop(session)
 
 
 if __name__ == "__main__":

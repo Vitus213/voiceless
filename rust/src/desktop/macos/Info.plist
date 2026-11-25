@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.voiceless.cli</string>
+  <key>CFBundleName</key><string>Voiceless CLI</string>
+  <key>CFBundleExecutable</key><string>voiceless</string>
+  <key>NSMicrophoneUsageDescription</key><string>Voiceless uses the selected microphone to transcribe your dictation.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Voiceless records the selected system output when you include it in a meeting.</string>
+</dict></plist>

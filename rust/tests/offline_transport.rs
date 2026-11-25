@@ -1,11 +1,18 @@
 //! Contract tests for the `local-offline` backend that need no model:
-//! config validation, catalog consistency, and load-failure reporting.
-//! Fixtures: `AppConfig::from_toml` snippets, the in-binary model catalog,
-//! and an `OfflineTransport` started with a loader closure that fails
-//! (standing in for a missing model directory).
+//! config validation, catalog consistency, requested-device failures and
+//! the event order around a load. Fixtures: `AppConfig::from_toml` snippets,
+//! the in-binary model catalog, and an `OfflineTransport` started with a
+//! loader closure that fails (standing in for a missing model directory).
+//! The order after a successful load (`Ready`, `DevicesLoaded`, then
+//! recognition) is covered by the unit tests in `offline_asr`, which can
+//! stand in for the model.
+
+use std::path::Path;
 
 use voiceless::config::AppConfig;
-use voiceless::offline_asr::{OfflineAsrError, OfflineFamily, OfflineTransport};
+use voiceless::offline_asr::{
+    create_decoder, ComputeDevice, OfflineAsrError, OfflineFamily, OfflineOptions, OfflineTransport,
+};
 use voiceless::realtime::RealtimeEvent;
 
 /// GGUF uses build-specific device defaults and accepts explicit providers.
@@ -96,6 +103,8 @@ fn offline_catalog_entries_are_consistent() {
 /// The transport reports Ready before the loader runs; audio sent in the
 /// meantime is accepted (or rejected harmlessly once the worker is gone);
 /// the loader's error then arrives as an `Error` event naming the path.
+/// A failed load reports no devices: `Ready` and `Error` are the whole
+/// stream, which then closes.
 #[tokio::test]
 async fn load_failure_is_reported_after_ready() {
     let transport = OfflineTransport::start(|| {
@@ -110,5 +119,84 @@ async fn load_failure_is_reported_after_ready() {
     match transport.next_event().await.unwrap() {
         RealtimeEvent::Error(message) => assert!(message.contains("/nonexistent")),
         other => panic!("expected load error, got {other:?}"),
+    }
+    assert!(
+        transport.next_event().await.is_err(),
+        "a failed load reports no devices and closes the stream"
+    );
+}
+
+/// The requested device is settled before anything loads: a Sherpa-ONNX
+/// model asked for a GPU, or for `auto`, fails naming that request instead
+/// of running on the CPU and passing for it. An unknown device name is
+/// rejected for every model.
+#[test]
+fn gpu_request_for_a_cpu_model_fails_before_loading() {
+    let load = |provider: &str| {
+        create_decoder(
+            OfflineFamily::SenseVoice,
+            Path::new("/nonexistent"),
+            &OfflineOptions {
+                provider: provider.to_owned(),
+                num_threads: 1,
+                hotwords: Vec::new(),
+            },
+        )
+    };
+    let refused = |provider: &str| load(provider).err().expect("the device must be refused");
+    for (provider, requested) in [
+        ("cuda", ComputeDevice::Cuda),
+        ("vulkan", ComputeDevice::Vulkan),
+        ("auto", ComputeDevice::Auto),
+    ] {
+        match refused(provider) {
+            OfflineAsrError::DeviceUnsupported {
+                requested: actual, ..
+            } => {
+                assert_eq!(actual, requested)
+            }
+            error => panic!("{provider}: {error:?}"),
+        }
+    }
+    assert_eq!(
+        refused("cuda").to_string(),
+        "Sherpa-ONNX models run on cpu; /nonexistent cannot use cuda"
+    );
+    assert_eq!(
+        refused("rocm").to_string(),
+        "unknown compute device \"rocm\"; expected cpu, cuda, vulkan or auto"
+    );
+}
+
+/// A GGUF model is asked for its device first. Without the engine in this
+/// build the request is refused naming the device; with it, the model file
+/// is what gets checked.
+#[test]
+fn gguf_request_is_refused_before_any_model_is_read() {
+    let error = create_decoder(
+        OfflineFamily::Gguf,
+        Path::new("/nonexistent"),
+        &OfflineOptions {
+            provider: "auto".to_owned(),
+            num_threads: 1,
+            hotwords: Vec::new(),
+        },
+    )
+    .err()
+    .expect("no GGUF model is installed");
+    #[cfg(not(feature = "transcribe"))]
+    match error {
+        OfflineAsrError::DeviceUnavailable {
+            requested, cause, ..
+        } => {
+            assert_eq!(requested, ComputeDevice::Auto);
+            assert!(cause.starts_with("GGUF models need the transcribe.cpp engine"));
+        }
+        error => panic!("{error:?}"),
+    }
+    #[cfg(feature = "transcribe")]
+    match error {
+        OfflineAsrError::MissingModelFile(path) => assert!(path.ends_with("model.gguf")),
+        error => panic!("{error:?}"),
     }
 }

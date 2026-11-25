@@ -4,7 +4,14 @@ __pycache__/
 .coverage
 result
 models/
+!rust/src/models/
 reports/
 !scripts/asr_benchmark/reports/
 rust/target/
+desktop/target/
+desktop/gen/schemas/
 *.wav
+frontend/dist/
+frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/

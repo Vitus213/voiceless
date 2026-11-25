@@ -3,7 +3,7 @@
 //! Every command that touches audio, a recognizer, the injector or the
 //! console starts here. `stream::run_with_env`, `daemon::serve`,
 //! `batch_cmd`, `benchmark_cmd`, `latency_cmd`, `doctor` and the console
-//! (`console::ConsoleState::config`, `console::settings::patch_file`) all go
+//! use the same loader and validation rules. Settings edits pass back
 //! through `AppConfig::load_optional`, `load_default_config` or `from_toml`.
 //! The file is `$XDG_CONFIG_HOME/voiceless/config.toml`
 //! (`~/.config/voiceless/config.toml` when the variable is unset); a missing
@@ -32,20 +32,17 @@
 //!   is textual, so a commented-out key or `processing.api_key_env` also
 //!   triggers it. `from_toml` has no such gate; it never sees a path.
 //!
-//! Writers: the console's `PUT /api/config` edits the file with `toml_edit`
-//! (`console::settings::patch_file`), re-validates the merged text with
+//! `PUT /api/config` edits the file with `toml_edit`, re-validates it with
 //! `from_toml` and writes it back with 0600 permissions, preserving comments
-//! and layout. `stream`
-//! re-validates a `--backend` override by round-tripping the struct through
-//! TOML, and the console serializes it to JSON for `GET /api/config` (secrets
-//! are masked there, not here); both are why every section derives
-//! `Serialize` and why `None` options are skipped when serializing.
+//! and layout. The console serializes `AppConfig` to JSON for `GET /api/config`,
+//! which masks secrets before sending the response.
 //!
 //! `[text].hotwords` is the one list the user maintains for both recognizer
 //! biasing and phonetic correction: `AppConfig::local_engine` and
 //! `AppConfig::doubao_engine` merge it into the engine-specific lists.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -58,6 +55,13 @@ const DEFAULT_DOUBAO_ENDPOINT: &str = "wss://openspeech.bytedance.com/api/v3/sau
 const DEFAULT_DOUBAO_RESOURCE_ID: &str = "volc.seedasr.sauc.duration";
 const DEFAULT_PROCESSING_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const DEFAULT_PROCESSING_MODEL: &str = "deepseek-v4-flash-0731";
+
+pub(crate) const SECRETS: &[(&str, &str)] = &[
+    ("cloud", "api_key"),
+    ("doubao", "api_key"),
+    ("doubao", "access_key"),
+    ("processing", "api_key"),
+];
 
 /// Why a configuration could not be loaded. Commands print the `Display`
 /// text after `Voiceless: ` and exit non-zero; the console answers 400 or
@@ -116,6 +120,8 @@ pub struct AppConfig {
     pub inject: InjectConfig,
     /// `[processing]`: the LLM used by every mode other than `quick`.
     pub processing: ProcessingConfig,
+    /// `[output]`: application rules and ordered per-mode steps.
+    pub output: crate::output::OutputConfig,
     /// `[history]`: SQLite history and WAV retention.
     pub history: HistoryConfig,
 }
@@ -139,8 +145,7 @@ pub struct AsrConfig {
     pub fallback_backend: Option<String>,
     /// `asr.batch_backend`: engine of `transcribe`/`record` when no
     /// `--backend` is given: `cloud` (DashScope REST) or `local`
-    /// (SenseVoice). Default `cloud`. Checked by the batch command when it
-    /// runs, not by `validate`.
+    /// (SenseVoice). Default `cloud`. `sensevoice` is a legacy alias of `local`.
     pub batch_backend: String,
     /// Removed type4me key. Kept in the schema only so `validate` can reject
     /// it with a specific message instead of a generic unknown-field error;
@@ -169,6 +174,20 @@ impl Default for AsrConfig {
             batch_model_dir: None,
         }
     }
+}
+
+const REALTIME_BACKENDS: &str = "cloud-realtime, doubao-realtime, local-streaming or local-offline";
+
+pub(crate) fn validate_streaming_backend(key: &str, value: &str) -> Result<(), ConfigError> {
+    let migration = match value {
+        "cloud-realtime" | "doubao-realtime" | "local-streaming" | "local-offline" => return Ok(()),
+        "cloud-vad" => " For migration from cloud-vad, select cloud-realtime. See ASR migration in the README.",
+        "sensevoice-vad" => " For migration from sensevoice-vad, select local-offline with local.model = \"sense-voice-int8\". See ASR migration in the README.",
+        _ => "",
+    };
+    Err(ConfigError::Invalid(format!(
+        "asr.{key}={value:?}; expected {REALTIME_BACKENDS}.{migration}"
+    )))
 }
 
 /// `[cloud]`: DashScope (Alibaba BaiLian) access, shared by the
@@ -212,12 +231,23 @@ impl Default for CloudConfig {
 /// Daemon push-to-talk key read from evdev (needs the `input` group). Hold
 /// it at least `hold_threshold_ms` to talk while held; tap it to toggle
 /// (tap again to stop). With Ctrl held the session uses `ctrl_mode`.
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HotkeyConfig {
-    /// evdev key name, e.g. `KEY_SCROLLLOCK`; unset disables the listener.
+    /// Legacy evdev key for combined hold and tap gestures.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Optional action-specific Linux shortcuts such as `Ctrl+Shift+KEY_F9`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toggle_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repaste_key: Option<String>,
     /// Mode for a plain press; empty uses the daemon's `--mode`.
     pub mode: String,
     /// Mode for a press with Ctrl held; default `prompt-optimize`.
@@ -231,6 +261,11 @@ impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
             key: None,
+            hold_key: None,
+            toggle_key: None,
+            cancel_key: None,
+            raw_key: None,
+            repaste_key: None,
             mode: String::new(),
             ctrl_mode: "prompt-optimize".to_owned(),
             hold_threshold_ms: 350,
@@ -238,15 +273,14 @@ impl Default for HotkeyConfig {
     }
 }
 
-/// Web console served by the daemon (loopback only by default).
+/// Loopback web console served by the daemon.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConsoleConfig {
     /// Serve the console from the daemon; default true. `history serve`
     /// ignores this and takes its own `--host`/`--port`.
     pub enabled: bool,
-    /// Listen address; default `127.0.0.1`. The console also rejects any
-    /// non-loopback `Host` header, so a wider bind alone does not expose it.
+    /// Loopback listen address; default `127.0.0.1`.
     pub host: String,
     /// Listen port; default 8790.
     pub port: u16,
@@ -270,6 +304,14 @@ pub struct AudioConfig {
     pub pause_media: bool,
     /// Short start/stop tones through `pw-play`.
     pub cues: bool,
+    /// PipeWire node name for an explicitly selected microphone. Absent
+    /// follows the system default at each start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Override display in an enabled desktop overlay watcher. Absent
+    /// honors the installation's existing overlay setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<bool>,
 }
 
 impl Default for AudioConfig {
@@ -277,6 +319,8 @@ impl Default for AudioConfig {
         Self {
             pause_media: true,
             cues: false,
+            source: None,
+            overlay: None,
         }
     }
 }
@@ -306,6 +350,8 @@ pub struct TextConfig {
     pub replacements: Vec<TextReplacement>,
     /// Regex replacements (`$1` captures), applied in order after them.
     pub rules: Vec<TextRule>,
+    /// Optional mode and project vocabularies, applied after the global entries.
+    pub scopes: Vec<crate::text::ScopedVocabulary>,
 }
 
 impl Default for TextConfig {
@@ -317,13 +363,14 @@ impl Default for TextConfig {
             hotword_threshold: 0.9,
             replacements: Vec::new(),
             rules: Vec::new(),
+            scopes: Vec::new(),
         }
     }
 }
 
 /// One `[[text.replacements]]` entry: a literal substring swap, no regex.
 /// Both keys are required (no defaults).
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextReplacement {
     /// Text to find; an empty value is ignored at cleanup time.
@@ -335,7 +382,7 @@ pub struct TextReplacement {
 /// One `[[text.rules]]` entry: a `regex` crate pattern, compiled during
 /// validation (an invalid pattern is a `ConfigError::Invalid`). Both keys
 /// are required.
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextRule {
     /// Regular expression (`regex` syntax, no look-around).
@@ -344,10 +391,12 @@ pub struct TextRule {
     pub replace: String,
 }
 
+const SHERPA_MAX_SEGMENT_SECONDS: f32 = 25.0;
+
 /// `local-offline` backend: an offline catalog model run on VAD segments.
 /// Live previews target `partial_interval_ms` after their first text.
 /// `max_segment_seconds` controls VAD segmentation for the chosen model.
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
     /// Catalog ID of the offline model: `qwen3-asr-1.7b-gguf` (default) or
@@ -400,16 +449,24 @@ impl AppConfig {
     /// not already contain (exact match). This is the config the engine is
     /// built from and compared against for reloads.
     pub fn local_engine(&self) -> LocalConfig {
+        self.local_engine_with_hotwords(&self.text.hotwords)
+    }
+
+    pub(crate) fn local_engine_with_hotwords(&self, hotwords: &[String]) -> LocalConfig {
         let mut local = self.local.clone();
-        merge_hotwords(&mut local.hotwords, &self.text.hotwords);
+        merge_hotwords(&mut local.hotwords, hotwords);
         local
     }
 
     /// `[doubao]` with `[text].hotwords` merged into its hotwords (same
     /// order rule as `local_engine`). `stream` connects with this config.
     pub fn doubao_engine(&self) -> DoubaoConfig {
+        self.doubao_engine_with_hotwords(&self.text.hotwords)
+    }
+
+    pub(crate) fn doubao_engine_with_hotwords(&self, hotwords: &[String]) -> DoubaoConfig {
         let mut doubao = self.doubao.clone();
-        merge_hotwords(&mut doubao.hotwords, &self.text.hotwords);
+        merge_hotwords(&mut doubao.hotwords, hotwords);
         doubao
     }
 }
@@ -432,6 +489,19 @@ impl LocalConfig {
             crate::offline_asr::OfflineFamily::for_model(&self.model),
             Ok(crate::offline_asr::OfflineFamily::Gguf)
         )
+    }
+
+    /// Prepare a file job or history request using the selected model's device and segment limits.
+    pub(crate) fn select_file_model(&mut self, model: &str) {
+        if self.model != model {
+            model.clone_into(&mut self.model);
+        }
+        if !self.is_gguf() {
+            self.provider = None;
+            self.max_segment_seconds = self
+                .max_segment_seconds
+                .map(|limit| limit.min(SHERPA_MAX_SEGMENT_SECONDS));
+        }
     }
 
     pub(crate) fn preview_model(&self) -> Option<&'static str> {
@@ -549,9 +619,10 @@ impl DoubaoConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct InjectConfig {
     /// Primary method: `wtype` (type through the Wayland virtual keyboard),
-    /// `clipboard` (`wl-copy` + synthesized paste keystroke) or `fcitx5`
-    /// (commit through the Voiceless Fcitx5 bridge). Default `wtype`; any
-    /// other value fails validation.
+    /// `clipboard` (`wl-copy` + synthesized paste keystroke), `fcitx5`
+    /// (commit through the Voiceless Fcitx5 bridge) or `copy` (put the text
+    /// on the clipboard and leave pasting to the user). Default `wtype`;
+    /// any other value fails validation.
     pub prefer: String,
     /// Typing executable for the `wtype` method; default `wtype`.
     pub wtype_command: String,
@@ -562,6 +633,11 @@ pub struct InjectConfig {
     /// Arguments handed to `paste_tool` to synthesize the paste keystroke;
     /// default `-M ctrl -k v` (wtype syntax).
     pub paste_command: String,
+    /// Arguments handed to `paste_tool` to paste into a terminal, where
+    /// `Ctrl+Shift+V` is the usual chord and a bracketed paste keeps the
+    /// line breaks from running as commands; default
+    /// `-M ctrl -M shift -k v` (wtype syntax).
+    pub terminal_paste_command: String,
     /// Executable that receives `paste_command`; default `wtype`
     /// (`xdotool` for X11 setups).
     pub paste_tool: String,
@@ -573,10 +649,15 @@ pub struct InjectConfig {
     /// selections), e.g. `xsel --clipboard --input`; the previous X11
     /// selection is restored after the paste. Empty (default) disables.
     pub x11_clipboard_command: String,
+    /// Application ids (Wayland) and window classes (X11) of terminals
+    /// beyond the built-in ones; text with line breaks is pasted into
+    /// them, never typed.
+    pub terminal_apps: Vec<String>,
     /// Retry through the clipboard when the `wtype` or `fcitx5` method
-    /// fails; default true. Has no effect when `prefer = "clipboard"`.
+    /// fails; default true. Has no effect when `prefer` is `clipboard`
+    /// or `copy`.
     pub clipboard_fallback: bool,
-    /// Timeout in seconds for each clipboard subprocess; default 10.
+    /// Timeout in seconds for typing, paste shortcuts and clipboard I/O; default 10.
     /// Values below 0.1 are raised to 0.1.
     pub timeout_seconds: f64,
     /// With `prefer = "fcitx5"`: show the live transcript as preedit
@@ -597,6 +678,8 @@ impl Default for InjectConfig {
             clipboard_fallback: true,
             timeout_seconds: 10.0,
             preedit: true,
+            terminal_paste_command: "-M ctrl -M shift -k v".to_owned(),
+            terminal_apps: Vec::new(),
         }
     }
 }
@@ -656,6 +739,20 @@ pub struct HistoryConfig {
     /// Keep the WAV recording of every successful streaming session next
     /// to the history database (`~/.local/share/voiceless/audio/`).
     pub save_audio: bool,
+    /// Days a history row is kept; 0 (the default) never prunes text.
+    pub text_days: u32,
+    /// Days a successful session's WAV is kept; 0 (the default) never
+    /// prunes recordings. Audio that expires leaves its row readable.
+    pub audio_days: u32,
+    /// Keep the recording of a session that failed (never one the user
+    /// cancelled) in the recovery area. Independent of `enabled`; a kept
+    /// recording is not a history row and is transcribed only on request.
+    pub save_failed_audio: bool,
+    /// Days a recovered recording is kept; 0 never prunes it by age.
+    pub failed_audio_days: u32,
+    /// Size the recovery area may reach, in MiB; the oldest go first.
+    /// 0 sets no cap.
+    pub failed_audio_mb: u32,
 }
 
 impl Default for HistoryConfig {
@@ -663,6 +760,11 @@ impl Default for HistoryConfig {
         Self {
             enabled: true,
             save_audio: true,
+            text_days: 0,
+            audio_days: 0,
+            save_failed_audio: false,
+            failed_audio_days: 7,
+            failed_audio_mb: 512,
         }
     }
 }
@@ -675,13 +777,12 @@ impl AppConfig {
     /// merged document before writing it.
     pub fn from_toml(input: &str) -> Result<Self, ConfigError> {
         let config = toml::from_str::<Self>(input).map_err(|error| {
-            let message = error.to_string();
-            // toml's error is one string; the "unknown field" wording is how
-            // serde reports a key rejected by `deny_unknown_fields`.
-            if message.contains("unknown field") {
-                ConfigError::UnknownField { field: message }
+            let reason = error.message();
+            let detail = parse_error_detail(input, reason, error.span().map(|span| span.start));
+            if reason.starts_with("unknown field") {
+                ConfigError::UnknownField { field: detail }
             } else {
-                ConfigError::Parse(message)
+                ConfigError::Parse(detail)
             }
         })?;
         config.validate()
@@ -704,30 +805,16 @@ impl AppConfig {
     /// (unreadable file or metadata), `InsecurePermissions`, then whatever
     /// `from_toml` reports.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let input = fs::read_to_string(path)?;
-        // A file that carries a cloud/LLM key must not be readable by other
-        // users. The check is textual on purpose: it also fires on a
-        // commented-out or empty key, so the user tightens the mode before a
-        // key is ever stored. `0o077` masks every group/other bit.
-        #[cfg(unix)]
-        if !input.is_empty() && (input.contains("api_key") || input.contains("access_key")) {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(path)?.permissions().mode();
-            if mode & 0o077 != 0 {
-                return Err(ConfigError::InsecurePermissions);
-            }
-        }
-        Self::from_toml(&input)
+        Self::from_toml(&read_private_text(path)?)
     }
 
     /// Cross-field checks after deserialization. The first failure wins and
     /// becomes `ConfigError::Invalid` naming the offending `section.key`:
     ///
-    /// 1. `asr.streaming_backend` and `asr.fallback_backend` in the backend
-    ///    allowlist (this is where the legacy `cloud-vad` and
-    ///    `sensevoice-vad` are refused, with the replacements named).
+    /// 1. `asr.streaming_backend`, `asr.fallback_backend` and `asr.batch_backend`
+    ///    use supported names. Removed backends include migration guidance.
     /// 2. `asr.final_backend` absent (removed key).
-    /// 3. `inject.prefer` one of `wtype`, `clipboard`, `fcitx5`.
+    /// 3. `inject.prefer` one of `wtype`, `clipboard`, `fcitx5`, `copy`.
     /// 4. `local.model` known to `offline_asr::OfflineFamily`; GGUF accepts
     ///    `cpu`, `cuda`, `vulkan` or `auto`; Sherpa-ONNX accepts only `cpu`.
     ///    Effective segment limit within 1..=60 s (GGUF) or 1..=25 s (Sherpa).
@@ -737,9 +824,8 @@ impl AppConfig {
     /// 7. `doubao.endpoint` and `cloud.realtime_endpoint` using `wss://`;
     ///    `cloud.realtime_model` non-blank.
     ///
-    /// Not checked here: `processing.provider` (`processing::from_config`),
-    /// `asr.batch_backend` (the batch command) and whether the cloud keys
-    /// are present (each backend reports that when it opens).
+    /// `processing::from_config` validates the LLM provider. Each cloud
+    /// backend checks for its required credentials when it opens.
     fn validate(self) -> Result<Self, ConfigError> {
         let backends = std::iter::once(("streaming_backend", &self.asr.streaming_backend)).chain(
             self.asr
@@ -748,28 +834,22 @@ impl AppConfig {
                 .map(|value| ("fallback_backend", value)),
         );
         for (key, value) in backends {
-            if !matches!(
-                value.as_str(),
-                "cloud-realtime" | "doubao-realtime" | "local-streaming" | "local-offline"
-            ) {
-                return Err(ConfigError::Invalid(format!(
-                    "asr.{key}={value:?}; expected cloud-realtime, doubao-realtime, local-streaming or local-offline"
-                )));
-            }
+            validate_streaming_backend(key, value)?;
         }
         // Rejected rather than ignored: silently dropping a removed key would
         // hide that the user's intended backend no longer applies.
         if self.asr.final_backend.is_some() {
             return Err(ConfigError::Invalid(
-                "asr.final_backend was removed; choose cloud-realtime or local-streaming"
-                    .to_owned(),
+                format!("asr.final_backend was removed. For migration, remove asr.final_backend and select {REALTIME_BACKENDS} in asr.streaming_backend. See ASR migration in the README."),
             ));
         }
+        crate::batch::BatchBackend::parse(&self.asr.batch_backend)
+            .map_err(|error| ConfigError::Invalid(format!("asr.batch_backend: {error}")))?;
         match self.inject.prefer.as_str() {
-            "wtype" | "clipboard" | "fcitx5" => {}
+            "wtype" | "clipboard" | "fcitx5" | "copy" => {}
             value => {
                 return Err(ConfigError::Invalid(format!(
-                    "inject.prefer={value:?}; expected wtype, clipboard or fcitx5"
+                    "inject.prefer={value:?}; expected wtype, clipboard, fcitx5 or copy"
                 )))
             }
         }
@@ -797,7 +877,7 @@ impl AppConfig {
         // about 25 s of audio; the GGUF path accepts up to 60 s per segment.
         let max_segment = match family {
             crate::offline_asr::OfflineFamily::Gguf => 60.0,
-            _ => 25.0,
+            _ => SHERPA_MAX_SEGMENT_SECONDS,
         };
         if !(1.0..=max_segment).contains(&self.local.segment_limit()) {
             return Err(ConfigError::Invalid(format!(
@@ -805,9 +885,32 @@ impl AppConfig {
                 self.local.model
             )));
         }
-        if let Some(key) = &self.hotkey.key {
-            crate::hotkey::parse_key(key)
-                .map_err(|error| ConfigError::Invalid(format!("hotkey.key: {error}")))?;
+        crate::hotkey::bindings(&self.hotkey).map_err(ConfigError::Invalid)?;
+        for (key, days) in [
+            ("text_days", self.history.text_days),
+            ("audio_days", self.history.audio_days),
+            ("failed_audio_days", self.history.failed_audio_days),
+        ] {
+            if days > 36500 {
+                return Err(ConfigError::Invalid(format!(
+                    "history.{key} must be at most 36500 days"
+                )));
+            }
+        }
+        if self.history.failed_audio_mb > 1_048_576 {
+            return Err(ConfigError::Invalid(
+                "history.failed_audio_mb must be at most 1048576".to_owned(),
+            ));
+        }
+        if self
+            .audio
+            .source
+            .as_ref()
+            .is_some_and(|source| source.trim().is_empty())
+        {
+            return Err(ConfigError::Invalid(
+                "audio.source must name a PipeWire microphone".to_owned(),
+            ));
         }
         if !(0.5..=1.0).contains(&self.text.hotword_threshold) {
             return Err(ConfigError::Invalid(
@@ -817,6 +920,8 @@ impl AppConfig {
         // Compile the regex rules now so a bad pattern fails at load time,
         // not in the middle of a session's final-text step.
         crate::text::TextCleaner::new(&self.text).map_err(ConfigError::Invalid)?;
+        crate::text::vocabulary::validate(&self.text.scopes).map_err(ConfigError::Invalid)?;
+        self.output.validate().map_err(ConfigError::Invalid)?;
         // Keys travel over these sockets; plain ws:// is never acceptable.
         if !self.doubao.endpoint.starts_with("wss://") {
             return Err(ConfigError::Invalid(
@@ -837,18 +942,75 @@ impl AppConfig {
     }
 }
 
-/// Path to the Voiceless config file under the XDG config root:
-/// `$XDG_CONFIG_HOME/voiceless/config.toml`, else `$HOME/.config/...`, else
-/// `./.config/...` when neither variable is set. Same resolution as
-/// `models::default_config_dir`; the daemon and `history serve` hand this
-/// path to the console as the file it edits.
+fn parse_error_detail(input: &str, reason: &str, offset: Option<usize>) -> String {
+    let reason = if reason.starts_with("invalid type:") {
+        reason
+            .rsplit_once(", expected ")
+            .map_or("invalid TOML value", |(_, expected)| expected)
+    } else {
+        reason
+    };
+    let Some(offset) = offset.filter(|offset| *offset <= input.len()) else {
+        return reason.to_owned();
+    };
+    let prefix = &input.as_bytes()[..offset];
+    let line = prefix.iter().filter(|&&byte| byte == b'\n').count() + 1;
+    let start = prefix
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let current = input[start..].lines().next().unwrap_or_default();
+    let column = offset - start + 1;
+    if !reason.starts_with("unknown field")
+        && (current.contains("api_key") || current.contains("access_key"))
+    {
+        format!("line {line}, column {column}: invalid credential field")
+    } else {
+        format!("line {line}, column {column}: {reason}")
+    }
+}
+
+/// Read the bytes and check permissions on the same open file. The console
+/// uses these exact bytes for both its revision and the parsed config.
+pub(crate) fn read_private_text(path: &Path) -> Result<String, ConfigError> {
+    let mut file = fs::File::open(path)?;
+    let mut input = String::new();
+    file.read_to_string(&mut input)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if file.metadata()?.permissions().mode() & 0o077 != 0 && contains_credentials(&input) {
+            return Err(ConfigError::InsecurePermissions);
+        }
+    }
+    Ok(input)
+}
+
+#[cfg(unix)]
+fn contains_credentials(text: &str) -> bool {
+    if text.contains("api_key") || text.contains("access_key") {
+        return true;
+    }
+    // Quoted TOML keys can spell credential names with Unicode escapes.
+    text.contains('\\')
+        && toml::from_str::<toml::Table>(text).is_ok_and(|table| {
+            SECRETS.iter().any(|(section, key)| {
+                table
+                    .get(*section)
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|fields| fields.contains_key(*key))
+            })
+        })
+}
+
+/// Apply a JSON settings patch with the console's locked, validated writer.
+pub fn patch(path: &Path, body: &serde_json::Value) -> Result<(), String> {
+    crate::console::settings::patch_cli(path, body)
+}
+
+/// Path to the Voiceless configuration in the current user's settings directory.
 pub fn default_config_path() -> PathBuf {
-    let root = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned())).join(".config")
-        });
-    root.join("voiceless").join("config.toml")
+    crate::models::default_config_dir().join("config.toml")
 }
 
 /// Load the Voiceless XDG config file when present, otherwise defaults.

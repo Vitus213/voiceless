@@ -10,13 +10,15 @@
 //! Output contract: exactly one JSON document on stdout and exit code 0 on
 //! success; on any failure one `Voiceless: …` line on stderr, nothing on
 //! stdout and exit code 1. Shapes: `list` is `{"records": [HistoryRecord],
-//! "next_cursor"}` (the console's `/api/records` shape); `delete` is
+//! "next_cursor"}` (the console's `/api/records` shape) over the rows the
+//! filter flags select (`--search`, `--from`, `--to`, `--mode`, `--app`,
+//! `--model`, `--audio`, what the console's search takes); `delete` is
 //! `{"deleted": n}`; `export` is `{"exported": n, "path"}`; `totals` is
 //! `HistoryTotals`; `usage` is the `HistoryStore::usage` object.
 
 use std::path::PathBuf;
 
-use crate::history::HistoryStore;
+use crate::history::{HistoryFilter, HistoryStore};
 use crate::models::default_data_dir;
 
 /// Flags shared by every history action (clap declares them global; each
@@ -37,10 +39,49 @@ pub struct HistoryArgs {
     pub days: i64,
 }
 
-/// Run one action and return the process exit code. Blocking (SQLite and
-/// file I/O). `delete` with neither `--all` nor `--ids` deletes nothing and
-/// prints `{"deleted": 0}`; an unknown `action` is a usage error (exit 1).
-pub fn run(action: &str, args: HistoryArgs) -> i32 {
+/// The rows `list` and `export` select, as the command line spells them
+/// (clap declares them global; the other actions ignore them). Every flag
+/// is optional and blank means "any"; `history::HistoryFilter` says what
+/// the values mean. `main.rs` hands them to `run_with`.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryFlags {
+    /// `--search <text>`: the raw or final text contains it.
+    pub search: Option<String>,
+    /// `--from <time>`: created at or after this RFC 3339 time.
+    pub from: Option<String>,
+    /// `--to <time>`: created before this RFC 3339 time.
+    pub to: Option<String>,
+    /// `--mode <id>`: this processing mode.
+    pub mode: Option<String>,
+    /// `--app <id>`: dictated into this application.
+    pub app: Option<String>,
+    /// `--model <id>`: recognized with this model.
+    pub model: Option<String>,
+    /// `--audio <with|without>`: keeps a saved recording, or none.
+    pub audio: Option<String>,
+}
+
+impl HistoryFlags {
+    /// The same filter as the store checks it.
+    fn filter(&self) -> HistoryFilter {
+        HistoryFilter {
+            text: self.search.clone().unwrap_or_default(),
+            from: self.from.clone(),
+            to: self.to.clone(),
+            mode: self.mode.clone(),
+            app: self.app.clone(),
+            model: self.model.clone(),
+            audio: self.audio.clone(),
+        }
+    }
+}
+
+/// Run one action and return the process exit code, `list` and `export`
+/// over the rows `flags` selects. Blocking (SQLite and file I/O).
+/// `delete` with neither `--all` nor `--ids` deletes nothing and prints
+/// `{"deleted": 0}`; an unknown `action` is a usage error and a filter
+/// value the store rejects fails with its message (both exit 1).
+pub fn run_with(action: &str, args: HistoryArgs, flags: HistoryFlags) -> i32 {
     let store = match HistoryStore::open(default_data_dir().join("history.sqlite3")) {
         Ok(store) => store,
         Err(error) => {
@@ -49,7 +90,7 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
         }
     };
     let value = match action {
-        "list" => match store.query(args.limit, args.cursor.as_deref()) {
+        "list" => match store.search(&flags.filter(), args.limit, args.cursor.as_deref()) {
             Ok(page) => serde_json::json!({
                 "records": page.records,
                 "next_cursor": page.next_cursor,
@@ -78,7 +119,7 @@ pub fn run(action: &str, args: HistoryArgs) -> i32 {
                 eprintln!("Voiceless: history export requires --destination");
                 return 1;
             };
-            match store.export_csv(destination) {
+            match store.export_csv(destination, &flags.filter()) {
                 Ok(count) => {
                     serde_json::json!({ "exported": count, "path": destination.display().to_string() })
                 }

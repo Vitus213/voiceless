@@ -1,7 +1,7 @@
-//! Library endpoints: model catalog and installs, history records and
-//! recordings, re-transcription with the warm engine, correction
-//! suggestions and the replay benchmark.
-//!
+//! Library endpoints: model catalog, installs and GGUF imports, history
+//! records (listing, search, facets and CSV export) and recordings,
+//! re-transcription with the warm engine, correction suggestions and the
+//! replay benchmark.
 //! Mounted under `/api` by `super::router`; the "Models", "History" and
 //! "Diagnostics" tables of `docs/console-api.md`. Touches the model store
 //! (`ModelManager` over `<data dir>/models` with `versions/` beneath it and
@@ -10,27 +10,32 @@
 //! database and the WAV recordings its rows point at, and `config.toml`
 //! (`[text]`, for the cleanup applied to re-transcriptions).
 //!
-//! Endpoints that decode audio (`retranscribe`, `benchmark`) need the
-//! daemon's warm local engine (`streaming_backend = "local-offline"`) and
-//! answer 503 otherwise; everything else also works under `voiceless
-//! history serve`. Record ids are validated as UUIDs before they reach SQL,
-//! and audio is only ever read from the path stored in the record, never
-//! from anything in the request.
+//! Re-transcription uses the daemon's background decoder budget and loads
+//! the selected local model. The benchmark requires a warm offline engine.
+//! Audio is read from the path stored in the record.
 
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::StreamExt;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use super::{ApiError, ApiResult, ConsoleState};
-use crate::history::HistoryRecord;
-use crate::models::{catalog, default_cache_dir, default_data_dir, HttpDownloader, ModelManager};
+use crate::history::{HistoryError, HistoryFilter, HistoryRecord, HistoryStore};
+use crate::models::{
+    catalog, default_cache_dir, default_data_dir, import_filename, model_info, HttpDownloader,
+    ImportedModel, ModelError, ModelManager, ModelSpec,
+};
+use crate::transcription_jobs::{PcmSource, SharedResource, WavSource};
 
 /// Background model installs: id → last error (`None` while running).
 ///
@@ -76,16 +81,61 @@ fn models_in_use(state: &ConsoleState) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `GET /api/models` (console API "Models"): every catalog entry with
-/// `installed` (an intact `current` pointer in the store; a broken one
-/// reads as not installed), `installing`, `progress` (bytes of the
-/// `.partial` download over `size_bytes`, 0..1, only while installing; it
-/// sits at 1.0 while the archive is verified and extracted, and is never
-/// `null` during an install), `error` from the last failed install,
-/// `kind` and `in_use`. Always 200; works without a daemon (`in_use` is
-/// then always false).
+/// One entry of `GET /api/models`: what `model_info` says about the model
+/// (`name`, `languages`, `devices`) over what the store holds for `spec`.
+/// `install` is its `Installs` entry and `imported` the imported model
+/// behind it (`None` for a catalog entry).
+fn model_json(
+    manager: &ModelManager,
+    spec: &ModelSpec,
+    imported: Option<&ImportedModel>,
+    install: Option<&Option<String>>,
+    in_use: &[String],
+) -> Value {
+    let info = model_info(spec, imported);
+    let installing = matches!(install, Some(None));
+    // Download ratio while bytes are still arriving; `null` once the file
+    // is complete and the installer is verifying/extracting, so the page
+    // can show an indeterminate "verifying" state.
+    let progress = installing
+        .then(|| {
+            std::fs::metadata(manager.download_path(spec))
+                .map(|metadata| metadata.len() as f64 / spec.size_bytes as f64)
+                .unwrap_or(0.0)
+        })
+        .filter(|ratio| *ratio < 1.0);
+    json!({
+        "id": spec.id,
+        "name": info.name,
+        "version": spec.version,
+        "size_bytes": spec.size_bytes,
+        "license_status": spec.license_status,
+        "installed": matches!(manager.resolve(&spec.id), Ok(Some(_))),
+        "installing": installing,
+        "progress": progress,
+        "error": install.cloned().flatten(),
+        "kind": kind(&spec.id),
+        "in_use": in_use.contains(&spec.id),
+        "languages": info.languages,
+        "devices": info.devices,
+        "imported": imported.is_some(),
+    })
+}
+
+/// `GET /api/models` (console API "Models"): every catalog entry and
+/// every imported GGUF model with `installed` (an intact `current`
+/// pointer in the store; a broken one reads as not installed),
+/// `installing`, `progress` (bytes of the `.partial` download over
+/// `size_bytes`, 0..1, only while installing; it sits at 1.0 while the
+/// archive is verified and extracted, and is never `null` during an
+/// install), `error` from the last failed install, `kind`, `in_use` and
+/// `imported`, plus what the page lists and filters by: `name`,
+/// `languages` and `devices` from `model_info`. The devices are those
+/// this build was compiled for; where a loaded model really runs is the
+/// engine's report in the status. Works without a daemon (`in_use` is
+/// then always false); 500 only when the store cannot list the imported
+/// models.
 pub async fn list_models(State(state): State<Arc<ConsoleState>>) -> ApiResult {
-    let manager = manager();
     let in_use = models_in_use(&state);
     // Snapshot the map so the lock is not held across the filesystem probes.
     let installs = state
@@ -94,35 +144,22 @@ pub async fn list_models(State(state): State<Arc<ConsoleState>>) -> ApiResult {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
-    let models: Vec<Value> = catalog()
-        .into_iter()
-        .map(|spec| {
-            let install = installs.get(&spec.id);
-            let installing = matches!(install, Some(None));
-            // Download ratio while bytes are still arriving; `null` once the
-            // file is complete and the installer is verifying/extracting, so
-            // the page can show an indeterminate "verifying" state.
-            let progress = installing
-                .then(|| {
-                    std::fs::metadata(manager.download_path(&spec))
-                        .map(|metadata| metadata.len() as f64 / spec.size_bytes as f64)
-                        .unwrap_or(0.0)
-                })
-                .filter(|ratio| *ratio < 1.0);
-            json!({
-                "id": spec.id,
-                "version": spec.version,
-                "size_bytes": spec.size_bytes,
-                "license_status": spec.license_status,
-                "installed": matches!(manager.resolve(&spec.id), Ok(Some(_))),
-                "installing": installing,
-                "progress": progress,
-                "error": install.cloned().flatten(),
-                "kind": kind(&spec.id),
-                "in_use": in_use.contains(&spec.id),
-            })
+    let models =
+        tokio::task::spawn_blocking(move || {
+            let manager = manager();
+            let imported = manager.list_imported()?;
+            let mut models: Vec<Value> = catalog()
+                .iter()
+                .map(|spec| model_json(&manager, spec, None, installs.get(&spec.id), &in_use))
+                .collect();
+            models.extend(imported.iter().map(|imported| {
+                model_json(&manager, &imported.spec, Some(imported), None, &in_use)
+            }));
+            Ok::<_, ModelError>(models)
         })
-        .collect();
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(|error| ApiError::internal(format!("cannot list imported models: {error}")))?;
     Ok(Json(json!(models)))
 }
 
@@ -187,9 +224,11 @@ pub async fn install_model(
 
 /// `DELETE /api/models/{id}` (console API "Models"): deletes the model's
 /// pointer and every stored version. 409 while the daemon's warm engine
-/// has it loaded (switch models and reload first), 404 if nothing is
-/// installed under that id, 500 on filesystem errors; `{"ok": true}`
-/// otherwise. No catalog check: any installed id can be removed.
+/// has it loaded (switch models and reload first) or while the store
+/// holds it for a running operation (`ModelError::InUse` / `Busy`, with
+/// the store's reason), 404 if nothing is installed under that id, 500 on
+/// filesystem errors; `{"ok": true}` otherwise. No catalog check: any
+/// installed id, imported or not, can be removed.
 pub async fn remove_model(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
@@ -200,7 +239,12 @@ pub async fn remove_model(
             format!("{id} is loaded by the engine; switch models and reload first"),
         ));
     }
-    let removed = manager().remove(&id).map_err(ApiError::internal)?;
+    let removed = manager().remove(&id).map_err(|error| match error {
+        ModelError::InUse(message) | ModelError::Busy(message) => {
+            ApiError(StatusCode::CONFLICT, message)
+        }
+        error => ApiError::internal(error),
+    })?;
     if !removed {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
@@ -210,10 +254,215 @@ pub async fn remove_model(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Header naming the file behind an import: its base name,
+/// percent-encoded as `encodeURIComponent` leaves it.
+const IMPORT_FILENAME: &str = "x-voiceless-filename";
+
+/// Body frames the channel holds for the writer besides the one it is
+/// writing; bounds what a multi-gigabyte upload keeps in memory.
+const IMPORT_FRAMES_IN_FLIGHT: usize = 4;
+
+/// `POST /api/models/import` (console API "Models"): imports a GGUF model
+/// from a file on this machine. The body is the file's raw bytes with a
+/// `Content-Length`; `X-Voiceless-Filename` optionally names the file.
+/// Answers `{"ok": true, "id"}` once the model is stored and verified,
+/// with the content-addressed `-gguf` id that `[local].model` takes.
+///
+/// The bytes are streamed into a temporary file of the model store
+/// (`begin_import`, which first checks that the disk can hold the
+/// declared size) and that file is handed to `finish_import`: nothing is
+/// buffered whole or copied. A body that fails or ends short of its
+/// `Content-Length` is an interrupted transfer (400) and the partial
+/// file is removed. 411 without a `Content-Length`, 400 for an empty
+/// upload or a name that names a path, 409 for a model another operation
+/// holds, 507 when the disk is full, 422 for bytes that are not a model
+/// this build can run, 500 for other store failures. A refusal before any
+/// byte is stored is answered only after the body was read to its end
+/// (`drain`). With a daemon the import is logged as `model <id>
+/// imported`. The blocking steps run on the blocking pool, and the
+/// request stays open for as long as the upload and the verification
+/// take.
+pub async fn import_model(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult {
+    let (file, bytes, name) = match start_import(&headers).await {
+        Ok(started) => started,
+        Err(error) => return Err(drain(body, error).await),
+    };
+    let file = receive(file, body, bytes).await?;
+    let imported = tokio::task::spawn_blocking(move || manager().finish_import(file, &name, bytes))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(import_error)?;
+    if let Some(daemon) = &state.daemon {
+        daemon.log(format!("Voiceless: model {} imported", imported.spec.id));
+    }
+    Ok(Json(json!({ "ok": true, "id": imported.spec.id })))
+}
+
+/// Check the request and reserve room for it: the declared size, the
+/// name and the temporary file to receive the bytes in.
+async fn start_import(
+    headers: &HeaderMap,
+) -> Result<(tempfile::NamedTempFile, u64, String), ApiError> {
+    let bytes = content_length(headers)?;
+    let name = import_name(headers)?;
+    let file = tokio::task::spawn_blocking(move || manager().begin_import(bytes))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(import_error)?;
+    Ok((file, bytes, name))
+}
+
+/// The size the client declares for the upload. Required: it is reserved
+/// on disk before the first byte is written, and the bytes that arrive
+/// are counted against it.
+pub(super) fn content_length(headers: &HeaderMap) -> Result<u64, ApiError> {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::LENGTH_REQUIRED,
+                "Content-Length is required".to_owned(),
+            )
+        })?
+        .to_str()
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| ApiError::bad_request("Content-Length must be a positive number of bytes"))
+}
+
+/// The name an imported model is listed under: `X-Voiceless-Filename`,
+/// decoded by the store's `import_filename`. Empty without the header and
+/// when the value gives no usable name (it does not decode, or is too
+/// long): the store then names the model after its own metadata, as for
+/// a CLI import, so a name never keeps a valid file out. A value that
+/// names a location (a slash or backslash, raw or escaped) is refused
+/// rather than shortened: no request ever carries a path on this
+/// machine.
+fn import_name(headers: &HeaderMap) -> Result<String, ApiError> {
+    let invalid = |reason: &str| ApiError::bad_request(format!("X-Voiceless-Filename {reason}"));
+    let Some(value) = headers.get(IMPORT_FILENAME) else {
+        return Ok(String::new());
+    };
+    let encoded = value
+        .to_str()
+        .map_err(|_| invalid("must be ASCII with the name percent-encoded"))?;
+    let lower = encoded.to_ascii_lowercase();
+    if encoded.contains(['/', '\\']) || lower.contains("%2f") || lower.contains("%5c") {
+        return Err(invalid("must be a file name, not a path"));
+    }
+    Ok(import_filename(encoded).unwrap_or_default())
+}
+
+/// Write the request body to `file`; the file back once the body ended
+/// whole, or the interrupted transfer.
+///
+/// Frames are read on the runtime and handed over a bounded channel to
+/// one blocking task that writes them, so the file grows as the bytes
+/// arrive and a few frames are all that is held. When the request is
+/// dropped (the client went away) the channel closes, that task returns
+/// the file and dropping it removes the partial copy. A body that fails
+/// before `expected` bytes, or ends early, is reported with the count
+/// that did arrive.
+pub(super) async fn receive(
+    file: tempfile::NamedTempFile,
+    body: Body,
+    expected: u64,
+) -> Result<tempfile::NamedTempFile, ApiError> {
+    let (sender, mut receiver) = mpsc::channel::<Bytes>(IMPORT_FRAMES_IN_FLIGHT);
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut file = file;
+        let mut written = 0_u64;
+        while let Some(frame) = receiver.blocking_recv() {
+            file.write_all(&frame)?;
+            written += frame.len() as u64;
+        }
+        Ok::<_, io::Error>((file, written))
+    });
+    let mut stream = body.into_data_stream();
+    let interrupted = loop {
+        match stream.next().await {
+            Some(Ok(frame)) => {
+                if sender.send(frame).await.is_err() {
+                    break None; // The writer failed; its error is the answer.
+                }
+            }
+            Some(Err(error)) => break Some(error.to_string()),
+            None => break None,
+        }
+    };
+    // Closing the channel lets the writer write what it holds and return.
+    drop(sender);
+    let (file, written) = writer
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(disk_error)?;
+    match interrupted {
+        Some(reason) => Err(ApiError::bad_request(format!(
+            "transfer interrupted after {written} of {expected} bytes: {reason}"
+        ))),
+        None if written != expected => Err(ApiError::bad_request(format!(
+            "received {written} bytes, Content-Length declared {expected}"
+        ))),
+        None => Ok(file),
+    }
+}
+
+/// Read `body` to its end, then hand back `error`: the answer to an
+/// import refused before its bytes were stored. A browser that is still
+/// uploading would otherwise see the connection close and report a
+/// network failure instead of the reason.
+pub(super) async fn drain(body: Body, error: ApiError) -> ApiError {
+    let mut stream = body.into_data_stream();
+    while (stream.next().await).is_some() {}
+    error
+}
+
+/// A refusal of the model store as the API error it is for an import:
+/// 409 for a model another operation holds (`InUse`, `Busy`), 507 when
+/// the disk cannot hold the file, 400 for a transfer shorter than its
+/// `Content-Length` (`Incomplete`), 422 for bytes that are not a model
+/// this build can run (`Integrity`, `Archive`, `Unsupported`, `Invalid`),
+/// 500 otherwise.
+fn import_error(error: ModelError) -> ApiError {
+    match error {
+        ModelError::InUse(message) | ModelError::Busy(message) => {
+            ApiError(StatusCode::CONFLICT, message)
+        }
+        ModelError::NoSpace { .. } => ApiError(StatusCode::INSUFFICIENT_STORAGE, error.to_string()),
+        ModelError::Incomplete { .. } => ApiError::bad_request(error.to_string()),
+        ModelError::Integrity(..)
+        | ModelError::Archive(_)
+        | ModelError::Unsupported(_)
+        | ModelError::Invalid(_) => ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
+        ModelError::Io(error) => disk_error(error),
+        error => ApiError::internal(error),
+    }
+}
+
+/// An I/O failure while storing a model: 507 when the disk or the user's
+/// quota is full, 500 otherwise.
+pub(super) fn disk_error(error: io::Error) -> ApiError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+    ) {
+        return ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!("no space left for the model: {error}"),
+        );
+    }
+    ApiError::internal(error)
+}
+
 /// A `HistoryRecord` as the API's `HistoryRecord` JSON plus `has_audio`,
 /// which checks that the referenced WAV still exists (the row keeps its
 /// `audio_path` even after the file was removed by hand).
-fn record_json(record: &HistoryRecord) -> Value {
+pub(super) fn record_json(record: &HistoryRecord) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or_default();
     value["has_audio"] = json!(record
         .audio_path
@@ -222,35 +471,131 @@ fn record_json(record: &HistoryRecord) -> Value {
     value
 }
 
-/// Query parameters of `GET /api/records`.
+/// Query parameters of `GET /api/records` and `GET /api/records/export`:
+/// `limit` and `cursor` page the former, the other six select the rows.
 #[derive(serde::Deserialize)]
 pub struct Page {
     /// Page size; default 200, clamped to 1..=1000.
     limit: Option<i64>,
     /// Opaque `next_cursor` from the previous page.
     cursor: Option<String>,
+    /// `q`: substring of the raw or final text.
+    #[serde(rename = "q")]
+    text: Option<String>,
+    /// `from`: created at or after this RFC 3339 time, on a whole second.
+    from: Option<String>,
+    /// `to`: created before such a time.
+    to: Option<String>,
+    /// `mode`: exact `processing_mode`.
+    mode: Option<String>,
+    /// `app`: exact `app_id`.
+    app: Option<String>,
+    /// `model`: exact `asr_model`.
+    model: Option<String>,
+    /// `audio`: `with` or `without` a saved recording.
+    audio: Option<String>,
 }
 
-/// `GET /api/records?limit=&cursor=` (console API "History"): newest
-/// first, `{"records": [HistoryRecord + has_audio], "next_cursor"}` where
-/// `next_cursor` is `null` on the last page. `limit` defaults to 200 and
-/// is clamped to 1..=1000. 500 for database errors, including a cursor
-/// that does not decode.
+impl Page {
+    /// The rows selected, as the store takes them: a parameter that is
+    /// missing or blank selects anything.
+    fn filter(&self) -> HistoryFilter {
+        HistoryFilter {
+            text: self.text.clone().unwrap_or_default(),
+            from: self.from.clone(),
+            to: self.to.clone(),
+            mode: self.mode.clone(),
+            app: self.app.clone(),
+            model: self.model.clone(),
+            audio: self.audio.clone(),
+        }
+    }
+}
+
+/// A failure of the history store as the API error it is: 400 for a
+/// filter it rejects, 500 for everything else (a database failure, a
+/// cursor that does not decode or was issued for another filter).
+fn history_error(error: HistoryError) -> ApiError {
+    match error {
+        HistoryError::Filter(message) => ApiError::bad_request(message),
+        error => ApiError::internal(error),
+    }
+}
+
+/// Run `work` on the store in the blocking pool: a search, the facets or
+/// an export may read the whole library, which must not stall the runtime.
+async fn on_store<T: Send + 'static>(
+    state: Arc<ConsoleState>,
+    work: impl FnOnce(&HistoryStore) -> Result<T, HistoryError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(move || work(&state.store))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(history_error)
+}
+
+/// `GET /api/records?limit=&cursor=&q=&from=&to=&mode=&app=&model=&audio=`
+/// (console API "History"): the rows the filter selects, newest first,
+/// `{"records": [HistoryRecord + has_audio], "next_cursor"}` where
+/// `next_cursor` is `null` on the last page. Without the filter
+/// parameters it lists every row as before. `limit` defaults to 200 and is
+/// clamped to 1..=1000. `q` is a substring of the raw or final text, ASCII
+/// letter case ignored; `from` is inclusive and `to` exclusive, both an
+/// RFC 3339 time on a whole second; `mode`, `app` and `model` compare for
+/// equality; `audio` is `with` or `without`. A cursor belongs to the
+/// filter it was issued for and is refused under another. 400 for a filter
+/// value the store rejects, 500 for database errors and for a cursor that
+/// does not decode.
 pub async fn records(
     State(state): State<Arc<ConsoleState>>,
     Query(page): Query<Page>,
 ) -> ApiResult {
-    let page = state
-        .store
-        .query(
-            page.limit.unwrap_or(200).clamp(1, 1_000),
-            page.cursor.as_deref(),
-        )
-        .map_err(ApiError::internal)?;
+    let filter = page.filter();
+    let limit = page.limit.unwrap_or(200).clamp(1, 1_000);
+    let cursor = page.cursor;
+    let page = on_store(state, move |store| {
+        store.search(&filter, limit, cursor.as_deref())
+    })
+    .await?;
     Ok(Json(json!({
         "records": page.records.iter().map(record_json).collect::<Vec<_>>(),
         "next_cursor": page.next_cursor,
     })))
+}
+
+/// `GET /api/records/facets` (console API "History"): what the search's
+/// menus offer, `{"modes": [{"value", "records"}], "apps": [...],
+/// "models": [...]}`: every `processing_mode`, `app_id` and `asr_model`
+/// the library holds, each with the rows carrying it, the most frequent
+/// first and by value among equals. 500 on database errors.
+pub async fn record_facets(State(state): State<Arc<ConsoleState>>) -> ApiResult {
+    let facets = on_store(state, |store| store.facets()).await?;
+    Ok(Json(
+        serde_json::to_value(facets).map_err(ApiError::internal)?,
+    ))
+}
+
+/// `GET /api/records/export?q=&from=&to=&mode=&app=&model=&audio=` (console
+/// API "History"): every row the filter selects, in the order the list
+/// shows and chosen by the same parameters, as `{"csv", "exported"}`.
+/// The CSV is one header line and one line per record with the fields of
+/// `HistoryRecord` in order (`id,created_at,…,audio_path,app_id`): a field
+/// with a comma, a quote or a line break is quoted with its quotes
+/// doubled, NULL fields are empty. `limit` and `cursor` mean nothing here.
+/// 400 for a filter value the store rejects, 500 on database errors.
+pub async fn export_records(
+    State(state): State<Arc<ConsoleState>>,
+    Query(query): Query<Page>,
+) -> ApiResult {
+    let filter = query.filter();
+    let (csv, exported) = on_store(state, move |store| {
+        let mut csv = Vec::new();
+        let exported = store.write_csv(&mut csv, &filter)?;
+        Ok((csv, exported))
+    })
+    .await?;
+    let csv = String::from_utf8(csv).map_err(ApiError::internal)?;
+    Ok(Json(json!({ "csv": csv, "exported": exported })))
 }
 
 /// `GET /api/totals` (console API "History"):
@@ -275,7 +620,7 @@ fn is_record_id(id: &str) -> bool {
 
 /// Look a record up by id; a malformed id and an unknown one are the same
 /// 404 `no such record`, a database error 500.
-fn find_record(state: &ConsoleState, id: &str) -> Result<HistoryRecord, ApiError> {
+pub(super) fn find_record(state: &ConsoleState, id: &str) -> Result<HistoryRecord, ApiError> {
     let not_found = || ApiError(StatusCode::NOT_FOUND, "no such record".to_owned());
     if !is_record_id(id) {
         return Err(not_found());
@@ -375,41 +720,51 @@ pub async fn delete_record(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Decode a WAV with the daemon's warm engine through the live VAD
-/// segmentation; returns (text, decode seconds, audio seconds).
-///
-/// Mirrors a real session so timings are comparable: the file is read with
-/// sherpa's WAV reader, resampled to 16 kHz if needed, fed in 512-sample
-/// chunks to a `SegmentedRecognizer` built from the engine's decoder, VAD
-/// model and segment limit, and the `Finished` transcript is taken. The
-/// partial interval is set to an hour so no partial decodes inflate the
-/// time. Blocking and GPU-heavy: callers run it on the blocking pool.
-/// Errors are strings: unreadable file, resampler or VAD creation failure.
+struct DecodedRecording {
+    text: String,
+    device: String,
+    decode_seconds: f64,
+    audio_seconds: f64,
+}
+
+/// Decode with the same segmentation as live dictation. Release the decoder between
+/// blocks so a foreground session can start. Exclude queueing and file I/O from RTF.
 fn decode_file(
     engine: &crate::engine::WarmEngine,
-    path: &str,
-) -> Result<(String, f64, f64), String> {
-    let wave = sherpa_onnx::Wave::read(path).ok_or_else(|| format!("cannot read {path}"))?;
-    let samples = if wave.sample_rate() == 16_000 {
-        wave.samples().to_vec()
-    } else {
-        sherpa_onnx::LinearResampler::create(wave.sample_rate(), 16_000)
-            .ok_or("cannot resample")?
-            .resample(wave.samples(), true)
+    mut source: WavSource,
+    resource: &dyn SharedResource,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DecodedRecording, ApiError> {
+    let unit = || resource.unit(cancelled).ok_or_else(request_ended);
+    let (mut recognizer, device) = {
+        let _unit = unit()?;
+        let (decoder, vad_path, limit) = engine
+            .offline_decoder()
+            .ok_or_else(|| ApiError::bad_request("selected model has no offline decoder"))?;
+        let device = decoder.device().to_string();
+        let vad = crate::offline_asr::create_vad(&vad_path, limit).map_err(ApiError::internal)?;
+        (
+            crate::offline_asr::SegmentedRecognizer::new(decoder, vad, Duration::from_secs(3600)),
+            device,
+        )
     };
-    let (decoder, vad_model, segment_limit) = engine
-        .offline_decoder()
-        .ok_or("no offline engine is loaded")?;
-    let vad =
-        crate::offline_asr::create_vad(&vad_model, segment_limit).map_err(|e| e.to_string())?;
-    // No partials: only the segment decodes count.
-    let mut recognizer =
-        crate::offline_asr::SegmentedRecognizer::new(decoder, vad, Duration::from_secs(3_600));
-    let started = Instant::now();
-    for chunk in samples.chunks(512) {
-        recognizer.accept(chunk);
+    let mut samples = [0.0; crate::capture::SAMPLE_RATE as usize];
+    let mut count = 0_u64;
+    let mut elapsed = Duration::ZERO;
+    loop {
+        let n = source.read(&mut samples).map_err(ApiError::bad_request)?;
+        if n == 0 {
+            break;
+        }
+        let _unit = unit()?;
+        let started = Instant::now();
+        recognizer.accept(&samples[..n]);
+        elapsed += started.elapsed();
+        count += n as u64;
     }
-    let transcript = recognizer
+    let _unit = unit()?;
+    let started = Instant::now();
+    let text = recognizer
         .finish()
         .into_iter()
         .find_map(|event| match event {
@@ -417,11 +772,19 @@ fn decode_file(
             _ => None,
         })
         .unwrap_or_default();
-    Ok((
-        transcript,
-        started.elapsed().as_secs_f64(),
-        samples.len() as f64 / 16_000.0,
-    ))
+    Ok(DecodedRecording {
+        text,
+        device,
+        decode_seconds: (elapsed + started.elapsed()).as_secs_f64(),
+        audio_seconds: count as f64 / f64::from(crate::capture::SAMPLE_RATE),
+    })
+}
+
+fn request_ended() -> ApiError {
+    ApiError(
+        StatusCode::REQUEST_TIMEOUT,
+        "recognition request ended".to_owned(),
+    )
 }
 
 /// The daemon's warm local engine, or 503: `daemon not running` without a
@@ -440,45 +803,119 @@ fn warm_engine(state: &ConsoleState) -> Result<Arc<crate::engine::WarmEngine>, A
         })
 }
 
-/// `POST /api/records/{id}/retranscribe` (console API "History"): decodes
-/// the record's recording again with the warm engine and answers
-/// `{"ok": true, "text", "cleaned", "seconds", "engine"}` — `text` raw,
-/// `cleaned` after the current `[text]` cleanup, `seconds` decode time,
-/// `engine` the `describe()` string. Nothing is written to history. 503
-/// without a daemon or local engine (checked before the id, so an unknown
-/// id also gets 503 then), 404 for a malformed/unknown id or a missing
-/// WAV, 400 if the saved `[text]` rules do not compile, 500 for decode
-/// errors. Occupies the GPU for the decode.
+/// Propose the selected local model's result. An older bodyless caller uses
+/// the active local model and still receives the preview fields it expects.
+#[derive(serde::Deserialize)]
+pub struct Retranscribe {
+    model: String,
+}
+
 pub async fn retranscribe(
     State(state): State<Arc<ConsoleState>>,
     UrlPath(id): UrlPath<String>,
+    body: Option<Json<Retranscribe>>,
 ) -> ApiResult {
-    let engine = warm_engine(&state)?;
+    use crate::history::revisions::{RevisionDraft, RevisionKind};
+
+    let daemon = state.daemon()?.clone();
     let record = find_record(&state, &id)?;
     let path = record
         .audio_path
-        .filter(|path| Path::new(path).is_file())
+        .filter(|p| Path::new(p).is_file())
         .ok_or_else(|| {
             ApiError(
                 StatusCode::NOT_FOUND,
                 "record has no saved audio".to_owned(),
             )
         })?;
-    let description = engine.describe();
-    let (text, seconds, _) = tokio::task::spawn_blocking(move || decode_file(&engine, &path))
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::internal)?;
-    let cleaned = crate::text::TextCleaner::new(&state.config()?.text)
-        .map_err(ApiError::bad_request)?
-        .clean(&text);
-    Ok(Json(json!({
-        "ok": true,
-        "text": text,
-        "cleaned": cleaned,
-        "seconds": seconds,
-        "engine": description,
-    })))
+    let active = daemon.active_file();
+    let model = body.map_or_else(
+        || active.config.local.model.clone(),
+        |Json(input)| input.model,
+    );
+    if model.is_empty()
+        || !model
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err(ApiError::bad_request("choose an installed offline model"));
+    }
+    crate::offline_asr::OfflineFamily::for_model(&model).map_err(ApiError::bad_request)?;
+    let cleaner =
+        crate::text::TextCleaner::new(&state.config()?.text).map_err(ApiError::bad_request)?;
+    let mut config = active.config.clone();
+    config.local.select_file_model(&model);
+    config.asr.streaming_backend = "local-offline".to_owned();
+    // At most one history request retains a cold model between decoder units.
+    static SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let slot = SLOT.try_acquire().map_err(|_| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "another history recording is being recognized".to_owned(),
+        )
+    })?;
+    let (cancel, request) = tokio::sync::oneshot::channel::<()>();
+    let (text, device, seconds) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+        let _slot = slot;
+        let resource: &dyn SharedResource = &daemon.transcription_resource;
+        let cancelled = || cancel.is_closed();
+        let started = Instant::now();
+        let source = WavSource::open(Path::new(&path), 0).map_err(ApiError::bad_request)?;
+        let engine = {
+            let _unit = resource.unit(&cancelled).ok_or_else(request_ended)?;
+            match daemon
+                .warm()
+                .filter(|engine| engine.matches_config(&config))
+            {
+                Some(warm) => warm,
+                None => {
+                    config.local.fast_preview = false;
+                    config.local.denoise = false;
+                    Arc::new(
+                        crate::engine::WarmEngine::load(&config)
+                            .map_err(ApiError::bad_request)?
+                            .ok_or_else(|| {
+                                ApiError::bad_request("cannot load selected offline model")
+                            })?,
+                    )
+                }
+            }
+        };
+        let decoded = decode_file(&engine, source, resource, &cancelled)?;
+        Ok((
+            decoded.text,
+            decoded.device,
+            started.elapsed().as_secs_f64(),
+        ))
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    drop(request);
+    let cleaned = cleaner.clean(&text);
+    if cleaned.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no speech recognized".to_owned(),
+        ));
+    }
+    let draft = RevisionDraft {
+        kind: RevisionKind::Retranscription,
+        raw_text: text,
+        processed_text: Some(cleaned.clone()),
+        final_text: cleaned,
+        asr_provider: Some("local-offline".to_owned()),
+        asr_model: Some(model.clone()),
+        device: Some(device.clone()),
+    };
+    let (record, revision) = state
+        .store
+        .propose_revision(&id, &draft, false, None)
+        .map_err(super::revisions::history_error)?;
+    Ok(Json(
+        json!({ "ok": true, "text": draft.raw_text, "cleaned": draft.final_text,
+        "seconds": seconds, "engine": format!("{model} ({device})"),
+        "record": record_json(&record), "revision": revision }),
+    ))
 }
 
 /// `POST /api/corrections` (console API "History"): body `{"original",
@@ -614,8 +1051,7 @@ pub fn cer(reference: &str, hypothesis: &str) -> f64 {
 /// that fails to decode yields `{"id", "error"}` instead and is left out
 /// of the means (which are `null` if nothing decoded). 503 without a
 /// daemon or local engine, 404 when no record has audio, 500 for database
-/// errors. Decodes run one after another on the blocking pool and hold
-/// the GPU for the whole run; the request blocks until all are done.
+/// errors. Background decodes yield to live dictation between blocks.
 pub async fn benchmark(
     State(state): State<Arc<ConsoleState>>,
     body: Option<Json<Value>>,
@@ -645,28 +1081,42 @@ pub async fn benchmark(
         ));
     }
     let description = engine.describe();
+    let resource = state.daemon()?.transcription_resource.clone();
+    let (cancel, request) = tokio::sync::oneshot::channel::<()>();
     let results = tokio::task::spawn_blocking(move || {
-        samples
-            .into_iter()
-            .map(|record| {
-                let path = record.audio_path.clone().unwrap_or_default();
-                match decode_file(&engine, &path) {
-                    Ok((text, decode_seconds, audio_seconds)) => json!({
-                        "id": record.id,
-                        "audio_seconds": audio_seconds,
-                        "decode_seconds": decode_seconds,
-                        "rtf": decode_seconds / audio_seconds.max(0.01),
-                        "reference": record.raw_text,
-                        "text": text,
-                        "cer": cer(&record.raw_text, &text),
-                    }),
-                    Err(error) => json!({ "id": record.id, "error": error }),
-                }
-            })
-            .collect::<Vec<_>>()
+        let mut results = Vec::with_capacity(samples.len());
+        for record in samples {
+            let Some(path) = record.audio_path.as_deref() else {
+                continue;
+            };
+            let decoded = WavSource::open(Path::new(path), 0)
+                .map_err(ApiError::bad_request)
+                .and_then(|source| decode_file(&engine, source, &resource, &|| cancel.is_closed()));
+            let row = match decoded {
+                Ok(DecodedRecording {
+                    text,
+                    decode_seconds,
+                    audio_seconds,
+                    ..
+                }) => json!({
+                    "id": record.id,
+                    "audio_seconds": audio_seconds,
+                    "decode_seconds": decode_seconds,
+                    "rtf": decode_seconds / audio_seconds.max(0.01),
+                    "reference": record.raw_text,
+                    "text": text,
+                    "cer": cer(&record.raw_text, &text),
+                }),
+                Err(error) if cancel.is_closed() => return Err(error),
+                Err(error) => json!({ "id": record.id, "error": error.1 }),
+            };
+            results.push(row);
+        }
+        Ok(results)
     })
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::internal)??;
+    drop(request);
     let mean = |field: &str| {
         let values: Vec<f64> = results
             .iter()

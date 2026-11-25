@@ -23,14 +23,10 @@
 //! directories. Processes spawned: `pw-record`, `wtype`, `wl-copy`,
 //! `wl-paste` and the configured paste, focus and X11 clipboard commands.
 //!
-//! Order of operations: the mode, processing provider and text cleaner are
-//! resolved before any backend opens, and the backend opens (with at most
-//! one fallback) before any capture starts, so configuration errors never
-//! produce audio. Backend-open failures that are configuration errors
-//! (`StreamError`) abort the command: `main.rs` prints `Voiceless: <error>`
-//! and exits 1. A missing or corrupt local model is instead reported as
-//! `error` + `completed` events (exit code 1) so `--json` consumers and
-//! overlays see it.
+//! The mode and final-text pipeline are resolved before opening a backend.
+//! A configured fallback may open once if the primary fails before capture.
+//! Configuration and connection errors use `StreamError`. Model and
+//! readiness failures use the session's `error` and `completed` events.
 //!
 //! `stream --json` prints one `JsonEvent` line per `OutputEvent`
 //! (`json_event`); the daemon broadcasts the same lines as D-Bus `Event`
@@ -38,22 +34,36 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
 use std::time::Duration;
 
 use serde::Serialize;
+#[cfg(target_os = "linux")]
 use tokio::io::AsyncWriteExt;
+#[cfg(target_os = "linux")]
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 
 use crate::capture::RawCapture;
-use crate::config::{AppConfig, ConfigError, InjectConfig};
+use crate::config::{validate_streaming_backend, AppConfig, ConfigError, InjectConfig};
 use crate::coordinator::{
-    AudioCapture, BackendTransport, ControlCommand, EventSink, HistoryEntry, HistoryRecorder,
-    InjectionResult, OutputEvent, SessionPlan, TextInjector, TextProcessor,
+    AudioCapture, BackendFallback, BackendSelection, BackendTransport, ControlCommand, Delivery,
+    EventSink, HistoryEntry, HistoryRecorder, InjectionResult, OutputEvent, ReadyError,
+    SessionPhase, SessionPlan, TextInjector, TextProcessor, DEFAULT_READY_TIMEOUT,
 };
 use crate::realtime::{RealtimeEvent, RealtimeSession};
 use crate::session::TranscriptSnapshot;
+
+#[cfg(test)]
+mod tests;
+
+/// Context explicitly supplied by an authorized local session caller.
+#[derive(Debug, Clone, Default)]
+pub struct DictationContext {
+    pub site: Option<String>,
+    pub project: Option<String>,
+}
 
 /// Options of one `stream` invocation. `main.rs` fills them from the CLI;
 /// the daemon keeps one copy and overrides `mode` and `inject` per session.
@@ -72,6 +82,13 @@ pub struct StreamOptions {
     /// Mode id or (case-insensitive) name resolved against `modes.json`;
     /// the CLI default is `quick`.
     pub mode: String,
+    pub context: DictationContext,
+}
+
+impl DictationContext {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.site.is_none() && self.project.is_none()
+    }
 }
 
 /// Startup failures of a standalone session, all raised before any audio
@@ -107,7 +124,17 @@ pub enum StreamError {
 /// `message` and `injection` are `null` unless the kind carries them; `rms`
 /// is present only on `level`.
 #[derive(Debug, Serialize)]
-struct JsonEvent<'a> {
+pub(crate) struct JsonEvent<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<SessionPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_selection: Option<&'a BackendSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    devices: Option<&'a crate::offline_asr::EngineDevices>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<&'a crate::output::Trace>,
     #[serde(rename = "type")]
     kind: &'a str,
     sequence: u64,
@@ -122,6 +149,8 @@ struct JsonEvent<'a> {
 /// SIGINT or SIGTERM cancels. Returns the session exit code (`0`, `1`,
 /// `130`) or a startup error.
 pub async fn run(options: StreamOptions) -> Result<i32, StreamError> {
+    let _runtime_lock = crate::runtime::lock_runtime(&crate::models::default_data_dir())
+        .map_err(|error| StreamError::Capture(error.to_string()))?;
     let control = control_receiver();
     run_with_control(options, control).await
 }
@@ -135,29 +164,13 @@ pub async fn run_with_control(
     run_with_env(options, control, SessionEnv::default()).await
 }
 
-/// What a resident daemon lends a session: a warm engine and the event
-/// broadcast that replaces stdout.
-#[derive(Default, Clone)]
+/// Resources lent by a resident daemon to a session.
+#[derive(Default)]
 pub struct SessionEnv {
     /// Model loaded by the daemon. Standalone sessions load on demand.
     pub warm: Option<std::sync::Arc<crate::engine::WarmEngine>>,
-    /// Daemon event broadcast (JSON lines). When set, events go there
-    /// through `BroadcastSink` instead of stdout, and level events are on.
-    pub events: Option<tokio::sync::broadcast::Sender<String>>,
-}
-
-impl SessionEnv {
-    /// The event sink for this environment: the broadcast when lent by the
-    /// daemon, otherwise stdout (`json` selects the line format).
-    fn sink(&self, json: bool) -> Box<dyn EventSink + Send> {
-        match &self.events {
-            Some(events) => Box::new(BroadcastSink {
-                events: events.clone(),
-                sequence: 0,
-            }),
-            None => Box::new(StdoutSink::new(json)),
-        }
-    }
+    /// Receives session events and mic levels when supplied. Defaults to stdout.
+    pub sink: Option<Box<dyn EventSink + Send>>,
 }
 
 /// Full session setup and run; see the module doc for the order. Returns
@@ -168,68 +181,151 @@ pub async fn run_with_env(
     control: tokio::sync::mpsc::Receiver<ControlCommand>,
     env: SessionEnv,
 ) -> Result<i32, StreamError> {
-    let mut config = AppConfig::load_optional(options.config_path.as_deref())?;
-    // Round-trip the overridden config through TOML so `--backend` gets
-    // the same validation (allowed names, cross-field rules) as a file.
+    let config = AppConfig::load_optional(options.config_path.as_deref())?;
+    run_with_config(
+        options,
+        control,
+        env,
+        std::borrow::Cow::Owned(config),
+        "quick",
+    )
+    .await
+}
+
+pub(crate) async fn run_with_config(
+    options: StreamOptions,
+    control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    env: SessionEnv,
+    mut config: std::borrow::Cow<'_, AppConfig>,
+    default_mode: &str,
+) -> Result<i32, StreamError> {
+    // An override changes only the backend of an already validated config.
     if let Some(backend) = options.backend.as_deref() {
-        config.asr.streaming_backend = backend.to_owned();
-        config = AppConfig::from_toml(&toml::to_string(&config).map_err(|error| {
-            ConfigError::Invalid(format!("cannot apply backend override: {error}"))
-        })?)?;
+        validate_streaming_backend("streaming_backend", backend)?;
+        config.to_mut().asr.streaming_backend = backend.to_owned();
     }
-    let pipeline = build_pipeline(&config, &options)?;
-    let mut sink = env.sink(options.json);
-    let mut injector = ConfiguredInjector::new(config.inject.clone());
-    if options.inject && config.inject.prefer == "fcitx5" {
-        // One ordered bridge channel for the live preedit and the commit.
-        let client = crate::fcitx5::Fcitx5Client::spawn();
-        if config.inject.preedit {
-            sink = Box::new(crate::fcitx5::PreeditSink::new(sink, client.clone()));
-        }
-        injector = injector.with_fcitx5(client);
+    let config = config.as_ref();
+    let pipeline = build_pipeline(config, &options, default_mode).await?;
+    let capture = PwCapture {
+        inner: None,
+        source: config.audio.source.as_deref(),
+    };
+    run_configured(config, &options, control, env, pipeline, capture).await
+}
+
+async fn run_configured<C: AudioCapture>(
+    config: &AppConfig,
+    options: &StreamOptions,
+    mut control: tokio::sync::mpsc::Receiver<ControlCommand>,
+    mut env: SessionEnv,
+    pipeline: Pipeline,
+    capture: C,
+) -> Result<i32, StreamError> {
+    let daemon_events = env.sink.is_some();
+    let mut sink = env
+        .sink
+        .take()
+        .unwrap_or_else(|| Box::new(StdoutSink::new(options.json)));
+    #[cfg(target_os = "linux")]
+    if let Some(client) = pipeline
+        .injector
+        .fcitx5
+        .as_ref()
+        .filter(|_| config.inject.preedit)
+    {
+        sink = Box::new(crate::fcitx5::PreeditSink::new(sink, client.clone()));
     }
-    // At most one fallback, and only to a different backend; its warning
-    // precedes `ready` in the event stream so consumers learn the switch.
-    let primary = config.asr.streaming_backend.clone();
-    let opened = match open_transport(&primary, &config, &env).await {
-        Ok(transport) => Ok((primary, transport)),
-        Err(error) => match config.asr.fallback_backend.clone() {
-            Some(fallback) if fallback != primary => {
+    let _ = sink.emit(OutputEvent::Output(Box::new(crate::output::Trace {
+        selection: pipeline.processor.selection().clone(),
+        steps: Vec::new(),
+    })));
+    let primary = config.asr.streaming_backend.as_str();
+    let fallback = config
+        .asr
+        .fallback_backend
+        .as_deref()
+        .filter(|&id| id != primary);
+    let warm = env.warm.as_deref();
+    // Nothing removes the models this session, or its fallback, may load
+    // while it runs; the leases live until the session has ended.
+    let _model_leases = crate::models::lease_models(
+        [primary, fallback.unwrap_or(primary)]
+            .into_iter()
+            .flat_map(|backend| crate::engine::model_ids_for(config, backend)),
+    );
+    let hotwords = pipeline
+        .processor
+        .scoped_hotwords()
+        .unwrap_or(&config.text.hotwords);
+    let opened = match open_ready_transport(primary, config, warm, hotwords, &mut control).await {
+        Ok(transport) => Ok((primary, transport, None)),
+        Err(error) => match fallback {
+            Some(fallback) if !matches!(error, OpenError::Cancelled) => {
+                let reason = error.to_string();
                 let _ = sink.emit(OutputEvent::Warning(format!(
-                    "{primary} unavailable ({error}); falling back to {fallback}"
+                    "{primary} unavailable ({reason}); falling back to {fallback}"
                 )));
-                open_transport(&fallback, &config, &env)
+                open_ready_transport(fallback, config, warm, hotwords, &mut control)
                     .await
-                    .map(|transport| (fallback, transport))
+                    .map(|transport| {
+                        let fallback_reason = BackendFallback {
+                            primary: primary.to_owned(),
+                            reason,
+                        };
+                        (fallback, transport, Some(fallback_reason))
+                    })
             }
             _ => Err(error),
         },
     };
-    let (backend, transport) = match opened {
+    let (backend, mut transport, fallback) = match opened {
         Ok(opened) => opened,
         Err(OpenError::Stream(error)) => return Err(error),
-        // Model problems are session events (exit 1 after error/completed),
-        // not a command error: overlays and `--json` readers must see them.
-        Err(OpenError::Model(message)) => {
-            let _ = sink.emit(OutputEvent::Error(message));
-            let _ = sink.emit(OutputEvent::Completed);
-            return Ok(1);
+        Err(OpenError::Model(message) | OpenError::Readiness(message)) => {
+            return Ok(crate::coordinator::fail(&mut sink, &message));
         }
+        Err(OpenError::Cancelled) => return Ok(crate::coordinator::cancelled(&mut sink)),
     };
-    let mut plan = session_plan(&config, &options, &backend, &pipeline.mode_id);
+    let mut plan = session_plan(config, options, backend, &pipeline.mode_id);
+    if config.history.save_failed_audio {
+        plan.failure_recovery = Some(crate::coordinator::FailureRecovery {
+            directory: crate::history::retention::RecoveryStore::default_dir(),
+            app_id: pipeline.processor.selection().app_id.clone(),
+        });
+    }
+    if sink
+        .emit(OutputEvent::BackendSelected(BackendSelection {
+            backend: plan.backend.clone(),
+            model: plan.model.clone(),
+            requested_device: requested_device(config, backend),
+            fallback,
+        }))
+        .is_err()
+    {
+        let _ = transport.cancel().await;
+        return Ok(1);
+    }
+    if backend == "local-streaming" {
+        let _ = sink.emit(OutputEvent::DevicesLoaded(Box::new(
+            crate::offline_asr::EngineDevices {
+                primary: crate::offline_asr::InferenceDevice::sherpa_cpu(),
+                preview: None,
+            },
+        )));
+    }
     // Live UIs (daemon console, overlay) draw a mic level meter.
-    plan.emit_levels = env.events.is_some();
+    plan.emit_levels = daemon_events;
     if backend == "local-offline" {
         // Bound capture drain and queuing the finish request. The worker's
         // final event can arrive later, including after a cold model load.
         plan.finish_timeout = Duration::from_secs(20);
     }
-    let code = crate::coordinator::run_session(
+    let code = crate::coordinator::run_ready_session(
         plan,
-        PwCapture::default(),
+        capture,
         transport,
         pipeline.processor,
-        injector,
+        pipeline.injector,
         pipeline.history,
         control,
         &mut sink,
@@ -238,19 +334,21 @@ pub async fn run_with_env(
     Ok(code)
 }
 
-/// Why a backend could not open. `Stream` errors abort the command;
-/// `Model` errors (missing or broken local models) are reported as session
-/// events so overlays and `--json` consumers see them.
+/// A backend can fail while opening the transport or while the startup
+/// acknowledgement is pending. Cancellation abandons both attempts.
 enum OpenError {
     Stream(StreamError),
     Model(String),
+    Readiness(String),
+    Cancelled,
 }
 
 impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OpenError::Stream(error) => error.fmt(f),
-            OpenError::Model(message) => f.write_str(message),
+            OpenError::Model(message) | OpenError::Readiness(message) => f.write_str(message),
+            OpenError::Cancelled => f.write_str("startup cancelled"),
         }
     }
 }
@@ -261,11 +359,36 @@ impl From<StreamError> for OpenError {
     }
 }
 
+async fn open_ready_transport(
+    backend: &str,
+    config: &AppConfig,
+    warm: Option<&crate::engine::WarmEngine>,
+    hotwords: &[String],
+    control: &mut tokio::sync::mpsc::Receiver<ControlCommand>,
+) -> Result<AnyTransport, OpenError> {
+    let deadline = Instant::now() + DEFAULT_READY_TIMEOUT;
+    let mut transport = tokio::select! {
+        biased;
+        _ = control.recv() => return Err(OpenError::Cancelled),
+        result = timeout_at(deadline, open_transport(backend, config, warm, hotwords)) => {
+            result.map_err(|_| OpenError::Readiness(format!("opening {backend} timed out")))??
+        }
+    };
+    let error = match crate::coordinator::wait_until_ready(&transport, control, deadline).await {
+        Ok(()) => return Ok(transport),
+        Err(ReadyError::Cancelled) => OpenError::Cancelled,
+        Err(ReadyError::Failed(message)) => OpenError::Readiness(message),
+    };
+    let _ = transport.cancel().await;
+    Err(error)
+}
+
 /// Connect or load the transport for one backend, before any capture.
 async fn open_transport(
     backend: &str,
     config: &AppConfig,
-    env: &SessionEnv,
+    warm: Option<&crate::engine::WarmEngine>,
+    hotwords: &[String],
 ) -> Result<AnyTransport, OpenError> {
     match backend {
         "cloud-realtime" => {
@@ -285,18 +408,16 @@ async fn open_transport(
             if !config.doubao.has_credentials() {
                 return Err(StreamError::MissingDoubaoCredentials.into());
             }
-            let session = crate::doubao::DoubaoSession::connect(&config.doubao_engine())
-                .await
-                .map_err(StreamError::from)?;
+            let session = crate::doubao::DoubaoSession::connect(
+                &config.doubao_engine_with_hotwords(hotwords),
+            )
+            .await
+            .map_err(StreamError::from)?;
             Ok(AnyTransport::Doubao(DoubaoTransport(session)))
         }
         "local-streaming" => {
             let directory = config.asr.local_model_dir.as_deref();
-            let recognizer = match env
-                .warm
-                .as_ref()
-                .and_then(|engine| engine.streaming_for(directory))
-            {
+            let recognizer = match warm.and_then(|engine| engine.streaming_for(directory)) {
                 Some(recognizer) => recognizer,
                 None => {
                     let model =
@@ -306,20 +427,29 @@ async fn open_transport(
             };
             Ok(AnyTransport::Local(LocalTransport::new(recognizer)))
         }
-        "local-offline" => open_local_offline(config, env).map(AnyTransport::Offline),
+        "local-offline" => open_local_offline(config, warm, hotwords).map(AnyTransport::Offline),
         value => Err(StreamError::UnsupportedBackend(value.to_owned()).into()),
     }
 }
 
 /// Build the `local-offline` transport: reuse the daemon's warm decoder
 /// when `[local]` still matches it, otherwise resolve and verify the model
-/// and the Silero VAD from the catalog and load them on the worker thread.
+/// (a catalog entry or an imported one) and the Silero VAD from the store
+/// and load them on the worker thread.
 /// Never blocks on the load itself.
 fn open_local_offline(
     config: &AppConfig,
-    env: &SessionEnv,
+    warm: Option<&crate::engine::WarmEngine>,
+    hotwords: &[String],
 ) -> Result<OfflineTransportAdapter, OpenError> {
-    let local = config.local_engine();
+    let local = if matches!(
+        crate::offline_asr::OfflineFamily::for_model(&config.local.model),
+        Ok(crate::offline_asr::OfflineFamily::SenseVoice)
+    ) {
+        config.local_engine()
+    } else {
+        config.local_engine_with_hotwords(hotwords)
+    };
     let denoise_model = local
         .denoise
         .then(|| {
@@ -330,7 +460,7 @@ fn open_local_offline(
         .transpose()?;
     // A warm engine was verified at daemon start: skip the per-session hash
     // check of ~1-2 GB of model files, which would delay capture.
-    let warm = env.warm.as_ref().and_then(|engine| {
+    let warm = warm.and_then(|engine| {
         engine
             .offline_for(&local)
             .map(|(decoder, vad_model)| (decoder, engine.preview_decoder(), vad_model))
@@ -338,11 +468,10 @@ fn open_local_offline(
     let (warm_decoders, model_dirs, vad_model) = match warm {
         Some((decoder, preview, vad_model)) => (Some((decoder, preview)), None, vad_model),
         None => {
-            let spec = crate::models::catalog()
-                .into_iter()
-                .find(|spec| spec.id == local.model)
-                .ok_or_else(|| OpenError::Model(format!("unknown model id: {}", local.model)))?;
-            let model_dir = resolve_managed_model(&spec).map_err(OpenError::Model)?;
+            // A catalog model or an imported one, verified through its
+            // pointer.
+            let model_dir =
+                crate::models::installed_model_dir(&local.model).map_err(OpenError::Model)?;
             let vad_dir = resolve_managed_model(&crate::models::silero_vad_spec())
                 .map_err(OpenError::Model)?;
             let preview_dir = local
@@ -442,22 +571,39 @@ impl BackendTransport for AnyTransport {
 struct Pipeline {
     /// Resolved mode id (the CLI may have given a name).
     mode_id: String,
-    processor: PipelineProcessor,
+    processor: crate::output::Pipeline,
     history: SqliteHistory,
+    injector: ConfiguredInjector,
 }
 
 /// Build the final-text pipeline once, before any capture starts: unknown
 /// modes and invalid processing config are startup errors.
-fn build_pipeline(config: &AppConfig, options: &StreamOptions) -> Result<Pipeline, StreamError> {
-    let repository = crate::modes::ModesRepository::open(modes_path())
-        .map_err(|error| StreamError::Capture(error.to_string()))?;
-    let mode = repository
-        .resolve(Some(&options.mode))
-        .map_err(|error| StreamError::Capture(error.to_string()))?;
-    let mode_id = mode.id.clone();
-
-    let chat = crate::processing::from_config(&config.processing)
-        .map_err(|error| StreamError::Capture(error.to_string()))?;
+async fn build_pipeline(
+    config: &AppConfig,
+    options: &StreamOptions,
+    default_mode: &str,
+) -> Result<Pipeline, StreamError> {
+    let track_app = config.history.enabled || !config.output.rules.is_empty();
+    let mut injector = ConfiguredInjector::capture(
+        config.inject.clone(),
+        crate::desktop::focus::desktop(),
+        options.inject,
+        track_app,
+    );
+    let window = if track_app {
+        injector.read_original().await
+    } else {
+        None
+    };
+    let context = crate::output::Context {
+        app_id: window.and_then(|window| window.app_id.as_deref()),
+        app_source: window.map(|window| window.source),
+        site: options.context.site.as_deref(),
+        site_source: Some("local-client"),
+        project: options.context.project.as_deref(),
+    };
+    let processor = crate::output::Pipeline::prepare(config, &options.mode, default_mode, context)
+        .map_err(StreamError::Capture)?;
 
     // A history database that cannot open disables history for this
     // session instead of failing it; recordings are then removed too.
@@ -469,20 +615,20 @@ fn build_pipeline(config: &AppConfig, options: &StreamOptions) -> Result<Pipelin
     } else {
         None
     };
-
-    let prompts = crate::modes::prompt_table(repository.list(), &config.processing.prompt);
+    let history_app = if store.is_some() && options.inject {
+        processor.selection().app_id.clone()
+    } else {
+        None
+    };
 
     Ok(Pipeline {
-        mode_id: mode_id.clone(),
-        processor: PipelineProcessor {
-            prompts,
-            chat,
-            cleaner: crate::text::TextCleaner::new(&config.text)
-                .map_err(|error| StreamError::Config(ConfigError::Invalid(error)))?,
-        },
+        mode_id: processor.selection().mode.clone(),
+        processor,
+        injector,
         history: SqliteHistory {
             store,
             audio_dir: audio_dir(config),
+            app_id: history_app,
         },
     })
 }
@@ -499,37 +645,29 @@ pub fn modes_path() -> std::path::PathBuf {
     root.join("voiceless").join("modes.json")
 }
 
-/// Production `TextProcessor`: `[text]` cleanup, then the mode's prompt
-/// rendered around the text and sent to the configured chat provider.
-struct PipelineProcessor {
-    /// `(mode id, prompt template)` pairs from `modes::prompt_table`.
-    prompts: Vec<(String, String)>,
-    /// `None` when `[processing]` configures no provider.
-    chat: Option<crate::processing::ChatProcessor<crate::processing::UreqPoster>>,
-    cleaner: crate::text::TextCleaner,
-}
-
-impl TextProcessor for PipelineProcessor {
-    fn cleanup(&mut self, text: &str) -> String {
-        self.cleaner.clean(text)
+impl TextProcessor for crate::output::Pipeline {
+    async fn process(&mut self, _mode_id: &str, text: &str) -> Result<String, String> {
+        let result = self.run(text, false, true).await;
+        match result.error {
+            Some(error) => Err(error),
+            None => Ok(result.text),
+        }
     }
 
-    async fn process(&mut self, mode_id: &str, text: &str) -> Result<String, String> {
-        // A mode without a prompt in the table sends the transcript itself.
-        let prompt = self
-            .prompts
-            .iter()
-            .find(|(id, _)| id == mode_id)
-            .map(|(_, prompt)| crate::modes::render_template(prompt, text, "", ""))
-            .unwrap_or_else(|| text.to_owned());
-        let Some(chat) = self.chat.clone() else {
-            return Err("no text processing provider configured".to_owned());
-        };
-        // The HTTP client is blocking (ureq); keep it off the runtime thread.
-        tokio::task::spawn_blocking(move || chat.process(&prompt))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())
+    fn announces_processing(&self, _mode_id: &str) -> bool {
+        self.uses_model()
+    }
+
+    async fn finalize(&mut self, _mode_id: &str, raw: &str) -> crate::coordinator::CompletedText {
+        let result = self.run(raw, false, true).await;
+        let succeeded = result.error.is_none();
+        crate::coordinator::CompletedText {
+            modified: succeeded && (self.uses_model() || result.text != raw),
+            text: result.text,
+            error: result.error,
+            trace: Some(result.trace),
+            may_deliver: succeeded,
+        }
     }
 }
 
@@ -541,6 +679,7 @@ struct SqliteHistory {
     store: Option<crate::history::HistoryStore>,
     /// Managed audio directory; only files directly inside it are removed.
     audio_dir: Option<PathBuf>,
+    app_id: Option<String>,
 }
 
 impl HistoryRecorder for SqliteHistory {
@@ -550,8 +689,7 @@ impl HistoryRecorder for SqliteHistory {
             remove_audio(entry.audio_path.as_deref(), self.audio_dir.as_deref());
             return;
         };
-        let backend = entry.backend.clone();
-        match store.insert(&entry, &backend) {
+        match store.insert_with_app(&entry, &entry.backend, self.app_id.as_deref()) {
             Ok(_) => {}
             Err(_) => remove_audio(entry.audio_path.as_deref(), self.audio_dir.as_deref()),
         }
@@ -606,7 +744,7 @@ fn session_plan(
 /// The model identifier a history row records as `asr_model` for
 /// `backend`: the cloud model name, the Doubao resource id, the local
 /// catalog id, or the overriding directory for `local-streaming`.
-fn backend_model(config: &AppConfig, backend: &str) -> String {
+pub(crate) fn backend_model(config: &AppConfig, backend: &str) -> String {
     match backend {
         "cloud-realtime" => config.cloud.realtime_model.clone(),
         "doubao-realtime" => config.doubao.resource_id.clone(),
@@ -619,24 +757,39 @@ fn backend_model(config: &AppConfig, backend: &str) -> String {
     }
 }
 
-/// Control channel fed by process signals: the first SIGINT sends `Stop`,
-/// every later SIGINT sends `Cancel`, SIGTERM sends `Cancel` and ends the
-/// task. Also used by `ctl::stream_via_daemon`, which relays the same
-/// commands to the daemon over D-Bus.
+pub(crate) fn requested_device(config: &AppConfig, backend: &str) -> Option<String> {
+    match backend {
+        "local-offline" => Some(config.local.device()),
+        "local-streaming" => Some("cpu".to_owned()),
+        _ => None,
+    }
+}
+
+/// The first interrupt stops and a second cancels. Termination cancels
+/// immediately. The relay uses the same control channel.
 pub(crate) fn control_receiver() -> tokio::sync::mpsc::Receiver<ControlCommand> {
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::spawn(async move {
         let mut first_stop = false;
-        // The signal streams are re-created on every iteration.
+        #[cfg(unix)]
+        let (mut stop, mut cancel) = {
+            use tokio::signal::unix::{signal, SignalKind};
+            (
+                signal(SignalKind::interrupt()).expect("install SIGINT handler"),
+                signal(SignalKind::terminate()).expect("install SIGTERM handler"),
+            )
+        };
+        #[cfg(windows)]
+        let (mut stop, mut cancel) = {
+            use tokio::signal::windows::{ctrl_break, ctrl_c};
+            (
+                ctrl_c().expect("install Ctrl-C handler"),
+                ctrl_break().expect("install Ctrl-Break handler"),
+            )
+        };
         loop {
-            let mut sigint =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                    .expect("install SIGINT handler");
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("install SIGTERM handler");
             tokio::select! {
-                _ = sigint.recv() => {
+                _ = stop.recv() => {
                     let command = if first_stop {
                         ControlCommand::Cancel
                     } else {
@@ -647,10 +800,11 @@ pub(crate) fn control_receiver() -> tokio::sync::mpsc::Receiver<ControlCommand> 
                         break;
                     }
                 }
-                _ = sigterm.recv() => {
+                _ = cancel.recv() => {
                     let _ = tx.send(ControlCommand::Cancel).await;
                     break;
                 }
+                _ = tx.closed() => break,
             }
         }
     });
@@ -659,14 +813,28 @@ pub(crate) fn control_receiver() -> tokio::sync::mpsc::Receiver<ControlCommand> 
 
 /// pw-record capture adapted to the coordinator boundary. Construction is
 /// deferred to `start` so the ready gate can fail before any capture exists.
-#[derive(Default)]
-struct PwCapture {
+struct PwCapture<'a> {
     inner: Option<RawCapture>,
+    source: Option<&'a str>,
 }
 
-impl AudioCapture for PwCapture {
+impl AudioCapture for PwCapture<'_> {
     async fn start(&mut self) -> io::Result<()> {
-        let capture = RawCapture::start()?;
+        #[cfg(target_os = "linux")]
+        let capture = RawCapture::start(self.source).await?;
+        #[cfg(not(target_os = "linux"))]
+        let target = match self.source {
+            Some(source) => Some(
+                crate::desktop::audio::require_source(source)
+                    .await
+                    .map_err(io::Error::other)?,
+            ),
+            None => None,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let capture = tokio::task::spawn_blocking(move || RawCapture::start(target))
+            .await
+            .map_err(io::Error::other)??;
         self.inner = Some(capture);
         Ok(())
     }
@@ -688,9 +856,10 @@ impl AudioCapture for PwCapture {
         }
     }
 
-    fn abort(&mut self) {
-        // Dropping the child kills it (kill_on_drop) without draining.
-        self.inner = None;
+    async fn abort(&mut self) {
+        if let Some(mut capture) = self.inner.take() {
+            capture.abort().await;
+        }
     }
 }
 
@@ -892,39 +1061,51 @@ impl<T: EventSink + ?Sized> EventSink for Box<T> {
     fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
         (**self).emit(event)
     }
-}
 
-/// Daemon sink: every event as one JSON line (the `stream --json` schema)
-/// on the broadcast channel behind `voiceless ctl watch`.
-struct BroadcastSink {
-    events: tokio::sync::broadcast::Sender<String>,
-    sequence: u64,
-}
-
-impl EventSink for BroadcastSink {
-    fn emit(&mut self, event: OutputEvent) -> io::Result<()> {
-        self.sequence += 1;
-        let line = serde_json::to_string(&json_event(&event, self.sequence))?;
-        // No subscriber is fine: nobody is watching.
-        let _ = self.events.send(line);
-        Ok(())
+    fn retain_final_text(&mut self, text: &str) {
+        (**self).retain_final_text(text);
     }
 }
 
 /// Map an `OutputEvent` to its JSON line; the `type` names are listed on
 /// `JsonEvent` and on each `OutputEvent` variant.
-fn json_event(event: &OutputEvent, sequence: u64) -> JsonEvent<'_> {
+pub(crate) fn json_event(
+    event: &OutputEvent,
+    sequence: u64,
+    session_id: Option<u64>,
+) -> JsonEvent<'_> {
     let (kind, transcript, message, injection, rms) = match event {
         OutputEvent::Ready => ("ready", None, None, None, None),
+        OutputEvent::BackendSelected(_) => ("backend-selected", None, None, None, None),
+        OutputEvent::DevicesLoaded(_) => ("devices-loaded", None, None, None, None),
         OutputEvent::Level(rms) => ("level", None, None, None, Some(*rms)),
         OutputEvent::Transcript(snapshot) => ("transcript", Some(snapshot), None, None, None),
         OutputEvent::Finalized { injection } => ("finalized", None, None, injection.as_ref(), None),
         OutputEvent::Warning(message) => ("warning", None, Some(message.as_str()), None, None),
+        OutputEvent::Phase(_) => ("phase", None, None, None, None),
+        OutputEvent::Output(_) => ("output", None, None, None, None),
         OutputEvent::Error(message) => ("error", None, Some(message.as_str()), None, None),
         OutputEvent::Cancelled => ("cancelled", None, None, None, None),
         OutputEvent::Completed => ("completed", None, None, None, None),
     };
     JsonEvent {
+        session_id,
+        phase: match event {
+            OutputEvent::Phase(phase) => Some(*phase),
+            _ => None,
+        },
+        backend_selection: match event {
+            OutputEvent::BackendSelected(backend) => Some(backend),
+            _ => None,
+        },
+        devices: match event {
+            OutputEvent::DevicesLoaded(devices) => Some(devices),
+            _ => None,
+        },
+        output: match event {
+            OutputEvent::Output(trace) => Some(trace),
+            _ => None,
+        },
         kind,
         sequence,
         transcript,
@@ -940,7 +1121,7 @@ impl EventSink for StdoutSink {
         if self.json {
             println!(
                 "{}",
-                serde_json::to_string(&json_event(&event, self.sequence))?
+                serde_json::to_string(&json_event(&event, self.sequence, None))?
             );
             return Ok(());
         }
@@ -999,36 +1180,223 @@ impl Drop for TerminalPreview {
     }
 }
 
-/// Config-driven injector: selects the wtype, clipboard or fcitx5 method
-/// from `[inject].prefer` and applies the clipboard fallback when the
-/// primary method fails (see `inject_text` for the rules).
+/// Automatic delivery uses the focused window from the start of the session.
+/// Fcitx5 also binds its preview and commit to the original input context.
 pub struct ConfiguredInjector {
     config: InjectConfig,
     /// Bridge client shared with the session's preedit sink, so the commit
     /// is ordered after the last preedit update.
+    #[cfg(target_os = "linux")]
     fcitx5: Option<crate::fcitx5::Fcitx5Client>,
+    focus: crate::desktop::focus::FocusReader,
+    origin_window: Option<tokio::task::JoinHandle<Option<crate::desktop::focus::FocusedWindow>>>,
+    original: Option<crate::desktop::focus::FocusedWindow>,
 }
 
 impl ConfiguredInjector {
-    /// Injector without a bridge client; the `fcitx5` method then spawns a
-    /// client per injection.
+    /// Capture the original target using the current desktop's focus facilities.
     pub fn new(config: InjectConfig) -> Self {
+        Self::for_session(config, true)
+    }
+
+    fn for_session(config: InjectConfig, inject: bool) -> Self {
+        Self::capture(config, crate::desktop::focus::desktop(), inject, false)
+    }
+
+    /// An injector that reads the focused window through `focus`: the
+    /// desktop's tools, or a test's script.
+    pub fn watching(config: InjectConfig, focus: crate::desktop::focus::FocusReader) -> Self {
+        Self::capture(config, focus, true, false)
+    }
+
+    fn capture(
+        config: InjectConfig,
+        focus: crate::desktop::focus::FocusReader,
+        inject: bool,
+        track_app: bool,
+    ) -> Self {
+        let origin_window = (track_app || (inject && config.prefer != "copy"))
+            .then(|| tokio::spawn(read_window(focus.clone())));
+        #[cfg(target_os = "linux")]
+        let fcitx5 = (inject && config.prefer == "fcitx5")
+            .then(crate::fcitx5::Fcitx5Client::spawn_for_dictation);
         Self {
             config,
-            fcitx5: None,
+            #[cfg(target_os = "linux")]
+            fcitx5,
+            focus,
+            origin_window,
+            original: None,
         }
     }
 
-    /// Commit through `client`, the same ordered channel the preedit uses.
-    pub fn with_fcitx5(mut self, client: crate::fcitx5::Fcitx5Client) -> Self {
-        self.fcitx5 = Some(client);
-        self
+    async fn read_original(&mut self) -> Option<&crate::desktop::focus::FocusedWindow> {
+        if let Some(window) = self.origin_window.take() {
+            self.original = window.await.ok().flatten();
+        }
+        self.original.as_ref()
+    }
+}
+
+/// Read the focused window once within the desktop query budget.
+async fn read_window(
+    focus: crate::desktop::focus::FocusReader,
+) -> Option<crate::desktop::focus::FocusedWindow> {
+    tokio::time::timeout(Duration::from_secs(2), focus())
+        .await
+        .ok()
+        .flatten()
+}
+
+const RESULT_KEPT: &str = "the text is kept for you to copy or type again";
+
+struct WindowGuard<'a> {
+    original: Option<&'a crate::desktop::focus::FocusedWindow>,
+    focus: &'a crate::desktop::focus::FocusReader,
+}
+
+impl WindowGuard<'_> {
+    fn refusal(&self, now: Option<&crate::desktop::focus::FocusedWindow>) -> Option<String> {
+        match (self.original, now) {
+            (Some(before), Some(now)) if before.source == now.source && before.key == now.key => {
+                None
+            }
+            (Some(before), Some(now)) => Some(format!(
+                "the focused window changed from {} to {}; {RESULT_KEPT}",
+                before.describe(),
+                now.describe()
+            )),
+            _ => Some(format!(
+                "the original focused window could not be confirmed; {RESULT_KEPT}"
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn recheck(&self) -> Option<String> {
+        self.refusal(read_window(self.focus.clone()).await.as_ref())
     }
 }
 
 impl TextInjector for ConfiguredInjector {
+    #[cfg(target_os = "linux")]
     async fn inject(&mut self, text: &str) -> InjectionResult {
-        inject_text_with(&self.config, text, self.fcitx5.as_ref()).await
+        if self.config.prefer == "copy" {
+            return copy_text(&self.config, text).await;
+        }
+        self.read_original().await;
+        let original = &self.original;
+        let now = read_window(self.focus.clone()).await;
+        let guard = WindowGuard {
+            original: original.as_ref(),
+            focus: &self.focus,
+        };
+        // A checked Fcitx5 commit can identify the original input context on
+        // desktops without a focused-window API. Multiline text still needs
+        // a window to tell whether it is going to a terminal.
+        let context_only = self.fcitx5.is_some()
+            && original.is_none()
+            && now.is_none()
+            && !text.contains(['\r', '\n']);
+        if !context_only {
+            if let Some(reason) = guard.refusal(now.as_ref()) {
+                return method_result(false, &self.config.prefer, &reason);
+            }
+        }
+        let terminal = is_terminal(&self.config, now.as_ref());
+        inject_text_with(
+            &self.config,
+            text,
+            self.fcitx5.as_ref(),
+            terminal,
+            Some(&guard),
+        )
+        .await
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn inject(&mut self, text: &str) -> InjectionResult {
+        if self.config.prefer == "copy" {
+            return copy_native(text).await;
+        }
+        let target = self.read_original().await;
+        inject_native(text, target).await
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_terminal(
+    config: &InjectConfig,
+    window: Option<&crate::desktop::focus::FocusedWindow>,
+) -> bool {
+    crate::desktop::focus::is_terminal(
+        window.and_then(|window| window.app_id.as_deref()),
+        &config.terminal_apps,
+    )
+}
+
+/// An explicit repaste targets the newly focused field. Without an app id,
+/// keep multiline text on the clipboard so the terminal cannot run its lines.
+#[cfg(target_os = "linux")]
+pub(crate) async fn repaste_text(config: &InjectConfig, text: &str) -> InjectionResult {
+    let window = read_window(crate::desktop::focus::desktop()).await;
+    if window
+        .as_ref()
+        .and_then(|window| window.app_id.as_deref())
+        .is_none()
+        && text.contains(['\r', '\n'])
+    {
+        return copy_text(config, text).await;
+    }
+    inject_text_with(
+        config,
+        text,
+        None,
+        is_terminal(config, window.as_ref()),
+        None,
+    )
+    .await
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) async fn repaste_text(config: &InjectConfig, text: &str) -> InjectionResult {
+    if config.prefer == "copy" {
+        return copy_native(text).await;
+    }
+    let target = read_window(crate::desktop::focus::desktop()).await;
+    inject_native(text, target.as_ref()).await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn copy_native(text: &str) -> InjectionResult {
+    let text = text.to_owned();
+    match tokio::task::spawn_blocking(move || crate::desktop::native::copy_text(&text)).await {
+        Ok(Ok(())) => method_result(true, "copy", ""),
+        Ok(Err(error)) => method_result(false, "copy", &error),
+        Err(error) => method_result(false, "copy", &error.to_string()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn inject_native(
+    text: &str,
+    target: Option<&crate::desktop::focus::FocusedWindow>,
+) -> InjectionResult {
+    let Some(target) = target else {
+        return method_result(
+            false,
+            "clipboard",
+            &format!("the original focused window could not be confirmed; {RESULT_KEPT}"),
+        );
+    };
+    let text = text.to_owned();
+    let key = target.key.clone();
+    match tokio::task::spawn_blocking(move || crate::desktop::native::paste_text(&text, &key)).await
+    {
+        Ok(Ok(())) => method_result(true, "clipboard", ""),
+        Ok(Err(error)) => method_result(false, "clipboard", &format!("{error}; {RESULT_KEPT}")),
+        // A native call that failed after being dispatched may already have posted input.
+        Err(error) => uncertain_result("clipboard", &error.to_string()),
     }
 }
 
@@ -1038,46 +1406,70 @@ impl TextInjector for ConfiguredInjector {
 /// method copies the text with `wl-copy` and synthesizes a paste keypress,
 /// so apps whose input method (Fcitx5) reinterprets typed keys receive the
 /// text verbatim. The fcitx5 method commits through the Voiceless Fcitx5
-/// bridge module, the same path as text typed with the input method.
+/// bridge module, the same path as text typed with the input method. The
+/// copy method only puts the text on the clipboard.
 ///
-/// Rules: `prefer = "clipboard"` never falls back. When the fallback runs
-/// and succeeds, its result (`method: "clipboard"`) is returned; when it
-/// fails too, the primary method's failure is returned. Used directly by
-/// `transcribe --inject` and the latency benchmark; sessions go through
-/// `ConfiguredInjector`.
+/// Clipboard fallback is only attempted when the primary action could not
+/// have delivered. The explicit caller is responsible for its own focus.
+#[cfg(target_os = "linux")]
 pub async fn inject_text(config: &InjectConfig, text: &str) -> InjectionResult {
-    inject_text_with(config, text, None).await
+    inject_text_with(config, text, None, false, None).await
 }
 
-/// Shared implementation of `inject_text`; `fcitx5` reuses the session's
-/// bridge client when given so the commit queues after its preedit.
+/// Deliver text after reading the explicitly targeted current window.
+#[cfg(not(target_os = "linux"))]
+pub async fn inject_text(config: &InjectConfig, text: &str) -> InjectionResult {
+    repaste_text(config, text).await
+}
+
+/// Dispatch one delivery, with the original-window guard for automatic paths.
+#[cfg(target_os = "linux")]
 async fn inject_text_with(
     config: &InjectConfig,
     text: &str,
     fcitx5: Option<&crate::fcitx5::Fcitx5Client>,
+    terminal: bool,
+    guard: Option<&WindowGuard<'_>>,
 ) -> InjectionResult {
-    let prefer_clipboard = config.prefer == "clipboard";
-    let result = match config.prefer.as_str() {
-        "clipboard" => inject_via_clipboard(config, text).await,
-        "fcitx5" => inject_via_fcitx5(text, fcitx5).await,
-        _ => inject_via_wtype_with(config, text).await,
+    let paste_args = if terminal {
+        &config.terminal_paste_command
+    } else {
+        &config.paste_command
     };
-    if !result.ok && config.clipboard_fallback && !prefer_clipboard {
-        let fallback = inject_via_clipboard(config, text).await;
-        if fallback.ok {
+    let as_paste = terminal && text.contains(['\r', '\n']);
+    let result = match config.prefer.as_str() {
+        "copy" => return copy_text(config, text).await,
+        "clipboard" => return inject_via_clipboard(config, text, paste_args, guard).await,
+        _ if as_paste => return inject_via_clipboard(config, text, paste_args, guard).await,
+        "fcitx5" => match commit_via_fcitx5(text, fcitx5).await {
+            Ok((ok, detail)) => method_result(ok, "fcitx5", if ok { "" } else { &detail }),
+            Err(crate::fcitx5::BridgeError::Target(detail)) => {
+                return method_result(false, "fcitx5", &detail)
+            }
+            Err(crate::fcitx5::BridgeError::Unconfirmed(detail)) => {
+                return uncertain_result("fcitx5", &detail)
+            }
+            Err(crate::fcitx5::BridgeError::Unavailable(detail)) => {
+                method_result(false, "fcitx5", &detail)
+            }
+        },
+        _ => inject_via_wtype_with(config, text, guard).await,
+    };
+    if result.delivery == Delivery::NotDelivered && config.clipboard_fallback {
+        let fallback = inject_via_clipboard(config, text, paste_args, guard).await;
+        if fallback.delivery != Delivery::NotDelivered {
             return fallback;
         }
     }
     result
 }
 
-/// Commit text into the focused input field through the Fcitx5 bridge
-/// module (`fcitx5-bridge/`). Fails when Fcitx5 or the module is not
-/// running, or when no input context has focus.
-async fn inject_via_fcitx5(
+/// Reuse the session's ordered bridge channel when one is already attached.
+#[cfg(target_os = "linux")]
+async fn commit_via_fcitx5(
     text: &str,
     client: Option<&crate::fcitx5::Fcitx5Client>,
-) -> InjectionResult {
+) -> crate::fcitx5::Reply {
     let owned;
     let client = match client {
         Some(client) => client,
@@ -1086,41 +1478,68 @@ async fn inject_via_fcitx5(
             &owned
         }
     };
-    match client.commit(text).await {
-        Ok((true, _)) => method_result(true, "fcitx5", ""),
-        // The bridge answered but could not commit (no focused context).
-        Ok((false, reason)) => method_result(false, "fcitx5", &reason),
-        Err(error) => method_result(false, "fcitx5", &error),
-    }
+    client.commit(text).await
 }
 
 /// Inject text through `wtype` with default settings. Newlines are typed as
 /// Shift+Enter so a chat input breaks the line without submitting.
+#[cfg(target_os = "linux")]
 pub async fn inject_via_wtype(text: &str) -> InjectionResult {
-    inject_via_wtype_with(&InjectConfig::default(), text).await
+    inject_via_wtype_with(&InjectConfig::default(), text, None).await
 }
 
-/// One `wtype` process per invocation from `wtype_invocations`, 1 s each.
-/// The first failure aborts the rest, so part of the text may already have
-/// been typed when the clipboard fallback runs.
-async fn inject_via_wtype_with(config: &InjectConfig, text: &str) -> InjectionResult {
-    for args in wtype_invocations(text) {
-        let result = run_command(&config.wtype_command, &args, Duration::from_secs(1)).await;
-        if let Err(message) = result {
-            return method_result(false, "wtype", &message);
+/// A failed later invocation may have written a prefix, so do not replay it.
+#[cfg(target_os = "linux")]
+async fn inject_via_wtype_with(
+    config: &InjectConfig,
+    text: &str,
+    guard: Option<&WindowGuard<'_>>,
+) -> InjectionResult {
+    let limit = Duration::from_secs_f64(config.timeout_seconds.max(0.1));
+    for (index, args) in wtype_invocations(text).into_iter().enumerate() {
+        if index > 0 {
+            if let Some(guard) = guard {
+                if let Some(reason) = guard.recheck().await {
+                    return uncertain_result("wtype", &reason);
+                }
+            }
+        }
+        if let Err(error) = run_command(&config.wtype_command, &args, limit).await {
+            return if index > 0 || error.started {
+                uncertain_result("wtype", &error.message)
+            } else {
+                method_result(false, "wtype", &error.message)
+            };
         }
     }
     method_result(true, "wtype", "")
 }
 
+/// Put `text` on the Wayland clipboard and leave it there for the user to
+/// paste; the selection that was there is replaced.
+#[cfg(target_os = "linux")]
+async fn copy_text(config: &InjectConfig, text: &str) -> InjectionResult {
+    let limit = Duration::from_secs_f64(config.timeout_seconds.max(0.1));
+    // wl-copy forks a selection owner that may keep inherited pipes open.
+    match run_command_with_stdin(&config.wl_copy_command, &[], text, false, limit).await {
+        Ok(()) => method_result(true, "copy", ""),
+        Err(error) => method_result(false, "copy", &error.message),
+    }
+}
+
 /// Inject text via the clipboard without clobbering the user's clipboard:
 /// save the previous Wayland (and X11, when mirrored) selection, copy the
 /// text with `wl-copy`, run `focus_command` (if set) to raise the target
-/// window, synthesize the paste keypress with `paste_tool`, then restore the
-/// previous selection after the paste has been consumed.
-async fn inject_via_clipboard(config: &InjectConfig, text: &str) -> InjectionResult {
-    // `timeout_seconds` bounds the clipboard reads/writes; the paste, focus
-    // and X11 mirror steps use a fixed 1 s each.
+/// window, synthesize the paste keypress `paste_command` with `paste_tool`,
+/// then restore the previous selection after the paste has been consumed.
+#[cfg(target_os = "linux")]
+async fn inject_via_clipboard(
+    config: &InjectConfig,
+    text: &str,
+    paste_command: &str,
+    guard: Option<&WindowGuard<'_>>,
+) -> InjectionResult {
+    // Apply the same subprocess budget to the paste shortcut as to typing.
     let limit = Duration::from_secs_f64(config.timeout_seconds.max(0.1));
 
     let prev_wayland = capture_stdout(&wayland_paste_command(&config.wl_copy_command), limit).await;
@@ -1128,10 +1547,15 @@ async fn inject_via_clipboard(config: &InjectConfig, text: &str) -> InjectionRes
         Some(command) => capture_stdout(&command, limit).await,
         None => None,
     };
-    if let Err(message) =
+    if let Some(guard) = guard {
+        if let Some(reason) = guard.recheck().await {
+            return method_result(false, "clipboard", &reason);
+        }
+    }
+    if let Err(error) =
         run_command_with_stdin(&config.wl_copy_command, &[], text, false, limit).await
     {
-        return method_result(false, "clipboard", &message);
+        return method_result(false, "clipboard", &error.message);
     }
     if !config.x11_clipboard_command.trim().is_empty() {
         // Best effort: XWayland apps (WeChat) read the X11 clipboard, which
@@ -1151,15 +1575,36 @@ async fn inject_via_clipboard(config: &InjectConfig, text: &str) -> InjectionRes
         // the text lands there even when another window is currently focused.
         let _ = run_command(&config.focus_command, &[], Duration::from_secs(1)).await;
     }
-    let paste_args: Vec<&str> = config.paste_command.split_whitespace().collect();
-    let pasted = match run_command(&config.paste_tool, &paste_args, Duration::from_secs(1)).await {
-        Ok(()) => method_result(true, "clipboard", ""),
-        Err(message) => method_result(false, "clipboard", &message),
+    let focus_error = match guard {
+        Some(guard) => guard.recheck().await,
+        None => None,
+    };
+    let pasted = if let Some(reason) = focus_error {
+        method_result(false, "clipboard", &reason)
+    } else {
+        let mut paste_args: Vec<&str> = paste_command.split_whitespace().collect();
+        // GTK 3 omits the last keycode when looking up shortcut bindings. Give
+        // wtype's synthetic map a key after V, including for saved defaults.
+        if std::path::Path::new(&config.paste_tool).file_name() == Some("wtype".as_ref())
+            && matches!(
+                paste_args.as_slice(),
+                ["-M", "ctrl", "-k", "v"] | ["-M", "ctrl", "-M", "shift", "-k", "v"]
+            )
+        {
+            paste_args.extend(["-p", "Control_L"]);
+        }
+        match run_command(&config.paste_tool, &paste_args, limit).await {
+            Ok(()) => method_result(true, "clipboard", ""),
+            Err(error) if error.started => uncertain_result("clipboard", &error.message),
+            Err(error) => method_result(false, "clipboard", &error.message),
+        }
     };
 
     // Let the focused app consume the selection, then restore the user's
     // previous clipboard so injection does not leave the transcript behind.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    if pasted.delivery == Delivery::Unconfirmed {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
     restore_clipboard(&config.wl_copy_command, prev_wayland, limit).await;
     if !config.x11_clipboard_command.trim().is_empty() {
         restore_clipboard(&config.x11_clipboard_command, prev_x11, limit).await;
@@ -1169,16 +1614,18 @@ async fn inject_via_clipboard(config: &InjectConfig, text: &str) -> InjectionRes
 
 /// Derive the `wl-paste` command from the configured `wl-copy` command, so a
 /// custom `wl_copy_command` path keeps its paired reader.
+#[cfg(target_os = "linux")]
 fn wayland_paste_command(copy_command: &str) -> String {
     match copy_command.strip_suffix("wl-copy") {
-        Some(prefix) => format!("{prefix}wl-paste"),
-        None => "wl-paste".to_owned(),
+        Some(prefix) => format!("{prefix}wl-paste --no-newline"),
+        None => "wl-paste --no-newline".to_owned(),
     }
 }
 
 /// Put `previous` back with the same writer command (`wl-copy` or the X11
 /// writer). An unreadable or empty previous selection is not restored, so
 /// the transcript then stays in the clipboard.
+#[cfg(target_os = "linux")]
 async fn restore_clipboard(command: &str, previous: Option<String>, limit: Duration) {
     // Nothing readable before injection: leave the selection as-is.
     let Some(previous) = previous else {
@@ -1189,6 +1636,7 @@ async fn restore_clipboard(command: &str, previous: Option<String>, limit: Durat
 
 /// Run a command and return its trimmed stdout on success. Best effort; used
 /// to snapshot the clipboard before injection overwrites it.
+#[cfg(target_os = "linux")]
 async fn capture_stdout(command: &str, limit: Duration) -> Option<String> {
     let mut parts = command.split_whitespace();
     let program = parts.next()?;
@@ -1197,6 +1645,7 @@ async fn capture_stdout(command: &str, limit: Duration) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .ok()?;
     match timeout(limit, child.wait_with_output()).await {
@@ -1215,6 +1664,7 @@ async fn capture_stdout(command: &str, limit: Duration) -> Option<String> {
 /// Derive the X11 would-be reader from the configured writer command, so the
 /// previous X11 selection can be snapshotted when an input command is set.
 /// Returns `None` when the command is empty or has no recognizable word-swap.
+#[cfg(target_os = "linux")]
 fn x11_read_command(input_command: &str) -> Option<String> {
     let trimmed = input_command.trim();
     if trimmed.is_empty() {
@@ -1228,6 +1678,7 @@ fn x11_read_command(input_command: &str) -> Option<String> {
 
 /// Build the `wtype` invocations for `text`: each line is typed literally and
 /// each newline becomes a Shift+Enter keypress.
+#[cfg(target_os = "linux")]
 pub fn wtype_invocations(text: &str) -> Vec<Vec<&str>> {
     let mut invocations = Vec::new();
     for (index, line) in text.split('\n').enumerate() {
@@ -1239,28 +1690,38 @@ pub fn wtype_invocations(text: &str) -> Vec<Vec<&str>> {
     invocations
 }
 
+#[cfg(target_os = "linux")]
+struct CommandFailure {
+    started: bool,
+    message: String,
+}
+
 /// Run `command` with `args` and no stdin, capturing stderr for the error
 /// message.
-async fn run_command(command: &str, args: &[&str], limit: Duration) -> Result<(), String> {
+#[cfg(target_os = "linux")]
+async fn run_command(command: &str, args: &[&str], limit: Duration) -> Result<(), CommandFailure> {
     run_command_with_stdin(command, args, "", true, limit).await
 }
 
-/// Spawn `command` split on whitespace (no shell, no quoting) followed by
-/// `args`, write `stdin_text` to its stdin, and wait up to `limit`. A
-/// non-zero exit reports the trimmed stderr (when `piped_stderr`) or
-/// `<command> failed`; a timeout reports `<command> timed out` and
-/// abandons the wait without killing the child.
+/// A failed spawn guarantees that the tool did nothing. After a successful
+/// spawn it may already have issued input, even if it exits with an error.
+#[cfg(target_os = "linux")]
 async fn run_command_with_stdin(
     command: &str,
     args: &[&str],
     stdin_text: &str,
     piped_stderr: bool,
     limit: Duration,
-) -> Result<(), String> {
+) -> Result<(), CommandFailure> {
     let mut parts = command.split_whitespace();
     let program = match parts.next().filter(|name| !name.is_empty()) {
         Some(name) => name,
-        None => return Err("empty command".to_owned()),
+        None => {
+            return Err(CommandFailure {
+                started: false,
+                message: "empty command".to_owned(),
+            })
+        }
     };
     let mut child = Command::new(program)
         .args(parts.chain(args.iter().copied()))
@@ -1275,32 +1736,58 @@ async fn run_command_with_stdin(
         // kill the tool instead of leaving a hung wtype/paste process.
         .kill_on_drop(true)
         .spawn()
-        .map_err(|error| format!("{program}: {error}"))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        let _ = stdin.write_all(stdin_text.as_bytes()).await;
-    }
-    // Close stdin so tools like wl-copy see EOF and return.
-    child.stdin.take();
-    match timeout(limit, child.wait_with_output()).await {
-        Ok(Ok(output)) if output.status.success() => Ok(()),
+        .map_err(|error| CommandFailure {
+            started: false,
+            message: format!("{program}: {error}"),
+        })?;
+    let output = timeout(limit, async {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(stdin_text.as_bytes()).await?;
+        }
+        child.wait_with_output().await
+    })
+    .await;
+    let message = match output {
+        Ok(Ok(output)) if output.status.success() => return Ok(()),
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            Err(if stderr.is_empty() {
+            if stderr.is_empty() {
                 format!("{command} failed")
             } else {
                 stderr
-            })
+            }
         }
-        Ok(Err(error)) => Err(format!("{command}: {error}")),
-        Err(_) => Err(format!("{command} timed out")),
-    }
+        Ok(Err(error)) => format!("{command}: {error}"),
+        Err(_) => format!("{command} timed out"),
+    };
+    Err(CommandFailure {
+        started: true,
+        message,
+    })
 }
 
-/// Build an `InjectionResult` for `method`.
+/// Build an `InjectionResult` for `method`; how much of the delivery is
+/// known follows from the method.
 fn method_result(ok: bool, method: &str, message: &str) -> InjectionResult {
+    let delivery = match (ok, method) {
+        (true, "fcitx5") => Delivery::Committed,
+        (true, "copy") => Delivery::Copied,
+        (true, _) => Delivery::Unconfirmed,
+        (false, _) => Delivery::NotDelivered,
+    };
     InjectionResult {
         ok,
         method: method.to_owned(),
         message: message.to_owned(),
+        delivery,
+    }
+}
+
+fn uncertain_result(method: &str, message: &str) -> InjectionResult {
+    InjectionResult {
+        ok: false,
+        method: method.to_owned(),
+        message: format!("delivery could not be confirmed ({message}); {RESULT_KEPT}"),
+        delivery: Delivery::Unconfirmed,
     }
 }

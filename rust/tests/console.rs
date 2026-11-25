@@ -178,7 +178,14 @@ async fn web_reuses_an_existing_console() {
 async fn web_does_not_open_another_local_service() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let server = axum::Router::new().route("/", axum::routing::get(|| async { "another service" }));
+    let server = axum::Router::new().route(
+        "/",
+        axum::routing::get(|| async {
+            axum::response::Html(
+                r#"<meta name="voiceless-token" content="cached-page">Another service"#,
+            )
+        }),
+    );
     tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
     let output = web_at(port).await;
     assert_eq!(output.status.code(), Some(1));
@@ -188,6 +195,21 @@ async fn web_does_not_open_another_local_service() {
         error.contains("did not serve a Voiceless console"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn the_console_rejects_a_non_loopback_listener() {
+    let root = tempdir().unwrap();
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let result = voiceless::console::serve_listener(
+        listener,
+        None,
+        root.path().join("history.sqlite3"),
+        root.path().join("config.toml"),
+        TOKEN.to_owned(),
+    )
+    .await;
+    assert!(result.unwrap_err().contains("requires a loopback address"));
 }
 
 /// The served page carries the token in its meta tag with the placeholder
@@ -333,6 +355,90 @@ async fn config_edits_keep_comments_and_secrets_are_write_only() {
     )
     .unwrap();
     assert_eq!(get(&fixture, "/api/config")["cloud"]["has_api_key"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revision_updates_merge_fields_and_reject_overwriting_manual_edits() {
+    let fixture = start().await;
+    let base = get(&fixture, "/api/config");
+    for fields in [
+        json!({"local.provider": "vulkan"}),
+        json!({"local.num_threads": 8}),
+    ] {
+        send(
+            &fixture,
+            "PUT",
+            "/api/config",
+            json!({"revision": base["revision"], "fields": fields}),
+        )
+        .unwrap();
+    }
+    let merged = get(&fixture, "/api/config");
+    assert_eq!(merged["local"]["provider"], "vulkan");
+    assert_eq!(merged["local"]["num_threads"], 8);
+    let text = std::fs::read_to_string(&fixture.config_path).unwrap();
+    let manually_edited = text.replace("num_threads = 8", "num_threads = 10 # manual edit");
+    assert_ne!(manually_edited, text);
+    std::fs::write(&fixture.config_path, &manually_edited).unwrap();
+    let (code, conflict) = send(
+        &fixture,
+        "PUT",
+        "/api/config",
+        json!({"revision": merged["revision"], "fields": {"local.num_threads": 6}}),
+    )
+    .unwrap_err();
+    assert_eq!(code, 409);
+    assert_eq!(conflict["conflicts"], json!(["local.num_threads"]));
+    assert_eq!(conflict["config"]["local"]["num_threads"], 10);
+    assert_eq!(
+        std::fs::read_to_string(&fixture.config_path).unwrap(),
+        manually_edited
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_export_and_clear_omit_credentials_and_keep_other_keys() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = start().await;
+    let saved = send(
+        &fixture,
+        "PUT",
+        "/api/config",
+        json!({"doubao": {
+            "api_key": "test-doubao-secret", "access_key": "test-access-secret"
+        }}),
+    )
+    .unwrap();
+    assert_eq!(saved["ok"], true);
+    let masked = get(&fixture, "/api/config");
+    let cleared = send(
+        &fixture,
+        "PUT",
+        "/api/config",
+        json!({
+            "revision": masked["revision"], "fields": {"doubao.api_key": null}
+        }),
+    )
+    .unwrap();
+    assert_eq!(cleared["config"]["doubao"]["has_api_key"], false);
+    assert_eq!(cleared["config"]["doubao"]["has_access_key"], true);
+    assert_eq!(cleared["config"]["cloud"]["has_api_key"], true);
+    let exported = get(&fixture, "/api/config/template");
+    let text = exported["toml"].as_str().unwrap();
+    assert!(!text.contains("sk-secret") && !text.contains("test-access-secret"));
+    let template = voiceless::config::AppConfig::from_toml(text).unwrap();
+    assert!(template.cloud.api_key.is_empty());
+    assert!(template.doubao.access_key.is_empty());
+    assert_eq!(template.text.hotwords, ["张三丰"]);
+    assert_eq!(
+        std::fs::metadata(&fixture.config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

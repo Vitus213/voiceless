@@ -22,9 +22,13 @@ fn event_kinds(events: &[OutputEvent]) -> Vec<&'static str> {
         .iter()
         .map(|event| match event {
             OutputEvent::Ready => "ready",
+            OutputEvent::BackendSelected(_) => "backend-selected",
+            OutputEvent::DevicesLoaded(_) => "devices-loaded",
             OutputEvent::Level(_) => "level",
             OutputEvent::Transcript(snapshot) if snapshot.is_final => "final",
             OutputEvent::Transcript(_) => "transcript",
+            OutputEvent::Phase(_) => "phase",
+            OutputEvent::Output(_) => "output",
             OutputEvent::Finalized { .. } => "finalized",
             OutputEvent::Warning(_) => "warning",
             OutputEvent::Error(_) => "error",
