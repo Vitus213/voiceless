@@ -62,6 +62,9 @@ the day the work landed on `main`; commit hashes refer to
   correctly installed SenseVoice and bilingual Paraformer models load again.
 - Windows reports the selected audio source when WASAPI denies recording
   permission, including when the privacy settings allowed the initial check.
+- If the first-run shortcut times out, the console points to the binding in
+  Shortcuts and typing and offers the Try a phrase button. On Windows and
+  macOS, the Sound section directs users to the window for recording status.
 - `record` and `transcribe` honor `--config`. Recording uses the microphone
   from the same configuration that selects the transcription backend.
 - Windows checkouts with CRLF line endings can build the web console. The
