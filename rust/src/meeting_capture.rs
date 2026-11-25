@@ -12,12 +12,15 @@
 //! left since it was selected, takes the data directory's capture lock (the
 //! dictation's `runtime::lock_capture`: the same file, so a dictation
 //! session and a meeting exclude each other in every process), creates the
-//! meeting directory and opens one recorder per selected track. Linux runs
-//! `pw-record`, macOS and Windows open native streams. A failed start
-//! leaves nothing on disk. `stop` asks the recorders to drain. `poll`
-//! returns the meeting once every track settled, as `Completed` when it ran
-//! to its stop or as `Interrupted` when a failure ended it, and releases
-//! the capture lock. `sources` lists what can be selected.
+//! meeting directory and opens one recorder per selected track, each read
+//! from the moment it is open, so that a later track's opening that waits
+//! (the system's first consent to record an output) cannot overrun what an
+//! earlier one delivered. Linux runs `pw-record`, macOS and Windows open
+//! native streams. A failed start leaves nothing on disk. `stop` asks the
+//! recorders to drain. `poll` returns the meeting once every track settled,
+//! as `Completed` when it ran to its stop or as `Interrupted` when a
+//! failure ended it, and releases the capture lock. `sources` lists what
+//! can be selected.
 //!
 //! Recovery. A track's audio is kept in committed ranges (`track`); a
 //! runtime that dies loses at most the range it was writing. `sweep`, run
@@ -178,20 +181,22 @@ impl MeetingRuntime {
                 MeetingError::Io(error)
             }
         })?;
+        // A pending consent dialog must not leave a journal or capture the other source.
+        #[cfg(not(target_os = "linux"))]
+        for spec in &mut specs {
+            spec.authorize()?;
+        }
         let (notices, receiver) = mpsc::unbounded_channel();
-        let recording = match Recording::start(
+        let recording = Recording::start(
             &self.meetings,
             #[cfg(target_os = "linux")]
             &recorder,
             &self.limits,
-            &specs,
+            specs,
             lock,
             receiver,
             notices,
-        ) {
-            Ok(recording) => recording,
-            Err(error) => return Err(error),
-        };
+        )?;
         let view = recording.view();
         self.active = Some(recording);
         Ok(view)
@@ -507,6 +512,8 @@ struct TrackSpec {
     label: String,
     #[cfg(target_os = "linux")]
     serial: u64,
+    #[cfg(not(target_os = "linux"))]
+    device: graph::Endpoint,
 }
 
 /// One meeting while its recorders run, owned by the runtime alone.
@@ -523,14 +530,14 @@ struct Recording {
 }
 
 impl Recording {
-    /// Create the meeting, start its recorders and their threads. Every
-    /// step that can fail comes before anything runs on its own, so a start
-    /// that fails leaves nothing behind.
+    /// Start each permitted track with its reader before opening the next stream.
+    /// A native stream can fill its queue in half a second. A failed start joins
+    /// the readers and removes the partial meeting.
     fn start(
         meetings: &Path,
         #[cfg(target_os = "linux")] recorder: &crate::capture::recorder::RecorderProfile,
         limits: &Limits,
-        specs: &[TrackSpec],
+        specs: Vec<TrackSpec>,
         lock: File,
         receiver: UnboundedReceiver<TrackNotice>,
         notices: UnboundedSender<TrackNotice>,
@@ -552,24 +559,31 @@ impl Recording {
                 return Err(unwritable("write the meeting journal", &error));
             }
         };
-        let mut prepared = Vec::with_capacity(specs.len());
+        let mut recording = Self {
+            id,
+            directory: directory.clone(),
+            _lock: lock,
+            journal,
+            tracks: Vec::with_capacity(specs.len()),
+            notices: receiver,
+            stop: None,
+        };
         let mut failure = None;
         for spec in specs {
-            let spec = track::Spec {
-                kind: spec.kind,
-                node: &spec.node,
-                #[cfg(target_os = "linux")]
-                serial: spec.serial,
+            let kind = spec.kind;
+            let opened = track::Spec {
+                source: spec,
                 #[cfg(target_os = "linux")]
                 recorder,
                 #[cfg(not(target_os = "linux"))]
-                lease: &lock,
-                directory: &directory,
+                lease: &recording._lock,
+                directory: &recording.directory,
                 limits,
             };
-            let track = track::Prepared::prepare(&spec, Arc::clone(&journal), notices.clone());
-            match track {
-                Ok(track) => prepared.push(track),
+            let prepared =
+                track::Prepared::prepare(opened, Arc::clone(&recording.journal), notices.clone());
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
                 Err(PrepareError::Storage(error)) => {
                     failure = Some(unwritable("open a track", &error));
                     break;
@@ -583,8 +597,21 @@ impl Recording {
                 Err(PrepareError::Recorder(error)) => {
                     failure = Some(
                         Failure::NoRecorder {
-                            source: spec.kind,
+                            source: kind,
                             reason: format!("{}: {error}", recorder.record().display()),
+                        }
+                        .into(),
+                    );
+                    break;
+                }
+            };
+            match prepared.start() {
+                Ok(handle) => recording.tracks.push(handle),
+                Err(error) => {
+                    failure = Some(
+                        Failure::NoRecorder {
+                            source: kind,
+                            reason: format!("cannot start a recording thread: {error}"),
                         }
                         .into(),
                     );
@@ -593,40 +620,9 @@ impl Recording {
             }
         }
         if let Some(failure) = failure {
-            for track in prepared {
-                track.kill();
-            }
+            drop(recording);
             let _ = fs::remove_dir_all(&directory);
             return Err(failure);
-        }
-        let mut recording = Self {
-            id,
-            directory,
-            _lock: lock,
-            journal,
-            tracks: Vec::with_capacity(prepared.len()),
-            notices: receiver,
-            stop: None,
-        };
-        let mut prepared = prepared.into_iter();
-        while let Some(track) = prepared.next() {
-            let kind = track.kind;
-            match track.start() {
-                Ok(handle) => recording.tracks.push(handle),
-                Err(error) => {
-                    for pending in prepared {
-                        pending.kill();
-                    }
-                    let directory = recording.directory.clone();
-                    drop(recording);
-                    let _ = fs::remove_dir_all(directory);
-                    return Err(Failure::NoRecorder {
-                        source: kind,
-                        reason: format!("cannot start a recording thread: {error}"),
-                    }
-                    .into());
-                }
-            }
         }
         Ok(recording)
     }
