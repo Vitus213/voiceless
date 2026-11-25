@@ -1,18 +1,17 @@
-name: Installed Windows typing settings
+name: Installed Windows model devices
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-ui/native-typing-0.2.0']
+    branches: ['ci/windows-ui/model-devices-0.2.0']
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   desktop:
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,22 +19,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v6
         with:
-          github-token: ${{ github.token }}
-          run-id: 45697254844
-          name: voiceless-windows-x64-typing-candidates
-          path: ${{ runner.temp }}/candidates
-      - name: Open installed typing settings in the native WebView2 window and save both choices
+          node-version: '22.23.1'
+          package-manager-cache: false
+      - name: Select the release toolchain
+        run: rustup default 1.99.1-x86_64-pc-windows-msvc
+      - name: Build the native installer candidates
+        run: python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-model-device-installers
+          path: ${{ runner.temp }}/candidates/voiceless-*-v*-windows-x64.exe
+          compression-level: 0
+          if-no-files-found: error
+      - name: Switch from an imported Vulkan preference to the installed CPU model
         env:
           PYTHONUTF8: '1'
         run: |
           python -m pip install sounddevice==0.5.3 playwright==1.65.2
-          python -u -B scripts/release/windows/typing-settings.py "$env:RUNNER_TEMP/candidates"
+          python -u -B scripts/release/windows/device-settings.py "$env:RUNNER_TEMP/candidates"
       - name: Keep the evidence of this guest
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: voiceless-windows-typing-evidence
-          path: ${{ runner.temp }}/typing-evidence
+          name: voiceless-windows-model-device-evidence
+          path: ${{ runner.temp }}/device-evidence
           if-no-files-found: ignore
