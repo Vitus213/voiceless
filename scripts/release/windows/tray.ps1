@@ -193,14 +193,15 @@ public static AccItem[] MenuItems(IntPtr menu) {
     if ($tray -eq [IntPtr]::Zero) { throw "The host has no notification-area window of its own (process $ProcessId), so it built no tray" }
     $chevron = $area.FindAll($children, (New-Condition $element::ClassNameProperty 'Button')) |
         Sort-Object { $_.Current.BoundingRectangle.Left } | Select-Object -First 1
-    $cover = if ($chevron) { $chevron.Current.BoundingRectangle } else { [System.Windows.Rect]::Empty }
+    # Where the taskbar's hidden-icons button is; it moves when an icon is promoted.
+    $cover = { if ($chevron) { $chevron.Current.BoundingRectangle } else { [System.Windows.Rect]::Empty } }
     try {
         # Where the shell puts the icon can change while this runs, so each miss is judged again.
         $menu = $null
         for ($attempt = 1; $attempt -le 3 -and !$menu; $attempt++) {
             $placed = $null
             $shellIcon = Find-ShellIcon
-            if ($shellIcon -and !(Test-Covers $cover $shellIcon.Rect)) {
+            if ($shellIcon -and !(Test-Covers (& $cover) $shellIcon.Rect)) {
                 # While an icon is hidden, the shell reports the button that reveals it, or nothing.
                 $placed = @{ Icon = $shellIcon; Hidden = $false }
             } else {
@@ -212,7 +213,7 @@ public static AccItem[] MenuItems(IntPtr menu) {
                     if (!$found) { return $null }
                     $flyout = & $overflow
                     if ($flyout -and !$flyout.Current.IsOffscreen -and (Test-Inside $found.Rect $flyout.Current.BoundingRectangle)) { return @{ Icon = $found; Hidden = $true } }
-                    if (!(Test-Covers $cover $found.Rect)) { return @{ Icon = $found; Hidden = $false } }
+                    if (!(Test-Covers (& $cover) $found.Rect)) { return @{ Icon = $found; Hidden = $false } }
                     $null
                 } '' 5
                 if (!$placed) { throw "The shell has no notification icon for the host's tray window, so the host registered none" }
