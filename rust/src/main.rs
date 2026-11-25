@@ -32,7 +32,7 @@ use clap::{Args, Parser, Subcommand};
     about = "Fast realtime voice input for Linux"
 )]
 struct Cli {
-    /// Config file for stream and daemon (default: ~/.config/voiceless/config.toml).
+    /// Config file for dictation, transcription and the console (defaults to the user config).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     /// The subcommand to run.
@@ -486,6 +486,7 @@ async fn run() {
         Command::Stream(args) => run_stream(cli.config, args).await,
         Command::Transcribe(args) => {
             voiceless::batch_cmd::transcribe(voiceless::batch_cmd::TranscribeArgs {
+                config_path: cli.config,
                 wav: args.wav,
                 backend: args.backend,
                 inject: args.inject,
@@ -495,6 +496,7 @@ async fn run() {
         }
         Command::Record(args) => {
             voiceless::batch_cmd::record(voiceless::batch_cmd::RecordArgs {
+                config_path: cli.config,
                 seconds: args.seconds,
                 backend: args.backend,
                 no_inject: args.no_inject,

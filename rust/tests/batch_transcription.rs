@@ -67,6 +67,29 @@ fn unsupported_batch_override_fails_before_recording_or_wav_io() {
 }
 
 #[test]
+fn explicit_batch_config_is_validated_before_opening_audio() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("selected.toml");
+    std::fs::write(&path, "[asr]\nbatch_backend = 'invalid-selected-backend'\n").unwrap();
+    for command in [["transcribe", "missing.wav"], ["record", "--no-inject"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_voiceless"))
+            .arg("--config")
+            .arg(&path)
+            .args(command)
+            .env("XDG_CONFIG_HOME", root.path())
+            .env("PATH", root.path())
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            error.contains("asr.batch_backend") && error.contains("invalid-selected-backend"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn wav_loader_accepts_mono_pcm16_16khz() {
     let root = tempdir().expect("temporary root");
     let path = root.path().join("sample.wav");
@@ -281,7 +304,7 @@ fn empty_content_array_maps_to_empty_text() {
 fn timed_recorder_preserves_samples_and_reports_early_exit() {
     use std::os::unix::fs::PermissionsExt;
     if let Some(destination) = std::env::var_os("VOICELESS_TEST_CAPTURE_WAV") {
-        let result = voiceless::batch::record_seconds(0.3, destination.as_ref());
+        let result = voiceless::batch::record_seconds(0.3, destination.as_ref(), None);
         if std::env::var_os("VOICELESS_TEST_RECORDER_EXIT").is_some() {
             assert!(result.unwrap_err().to_string().contains("recorder"));
         } else {
