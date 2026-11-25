@@ -1,4 +1,4 @@
-name: Installed macOS unattended system-audio dialog
+name: Installed macOS system-audio dialog answered at the dialog
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   candidate:
-    name: Leave the system's dialog unanswered for the first dual-track meeting of the installed CLI
+    name: Answer the system's system-audio dialog for the installed CLI, record both lines, lose the output and recover
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -30,7 +30,7 @@ jobs:
         run: python3 -m pip install sounddevice==0.5.3
       - name: Set up two test-owned loopback endpoints on the disposable guest
         run: bash scripts/release/macos/lines.sh
-      # Fixture-only changes can rerun against the same DMGs built with the consent fix.
+      # Fixture-only changes can rerun against the same DMGs built with the dual-track readiness fix.
       - uses: actions/setup-node@v6
         if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
         with:
@@ -41,39 +41,44 @@ jobs:
         run: |
           rustup default 1.99.1-aarch64-apple-darwin
           python3 -B scripts/release/macos/package.py "$RUNNER_TEMP/candidates"
-      - name: Reuse the images built with the consent fix
+      - name: Reuse the images built with the dual-track readiness fix
         if: ${{ contains(github.event.head_commit.message, '[no build]') }}
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 45703453204
+          run-id: 45707155253
           name: voiceless-macos-arm64-unanswered-candidates
           path: ${{ runner.temp }}/candidates
+      - name: The reused CLI image is the one the unanswered run tested
+        if: ${{ contains(github.event.head_commit.message, '[no build]') }}
+        run: |
+          cd "$RUNNER_TEMP/candidates"
+          echo "e9e8019d1707a155d0537f29ef39f9bad0375bbfd8a0e1b8171a82fce90fe157  voiceless-cli-v0.2.0-macos-arm64.dmg" | shasum -a 256 -c -
       - name: Keep the two images
         if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[no build]') }}
         uses: actions/upload-artifact@v4
         with:
-          name: voiceless-macos-arm64-unanswered-candidates
+          name: voiceless-macos-arm64-allowed-candidates
           path: ${{ runner.temp }}/candidates/*.dmg
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
-      - name: Install the CLI and leave the system's dialog unanswered for its first dual-track meeting
+      - name: Install the CLI and answer the system's dialog for its dual-track meetings
         run: |
           set -eu
-          root=$(mktemp -d "$RUNNER_TEMP/voiceless-consent.XXXXXXXX")
+          root=$(mktemp -d "$RUNNER_TEMP/voiceless-allowed.XXXXXXXX")
           mkdir -p "$root/volume" "$root/home" "$RUNNER_TEMP/evidence"
           image=$(ls "$RUNNER_TEMP"/candidates/voiceless-cli-v*-macos-arm64.dmg)
           shasum -a 256 "$image" | tee "$RUNNER_TEMP/evidence/image.txt"
           hdiutil attach -nobrowse -noautoopen -readonly -mountpoint "$root/volume" "$image"
           trap 'hdiutil detach "$root/volume"' EXIT
           HOME="$root/home" "$root/volume/install-cli.command"
-          python3 -u -B scripts/release/macos/system-audio-consent.py "$root" "$RUNNER_TEMP/evidence"
+          python3 -u -B scripts/release/macos/system-audio-allowed.py "$root" "$RUNNER_TEMP/evidence"
       - name: Keep the evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: voiceless-macos-system-audio-unanswered
+          name: voiceless-macos-system-audio-allowed
           path: ${{ runner.temp }}/evidence
           if-no-files-found: warn
           retention-days: 14
