@@ -4,9 +4,11 @@
 #
 #   pwsh -NoProfile -File microphone-consent.ps1 -State on|off -Evidence <dir> [-Name <label>]
 #
-# "on" turns on "Let apps access your microphone" and, with it, "Let desktop apps
-# access your microphone". "off" turns the first of them off, which refuses every
-# app. The clicks are synthetic pointer input; no person took part.
+# "on" turns on the switch for apps ("Allow apps to access your microphone" on
+# Windows 10 and Server, "Let apps access your microphone" on Windows 11) and,
+# with it, the switch for desktop apps. "off" turns the first of them off, which
+# refuses every app. The switches are found by their automation ids; the clicks
+# are synthetic pointer input, no person took part.
 param(
     [Parameter(Mandatory)][ValidateSet('on', 'off')][string]$State,
     [Parameter(Mandatory)][string]$Evidence,
@@ -82,8 +84,8 @@ $tree = [System.Windows.Automation.TreeScope]
 $any = [System.Windows.Automation.Condition]::TrueCondition
 $store = 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'
 $settingsProcesses = 'SystemSettings', 'ApplicationFrameHost'
-$apps = @{ label = 'Let apps access your microphone'; id = 'SystemSettings_CapabilityAccess_Microphone_UserGlobal_ToggleSwitch' }
-$desktop = @{ label = 'Let desktop apps access your microphone'; id = 'SystemSettings_CapabilityAccess_Microphone_ClassicGlobal_ToggleSwitch' }
+$apps = @{ label = 'microphone access for apps'; id = 'SystemSettings_CapabilityAccess_Microphone_UserGlobal_ToggleSwitch' }
+$desktop = @{ label = 'microphone access for desktop apps'; id = 'SystemSettings_CapabilityAccess_Microphone_ClassicGlobal_ToggleSwitch' }
 $record = [ordered]@{
     state = $State
     input = 'Synthetic pointer clicks and wheel turns of the harness on the switches of Settings; no person took part.'

@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Requires a disposable GitHub-hosted Windows guest' }
 New-Item -Type Directory -Path $Evidence -Force | Out-Null
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-Add-Type -Path (Join-Path $PSScriptRoot 'ProcessToken.cs'), (Join-Path $PSScriptRoot 'AcceptanceDesktop.cs')
+Add-Type -Path (Join-Path $PSScriptRoot 'ProcessToken.cs'), (Join-Path $PSScriptRoot 'AcceptanceDesktop.cs'), (Join-Path $PSScriptRoot 'ClipboardText.cs')
 
 $report = [ordered]@{
     input = 'Synthetic only: process starts and mouse_event pointer clicks from the harness; no physical key, button or microphone took part.'
@@ -132,7 +132,7 @@ $credential = [pscredential]::new("$env:COMPUTERNAME\$name", (ConvertTo-SecureSt
 $report.standardAccount = $name
 $workerDirectory = Join-Path $Root 'worker'
 New-Item -Type Directory -Path $workerDirectory -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'standard-user-worker.ps1'), (Join-Path $PSScriptRoot 'ProcessToken.cs') -Destination $workerDirectory
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'standard-user-worker.ps1'), (Join-Path $PSScriptRoot 'ProcessToken.cs'), (Join-Path $PSScriptRoot 'ClipboardText.cs') -Destination $workerDirectory
 & icacls.exe $Root /grant "${name}:(OI)(CI)M" /T /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "The standard user could not be given access to the working directory ($LASTEXITCODE)" }
 & icacls.exe $Evidence /grant "${name}:(OI)(CI)M" /Q | Out-Null
@@ -283,7 +283,7 @@ try {
     try {
         Wait-OwnFocus $elevatedForm $elevatedField 'The elevated editor did not obtain the foreground focus'
         try {
-            [System.Windows.Forms.Clipboard]::SetText($sentinel)
+            [ClipboardText]::Set($sentinel)
             $sentinelSet = [System.Windows.Forms.Clipboard]::GetText() -ceq $sentinel
         } catch { Write-Output "No clipboard sentinel: $($_.Exception.Message)" }
         $process = Start-Worker inject

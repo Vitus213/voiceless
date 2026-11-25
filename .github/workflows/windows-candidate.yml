@@ -25,7 +25,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Read the privacy store and the Settings pages without changing them
-        run: ./scripts/release/windows/consent-probe.ps1 -Output "$env:RUNNER_TEMP/consent-inventory"
+        run: ./scripts/release/windows/consent-probe.ps1 -Output "$env:RUNNER_TEMP/consent-inventory" -Pages
       - name: Keep what the image shows
         if: always()
         uses: actions/upload-artifact@v4
@@ -121,7 +121,7 @@ jobs:
         run: |
           python -m pip install sounddevice==0.5.3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Read the privacy store and the Settings page without changing them
+      - name: Read the privacy store without changing it or opening Settings
         run: ./scripts/release/windows/consent-probe.ps1 -Output "$env:RUNNER_TEMP/meeting-consent/inventory-before"
       - name: Refuse, allow through the switches of Settings, record both tracks, recover, refuse again and recover
         run: python -u -B scripts/release/windows/meeting.py --consent-settings "$env:RUNNER_TEMP/meeting-consent" "$env:RUNNER_TEMP/candidates"

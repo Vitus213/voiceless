@@ -1,10 +1,13 @@
 # Record, without changing anything, what this guest decides about microphone
-# access for desktop programs and whether Settings offers a page to decide it.
-# The privacy store and its policies are read; two Settings pages are opened,
-# written down and left open.
+# access for desktop programs. The privacy store and its policies are read. With
+# -Pages, the two Settings pages a user would open are opened, written down and
+# left open; without it, nothing is opened, so the guest keeps deciding as it did.
 #
-#   pwsh -NoProfile -File consent-probe.ps1 -Output <dir>
-param([Parameter(Mandatory)][string]$Output)
+#   pwsh -NoProfile -File consent-probe.ps1 -Output <dir> [-Pages]
+param(
+    [Parameter(Mandatory)][string]$Output,
+    [switch]$Pages
+)
 $ErrorActionPreference = 'Stop'
 if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Requires a GitHub-hosted Windows guest' }
 New-Item -Type Directory -Path $Output -Force | Out-Null
@@ -47,7 +50,7 @@ function Read-Window($Window) {
         try {
             $current = $item.Current
             $toggle = $null
-            if ($current.IsTogglePatternAvailable -and $item.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)) {
+            if ($item.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)) {
                 $toggle = [string]$pattern.Current.ToggleState
             }
             $rectangle = $current.BoundingRectangle
@@ -110,24 +113,26 @@ Save-Record
 
 # The Privacy hub lists the pages this system offers a user; the microphone page
 # is the one the installed CLI's refusal message tells a user to open.
-foreach ($page in 'ms-settings:privacy', 'ms-settings:privacy-microphone') {
-    $window = Open-Settings $page
-    $name = $page -replace '^ms-settings:', ''
-    if (!$window) {
-        $record.pages += [ordered]@{ page = $page; window = $null; elements = @() }
-        Write-Output "$page : no Settings window appeared"
-        continue
-    }
-    $record.pages += [ordered]@{
-        page = $page
-        window = [ordered]@{
-            title = $window.Current.Name
-            className = $window.Current.ClassName
-            process = (Get-Process -Id $window.Current.ProcessId).ProcessName
+if ($Pages) {
+    foreach ($page in 'ms-settings:privacy', 'ms-settings:privacy-microphone') {
+        $window = Open-Settings $page
+        $name = $page -replace '^ms-settings:', ''
+        if (!$window) {
+            $record.pages += [ordered]@{ page = $page; window = $null; elements = @() }
+            Write-Output "$page : no Settings window appeared"
+            continue
         }
-        elements = @(Read-Window $window)
+        $record.pages += [ordered]@{
+            page = $page
+            window = [ordered]@{
+                title = $window.Current.Name
+                className = $window.Current.ClassName
+                process = (Get-Process -Id $window.Current.ProcessId).ProcessName
+            }
+            elements = @(Read-Window $window)
+        }
+        Save-Screen "settings-$name"
     }
-    Save-Screen "settings-$name"
 }
 Save-Record
 

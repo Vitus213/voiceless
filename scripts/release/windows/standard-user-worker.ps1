@@ -17,6 +17,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -Path (Join-Path $PSScriptRoot 'ProcessToken.cs')
+Add-Type -Path (Join-Path $PSScriptRoot 'ClipboardText.cs')
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -271,7 +272,7 @@ public static extern bool ShowWindow(IntPtr window, int command);
                 $sentinel = 'Voiceless standard-user clipboard'
                 $before = 'not set'
                 try {
-                    [System.Windows.Forms.Clipboard]::SetText($sentinel)
+                    [ClipboardText]::Set($sentinel)
                     $before = if ([System.Windows.Forms.Clipboard]::GetText() -ceq $sentinel) { 'sentinel' } else { 'unreadable' }
                 } catch { $before = "error: $($_.Exception.Message)" }
                 Save-Json (Join-Path $Evidence 'editor.ready') ([ordered]@{ form = $form.Handle.ToInt64() })
