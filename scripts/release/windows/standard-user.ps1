@@ -57,9 +57,43 @@ function Get-RuntimeId {
     (Get-Content -Raw -LiteralPath $descriptor | ConvertFrom-Json).runtime_id
 }
 
-function Hide-DesktopWindow([uint32]$OfProcess, [IntPtr]$Window) {
-    if (![AcceptanceDesktop]::RequestClose($Window)) { throw 'The desktop window did not accept WM_CLOSE' }
-    $null = Wait-For { [AcceptanceDesktop]::VisibleWindow($OfProcess) -eq [IntPtr]::Zero } 'The Voiceless window did not hide' 15
+# Closing the desktop window only hides it: the runtime keeps serving. The request
+# is repeated, as a person would click the close button again.
+function Hide-DesktopWindow([uint32]$OfProcess, [IntPtr]$Window, [string]$Label) {
+    foreach ($attempt in 1..3) {
+        if (![AcceptanceDesktop]::RequestClose($Window)) { throw 'The desktop window did not accept WM_CLOSE' }
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $shown = [AcceptanceDesktop]::VisibleWindow($OfProcess) -ne [IntPtr]::Zero
+            if (!$shown) {
+                if (!(Get-Process -Id $OfProcess -ErrorAction SilentlyContinue)) { throw "The desktop exited instead of hiding its window (process $OfProcess)" }
+                return
+            }
+            Start-Sleep -Milliseconds 150
+        } while ([DateTime]::UtcNow -lt $deadline)
+        Start-Sleep -Seconds 2
+    }
+    Save-Screen "$Label-unhidden"
+    throw "The Voiceless window of process $OfProcess did not hide after three close requests"
+}
+
+# The runtime the desktop started announces itself in a descriptor; the window
+# can come first, and a started-again desktop announces a new one.
+function Wait-Runtime([string]$Label, [string]$Previous) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $current = Get-RuntimeId
+        if ($current -and $current -ne $Previous) { return $current }
+        Start-Sleep -Milliseconds 250
+    } while ($timer.Elapsed.TotalSeconds -lt 75)
+    $running = @(Get-Process -Name voiceless, voiceless-desktop -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($script:installed, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "$($_.Name) $($_.Id)" })
+    $probe = Start-Worker ctl
+    $null = Wait-Worker $probe ctl 90
+    $status = try { (Get-WorkerResult ctl).status } catch { "could not run: $($_.Exception.Message)" }
+    $stderrPath = Join-Path $Evidence "desktop-stderr-$Label.log"
+    $stderrText = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -Raw -LiteralPath $stderrPath).Trim() } else { '<no log>' }
+    throw "The desktop announced no new runtime within 75 seconds; running: $($running -join ', '); voiceless ctl status said: $($status -join ' '); the desktop printed: $stderrText"
 }
 
 function Show-Editor([string]$Title, [string]$Text) {
@@ -328,26 +362,13 @@ try {
     $started = Invoke-Step desktop-start 'The standard user could not start the installed desktop'
     $desktopId = [uint32]$started.process
     $window = Wait-For { [AcceptanceDesktop]::VisibleWindow($desktopId) } 'The installed desktop showed no window for the standard user' 75
-    $desktopAttempt = $script:run
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    while (!(Get-RuntimeId) -and $timer.Elapsed.TotalSeconds -lt 75) { Start-Sleep -Milliseconds 250 }
+    $runtime = Wait-Runtime "$script:run" $null
     Save-Screen 'desktop-window-standard-user'
-    if (!(Get-RuntimeId)) {
-        $running = @(Get-Process -Name voiceless, voiceless-desktop -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -and $_.Path.StartsWith($script:installed, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "$($_.Name) $($_.Id)" })
-        $probe = Start-Worker ctl
-        $null = Wait-Worker $probe ctl 90
-        $status = try { (Get-WorkerResult ctl).status } catch { "could not run: $($_.Exception.Message)" }
-        $stderrPath = Join-Path $Evidence "desktop-stderr-$desktopAttempt.log"
-        $stderrText = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -Raw -LiteralPath $stderrPath).Trim() } else { '<no log>' }
-        throw "The desktop left no runtime identity within 75 seconds; running: $($running -join ', '); voiceless ctl status said: $($status -join ' '); the desktop printed: $stderrText"
-    }
-    $runtime = Get-RuntimeId
     . (Join-Path $PSScriptRoot 'tray.ps1')
     $firstAttempt = $null
     $tray = $null
     foreach ($attempt in 1..2) {
-        if ([AcceptanceDesktop]::VisibleWindow($desktopId) -ne [IntPtr]::Zero) { Hide-DesktopWindow $desktopId $window }
+        if ([AcceptanceDesktop]::VisibleWindow($desktopId) -ne [IntPtr]::Zero) { Hide-DesktopWindow $desktopId $window 'desktop-window-before-tray' }
         try {
             $tray = Invoke-TrayItem -ProcessId $desktopId
             $shell = "the runner account's Explorer"
@@ -364,8 +385,8 @@ try {
         $started = Invoke-Step desktop-start 'The standard user could not start the installed desktop again'
         $desktopId = [uint32]$started.process
         $window = Wait-For { [AcceptanceDesktop]::VisibleWindow($desktopId) } 'The installed desktop showed no window under the standard user''s Explorer' 75
-        $runtime = Get-RuntimeId
-        Hide-DesktopWindow $desktopId $window
+        $runtime = Wait-Runtime "$script:run" $runtime
+        Hide-DesktopWindow $desktopId $window 'desktop-window-own-shell'
         $tray = Invoke-TrayItem -ProcessId $desktopId
         $shell = "$name's own Explorer"
     }
