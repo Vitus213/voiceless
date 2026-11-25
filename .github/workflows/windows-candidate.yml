@@ -77,3 +77,56 @@ jobs:
           name: voiceless-windows-standard-user-evidence
           path: ${{ runner.temp }}/standard-user-evidence
           if-no-files-found: warn
+
+  meeting-consent:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record the runner's desktop, audio endpoints and graphics adapter
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          $explorer = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
+          $endpoints = @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass = 'AudioEndpoint'" | Where-Object Present)
+          $graphics = @(Get-CimInstance Win32_VideoController)
+          [ordered]@{
+            session = $session
+            explorer = $explorer.Count
+            audioEndpoints = @($endpoints | ForEach-Object Name)
+            graphics = @($graphics | ForEach-Object Name)
+          } | ConvertTo-Json -Depth 3
+      - name: Reuse the exact installers from the dual-track run
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45707934020
+          name: voiceless-windows-prepared-stream-installers
+          path: ${{ runner.temp }}/candidates
+      - name: Confirm the core installer refused under the guest's own settings
+        run: |
+          $core = "$env:RUNNER_TEMP/candidates/voiceless-core-v0.2.0-windows-x64.exe"
+          $hash = (Get-FileHash $core -Algorithm SHA256).Hash
+          if ($hash -ne 'D4E06BE3C6620FFE284D2F4021E281C1C36982A25EBE3AED3D47ADEF903FBD14') { throw "The core installer is $hash, not d4e06be3c6620ffe284d2f4021e281c1c36982a25ebe3aed3d47adef903fbd14" }
+          Get-FileHash "$env:RUNNER_TEMP/candidates/voiceless-*.exe" -Algorithm SHA256 | Format-List Hash, Path
+      - name: Set up two independent WASAPI endpoint pairs on the disposable guest
+        run: ./scripts/release/windows/lines.ps1
+      - name: Install the audio signal generator
+        run: |
+          python -m pip install sounddevice==0.5.3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Read the privacy store and the Settings page without changing them
+        run: ./scripts/release/windows/consent-probe.ps1 -Output "$env:RUNNER_TEMP/meeting-consent/inventory-before"
+      - name: Refuse, allow through the switches of Settings, record both tracks, recover, refuse again and recover
+        run: python -u -B scripts/release/windows/meeting.py --consent-settings "$env:RUNNER_TEMP/meeting-consent" "$env:RUNNER_TEMP/candidates"
+      - name: Keep the records of the switches and of the recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-meeting-consent-evidence
+          path: ${{ runner.temp }}/meeting-consent
+          if-no-files-found: warn

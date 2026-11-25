@@ -104,6 +104,24 @@ def denied_microphone():
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
 
 
+def move_microphone_switches(state, evidence, label):
+    """The remedy the refusal names: a user moves the switches of Settings > Privacy
+    > Microphone. The helper clicks them; Settings stores what was chosen, and the
+    privacy store is only read."""
+    script = Path(__file__).with_name('microphone-consent.ps1')
+    subprocess.run(['pwsh', '-NoProfile', '-File', script, '-State', state, '-Evidence', str(evidence), '-Name', label],
+                   check=True, timeout=240)
+
+
+@contextmanager
+def withheld_by_settings(evidence):
+    move_microphone_switches('off', evidence, 'withheld')
+    try:
+        yield
+    finally:
+        move_microphone_switches('on', evidence, 'allowed-again')
+
+
 @contextmanager
 def installed_daemon(cli, config, env, log):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -142,7 +160,7 @@ def queued_meeting(api, path, state):
     return wait_for(linked, f'{path} to be {state} with both transcription jobs')
 
 
-def run(cli, root, env, speech, expect_wasapi_denial=False):
+def run(cli, root, env, speech, expect_wasapi_denial=False, evidence=None):
     config = Path(env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
     config.write_text(config.read_text() + 'batch_backend="local"\n[console]\nport=0\n[audio]\npause_media=false\ncues=false\n', encoding='utf-8')
     with installed_daemon(cli, config, env, root / 'daemon.log') as (daemon, api):
@@ -172,6 +190,16 @@ def run(cli, root, env, speech, expect_wasapi_denial=False):
                 assert not api('meetings')['meetings'] and not any(directory.rglob('*'))
                 print(f'WASAPI refusal {attempt}: HTTP 409, no meeting or track on disk: {refusal}')
             return
+        if evidence:
+            # With the privacy settings the guest came with.
+            listing = api('meetings')
+            directory = Path(listing['data_location'])
+            assert not listing['meetings'] and not any(directory.rglob('*'))
+            refusal = api('meetings/start', selection, 409)['error']
+            assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
+            assert not api('meetings')['meetings'] and not any(directory.rglob('*'))
+            print('Refused with the privacy settings the guest came with, HTTP 409, no meeting or track on disk:', refusal)
+            move_microphone_switches('on', evidence, 'allowed')
         feed, selected = line_index(1), line_index(2)
         rate1, rate2 = (int(sd.query_devices(i)['default_samplerate']) for i in (feed, selected))
         def capture():
@@ -233,7 +261,8 @@ def run(cli, root, env, speech, expect_wasapi_denial=False):
         assert len(words) >= 5 and any(' '.join(words[i:i+5]) in spoken for i in range(len(words)-4)), (baseline, recorded)
         print('Installed microphone recording recovered the reference speech:', recorded)
         previous_ids = [m['id'] for m in api('meetings')['meetings']]
-        with denied_microphone():
+        withheld = withheld_by_settings(evidence) if evidence else denied_microphone()
+        with withheld:
             refusal = api('meetings/start', selection, 409)['error']
             assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
             assert [m['id'] for m in api('meetings')['meetings']] == previous_ids
@@ -262,6 +291,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('candidates', type=Path)
     parser.add_argument('--expect-wasapi-denial', action='store_true')
+    parser.add_argument('--consent-settings', type=Path, metavar='EVIDENCE',
+                        help='move the switches of Settings > Privacy > Microphone instead of writing the privacy store; keep their records in EVIDENCE')
     args = parser.parse_args()
     if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or not os.environ.get('VOICELESS_VAC_DEVICE'):
         parser.error('requires the hosted evaluation device')
@@ -275,7 +306,7 @@ def main():
         installer = args.candidates / f'voiceless-core-v{version}-windows-x64.exe'
         subprocess.run([installer, *flags, f'/DIR={dest}'], check=True, timeout=120)
         try:
-            run(dest/'voiceless.exe', root, env, speech, args.expect_wasapi_denial)
+            run(dest/'voiceless.exe', root, env, speech, args.expect_wasapi_denial, args.consent_settings)
         finally:
             subprocess.run([dest/'unins000.exe', *flags], check=True, timeout=90)
 

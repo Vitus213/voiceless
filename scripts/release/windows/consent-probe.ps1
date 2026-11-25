@@ -51,6 +51,7 @@ function Read-Window($Window) {
                 $toggle = [string]$pattern.Current.ToggleState
             }
             $rectangle = $current.BoundingRectangle
+            $place = if ([double]::IsInfinity($rectangle.X) -or [double]::IsInfinity($rectangle.Width)) { 'nowhere on screen' } else { '{0},{1} {2}x{3}' -f [int]$rectangle.X, [int]$rectangle.Y, [int]$rectangle.Width, [int]$rectangle.Height }
             $rows.Add([ordered]@{
                 type = ($current.ControlType.ProgrammaticName -replace '^ControlType\.', '')
                 name = $current.Name
@@ -59,9 +60,10 @@ function Read-Window($Window) {
                 help = $current.HelpText
                 status = $current.ItemStatus
                 toggle = $toggle
+                patterns = @($item.GetSupportedPatterns() | ForEach-Object ProgrammaticName)
                 enabled = $current.IsEnabled
                 offscreen = $current.IsOffscreen
-                rectangle = ('{0},{1} {2}x{3}' -f [int]$rectangle.X, [int]$rectangle.Y, [int]$rectangle.Width, [int]$rectangle.Height)
+                rectangle = $place
             })
         } catch { $rows.Add([ordered]@{ type = 'unreadable'; name = $_.Exception.Message }) }
     }
@@ -89,7 +91,7 @@ $system = Get-CimInstance Win32_OperatingSystem
 $session = (Get-Process -Id $PID).SessionId
 $record = [ordered]@{
     os = [ordered]@{ caption = $system.Caption; version = $system.Version; build = $system.BuildNumber }
-    architecture = $env:PROCESS_ARCHITECTURE
+    architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
     image = $env:ImageVersion
     session = $session
     explorer = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session).Count
@@ -140,3 +142,4 @@ foreach ($page in $record.pages) {
     Write-Output "  switches: $($switches -join ' | ')"
     Write-Output "  texts: $($texts -join ' / ')"
 }
+exit 0

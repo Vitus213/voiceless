@@ -118,13 +118,15 @@ $report.guest.secondaryLogon = [string](Get-Service -Name seclogon).Status
 $name = 'VoicelessStandard'
 $bytes = [byte[]]::new(18)
 [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-# Hexadecimal only: `net user` would read a leading slash as one of its own options.
 $plain = [Convert]::ToHexString($bytes) + 'a1!A'
-$created = & net.exe user $name $plain /add
-if ($LASTEXITCODE -ne 0) {
-    # An account left by an earlier attempt keeps its name; its password is set again.
-    $created = & net.exe user $name $plain
-    if ($LASTEXITCODE -ne 0) { throw "The standard user could not be created ($LASTEXITCODE): $created" }
+$account = ([ADSI]'WinNT://.').Create('User', $name)
+try {
+    # ADS_UF_DONT_EXPIRE_PASSWD 0x10000 with ADS_UF_PASSWD_CANT_CHANGE 0x40
+    $account.SetPassword($plain)
+    $account.UserFlags = 0x10040
+    $null = $account.SetInfo()
+} catch {
+    throw "The standard user could not be created: $($_.Exception.Message)"
 }
 $credential = [pscredential]::new("$env:COMPUTERNAME\$name", (ConvertTo-SecureString $plain -AsPlainText -Force))
 $report.standardAccount = $name
@@ -404,3 +406,5 @@ try {
     $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Evidence 'summary.json') -Encoding utf8
     Write-Output ($report | ConvertTo-Json -Depth 12)
 }
+
+exit 0
