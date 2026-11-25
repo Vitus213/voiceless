@@ -62,7 +62,7 @@ function Hide-DesktopWindow([uint32]$OfProcess, [IntPtr]$Window) {
     $null = Wait-For { [AcceptanceDesktop]::VisibleWindow($OfProcess) -eq [IntPtr]::Zero } 'The Voiceless window did not hide' 15
 }
 
-function New-Editor([string]$Title, [string]$Text) {
+function Show-Editor([string]$Title, [string]$Text) {
     $form = [System.Windows.Forms.Form]::new()
     $form.Text = $Title
     $form.StartPosition = 'Manual'
@@ -77,7 +77,7 @@ function New-Editor([string]$Title, [string]$Text) {
     $form.Activate()
     $null = $field.Focus()
     [System.Windows.Forms.Application]::DoEvents()
-    , @($form, $field)
+    $script:editorForm, $script:editorField = $form, $field
 }
 
 # The focus of the harness's own window: waited for, then clicked for as a person would.
@@ -277,11 +277,11 @@ try {
     Write-Output "Paste: $($report.paste.characters) characters reached the standard user's editor through $($paste.injection.method) at $(Format-Level $paste.integrity); clipboard before: '$($paste.clipboardBefore)', after: '$($paste.clipboardAfter)'"
 
     # A window Windows keeps above the standard user receives nothing.
-    $elevatedForm, $elevatedField = New-Editor 'Voiceless elevated editor' 'Voiceless elevated editor: this text stays'
+    Show-Editor 'Voiceless elevated editor' 'Voiceless elevated editor: this text stays'
     $sentinel = 'Voiceless elevated harness clipboard'
     $sentinelSet = $false
     try {
-        Wait-OwnFocus $elevatedForm $elevatedField 'The elevated editor did not obtain the foreground focus'
+        Wait-OwnFocus $script:editorForm $script:editorField 'The elevated editor did not obtain the foreground focus'
         try {
             [ClipboardText]::Set($sentinel)
             $sentinelSet = [System.Windows.Forms.Clipboard]::GetText() -ceq $sentinel
@@ -295,10 +295,10 @@ try {
             Start-Sleep -Milliseconds 15
         }
         [System.Windows.Forms.Application]::DoEvents()
-        $elevatedText = $elevatedField.Text
-        $elevatedForeground = [AcceptanceDesktop]::GetForegroundWindow() -eq $elevatedForm.Handle
+        $elevatedText = $script:editorField.Text
+        $elevatedForeground = [AcceptanceDesktop]::GetForegroundWindow() -eq $script:editorForm.Handle
         $clipboardAfter = if ($sentinelSet) { [System.Windows.Forms.Clipboard]::GetText() } else { $null }
-    } finally { $elevatedForm.Dispose() }
+    } finally { $script:editorForm.Dispose() }
     $null = Wait-Worker $process inject
     $refusal = Get-WorkerResult inject
     if (!$refusal.transcript) { throw 'Nothing was recognized, so no delivery into the elevated editor was attempted' }
