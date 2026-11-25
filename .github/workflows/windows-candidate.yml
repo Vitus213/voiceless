@@ -42,3 +42,7 @@ jobs:
           path: ${{ runner.temp }}/candidates/voiceless-*-v*-windows-x64.exe
           if-no-files-found: error
           compression-level: 0
+      - name: Check guarded Unicode delivery in two native editor windows
+        run: cargo test --locked --manifest-path rust/Cargo.toml --lib desktop::native::interactive::windows_delivers_unicode_to_the_original_editor_only -- --ignored --exact
+      - name: Check WASAPI device discovery and refusal of a missing meeting input
+        run: cargo test --locked --manifest-path rust/Cargo.toml --test capture_workflows native_meeting::catalog_resolves_host_ids_and_rejects_a_missing_selection_before_recording -- --exact

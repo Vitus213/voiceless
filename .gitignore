@@ -4,6 +4,7 @@ __pycache__/
 .coverage
 result
 models/
+!rust/src/models/
 reports/
 !scripts/asr_benchmark/reports/
 rust/target/
