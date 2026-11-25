@@ -1,0 +1,67 @@
+name: Installed Windows desktop practice acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/windows-candidate/practice-0.2.0']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  desktop:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record the runner's desktop, audio endpoints and graphics adapter
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          $explorer = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
+          $endpoints = @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass = 'AudioEndpoint'" | Where-Object Present)
+          $graphics = @(Get-CimInstance Win32_VideoController)
+          [ordered]@{
+            session = $session
+            explorer = $explorer.Count
+            audioEndpoints = @($endpoints | ForEach-Object Name)
+            graphics = @($graphics | ForEach-Object Name)
+          } | ConvertTo-Json -Depth 3
+      - name: Download the accepted MSVC installers
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: '45667788670'
+          name: voiceless-windows-x64-candidates
+          path: ${{ runner.temp }}/candidates
+      - name: Check the installed inputs by SHA-256
+        run: |
+          $candidates = Join-Path $env:RUNNER_TEMP candidates
+          $expected = @{
+            core = '71e19137ad5a7561b9e6daab7695582f884783db0852d61f2e6f3db9a69e39af'
+            desktop = '139f50e1a18738de573b76fe8f9fcea2ea5b084b71cf89b70a7051a1dca4d1a9'
+          }
+          foreach ($kind in $expected.Keys) {
+            $file = Join-Path $candidates "voiceless-$kind-v0.2.0-windows-x64.exe"
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash -ne $expected[$kind]) { throw "Wrong $kind installer" }
+          }
+      - name: Set up two independent WASAPI endpoint pairs on the disposable guest
+        run: ./scripts/release/windows/lines.ps1
+      - name: Install the audio and interface automation tools
+        run: python -m pip install sounddevice==0.5.3 playwright==1.65.2
+      - name: First run of the installed desktop, its practice page, the hotkey registration and guarded delivery
+        env:
+          PYTHONUTF8: '1'
+        run: python -u -B scripts/release/windows/practice.py "$env:RUNNER_TEMP/candidates"
+      - name: Keep the evidence of this guest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-practice-evidence
+          path: ${{ runner.temp }}/practice-evidence
+          if-no-files-found: ignore
