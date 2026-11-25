@@ -407,15 +407,21 @@ def focus(editor):
     check(state['foreground'] and state['focused'], f'Editor {editor.name} is not the focused foreground window', state=state)
 
 
+def is_line(label, number):
+    """Voiceless names a test line "Line 1"; PnP and PortAudio may add "(Virtual Audio Cable)"."""
+    return re.fullmatch(rf'Line {number}(?:\s*\(.*\))?', str(label).strip(), re.IGNORECASE) is not None
+
+
 def line_index(number, direction):
     """The WASAPI device of test line `number`: its recording or its playback end."""
     channels = 'max_input_channels' if direction == 'input' else 'max_output_channels'
-    matches = [i for i, d in enumerate(sd.query_devices())
-               if d[channels] >= (1 if direction == 'input' else 2)
-               and sd.query_hostapis(d['hostapi'])['name'] == 'Windows WASAPI'
-               and f'Line {number} (' in d['name'] and 'Virtual Audio Cable' in d['name']]
+    wasapi = [(i, d) for i, d in enumerate(sd.query_devices())
+              if sd.query_hostapis(d['hostapi'])['name'] == 'Windows WASAPI']
+    matches = [i for i, d in wasapi
+               if d[channels] >= (1 if direction == 'input' else 2) and is_line(d['name'], number)]
     if len(matches) != 1:
-        raise RuntimeError(f'Line {number} {direction} is ambiguous: {matches}; devices: {sd.query_devices()}')
+        raise RuntimeError(f'Line {number} {direction} is ambiguous: {matches}; WASAPI devices: '
+                           + str([(d['name'], d[channels]) for _, d in wasapi]))
     return matches[0]
 
 
@@ -592,7 +598,7 @@ def run(candidates, root, env, evidence):
             # The microphone, the recognition and the model, as the page offers them.
             audio = console.call('api/desktop/audio')
             record('microphones', labels=[m['label'] for m in audio['microphones']], system_default=audio['system_default'])
-            found = [m for m in audio['microphones'] if 'Line 1 (' in m['label'] and 'Virtual Audio Cable' in m['label']]
+            found = [m for m in audio['microphones'] if is_line(m['label'], 1)]
             check(len(found) == 1 and found[0]['id'].lower() == os.environ['VOICELESS_VAC_MIC'].lower(),
                   'Line 1 is not the one microphone lines.ps1 named', found=found)
             page.get_by_label(UI['input']).select_option(found[0]['id'])
@@ -630,6 +636,8 @@ def run(candidates, root, env, evidence):
             (root / 'batch-config' / 'voiceless').mkdir(parents=True)
             (root / 'batch-config' / 'voiceless' / 'config.toml').write_text(
                 f'[asr]\nbatch_backend = "local"\nbatch_model_dir = {json.dumps(str(model.parent))}\n', encoding='utf-8')
+            record('wasapi', devices=[d['name'] for d in sd.query_devices()
+                                      if sd.query_hostapis(d['hostapi'])['name'] == 'Windows WASAPI'])
             baseline = transcribe(cli, speech.path, batch)
             path, levels = cable_report(speech, evidence)
             through = transcribe(cli, path, batch)
