@@ -118,7 +118,7 @@ fn unconnected(source: TrackKind, node: &str, reason: String) -> Failure {
 /// The system's refusal of a native source, with where its access is decided.
 fn refused(source: TrackKind, node: &str, reason: String) -> Failure {
     let remedy = match source {
-        TrackKind::Microphone => "Check microphone access in the system privacy settings",
+        TrackKind::Microphone => crate::desktop::native::MICROPHONE_REMEDY,
         TrackKind::System => "Check system audio recording access in the system privacy settings",
     };
     Failure::PermissionDenied {

@@ -310,6 +310,9 @@ fn confirm_observed_focus(expected_key: &str, observed: Option<Target>) -> Resul
 
 // Permissions and integrity.
 
+pub(crate) const MICROPHONE_REMEDY: &str =
+    "In Windows Settings > Privacy > Microphone, enable microphone access for desktop apps.";
+
 /// Check desktop microphone consent without starting an audio stream. Missing
 /// overrides inherit Windows defaults; WASAPI checks effective policy at open.
 pub(crate) fn microphone_permission() -> Result<(), String> {
@@ -347,7 +350,7 @@ pub(crate) fn microphone_permission() -> Result<(), String> {
                     .position(|&unit| unit == 0)
                     .unwrap_or(value.len());
                 if String::from_utf16_lossy(&value[..length]).eq_ignore_ascii_case("Deny") {
-                    return Err("Microphone access is denied. In Windows Settings > Privacy > Microphone, enable microphone access for desktop apps.".to_owned());
+                    return Err(format!("Microphone access is denied. {MICROPHONE_REMEDY}"));
                 }
             }
             code => {
