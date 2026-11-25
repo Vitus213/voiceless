@@ -158,6 +158,7 @@ bool vl_copy(const uint8_t *bytes, size_t length) {
 }
 
 int vl_paste(const uint8_t *bytes, size_t length, uint64_t key) {
+    if (key == 0) return 1; // No confirmed field, including a secure text field.
     @autoreleasepool { @synchronized (NSPasteboard.class) { @synchronized (NSWorkspace.class) {
         if (!AXIsProcessTrusted() || !CGPreflightPostEventAccess()) return 2;
         pid_t pid;
