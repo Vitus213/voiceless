@@ -110,7 +110,18 @@ static uint64_t currentFocus(pid_t *pid, char **appID, char **title) {
     static uint64_t generation;
     if (!AXIsProcessTrusted()) return 0;
     id system = CFBridgingRelease(AXUIElementCreateSystemWide());
-    id app = attribute((__bridge AXUIElementRef)system, kAXFocusedApplicationAttribute);
+    CFTypeRef appValue = NULL;
+    AXError status = AXUIElementCopyAttributeValue((__bridge AXUIElementRef)system,
+        kAXFocusedApplicationAttribute, &appValue);
+    id app = CFBridgingRelease(appValue);
+    if (status == kAXErrorCannotComplete) {
+        // System-wide AX can be unavailable even when TextEdit exposes its focused field.
+        NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+        if (!front || front.processIdentifier <= 0) return 0;
+        app = CFBridgingRelease(AXUIElementCreateApplication(front.processIdentifier));
+    } else if (status != kAXErrorSuccess) {
+        return 0;
+    }
     if (!app || CFGetTypeID((__bridge CFTypeRef)app) != AXUIElementGetTypeID()) return 0;
     AXUIElementRef ax = (__bridge AXUIElementRef)app;
     if (AXUIElementGetPid(ax, pid) != kAXErrorSuccess || *pid <= 0) return 0;
@@ -119,6 +130,7 @@ static uint64_t currentFocus(pid_t *pid, char **appID, char **title) {
     if (!window || !field || CFGetTypeID((__bridge CFTypeRef)field) != AXUIElementGetTypeID()
         || CFGetTypeID((__bridge CFTypeRef)window) != AXUIElementGetTypeID()) return 0;
     if ([attribute((__bridge AXUIElementRef)field, kAXSubroleAttribute) isEqual:@"AXSecureTextField"]) return 0;
+    if (status == kAXErrorCannotComplete && ![attribute(ax, kAXFrontmostAttribute) isEqual:@YES]) return 0;
     if (*pid != previousPID || !previousWindow || !previousField ||
         !CFEqual((__bridge CFTypeRef)window, (__bridge CFTypeRef)previousWindow) ||
         !CFEqual((__bridge CFTypeRef)field, (__bridge CFTypeRef)previousField)) {
