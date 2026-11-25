@@ -1,25 +1,45 @@
-name: Installed Windows meeting permission guidance
+name: Installed Windows standard-user desktop
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-candidate/meeting-permission-guidance-0.2.0']
+    branches: ['ci/windows-candidate/standard-user-desktop-0.2.0']
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  installers:
-    runs-on: windows-2022
-    timeout-minutes: 60
+  consent-inventory:
+    name: Microphone consent of the hosted ${{ matrix.os }} image
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v6
+      - name: Read the privacy store and the Settings pages without changing them
+        run: ./scripts/release/windows/consent-probe.ps1 -Output "$env:RUNNER_TEMP/consent-inventory"
+      - name: Keep what the image shows
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          node-version: '22.23.1'
-          package-manager-cache: false
+          name: voiceless-consent-inventory-${{ matrix.os }}
+          path: ${{ runner.temp }}/consent-inventory
+          if-no-files-found: warn
+
+  standard-user:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -35,22 +55,25 @@ jobs:
             audioEndpoints = @($endpoints | ForEach-Object Name)
             graphics = @($graphics | ForEach-Object Name)
           } | ConvertTo-Json -Depth 3
-      - name: Build candidates with the corrected startup message
-        run: |
-          rustup default 1.99.1-x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
-      - name: Record the tested core installer
-        run: Get-FileHash "$env:RUNNER_TEMP/candidates/voiceless-core-*.exe" -Algorithm SHA256 | Format-List Hash,Path
-      - uses: actions/upload-artifact@v4
+      - name: Reuse the exact installers from the dual-track run
+        uses: actions/download-artifact@v4
         with:
-          name: voiceless-windows-meeting-permission-core
-          path: ${{ runner.temp }}/candidates/voiceless-core-*.exe
-          if-no-files-found: error
-          compression-level: 0
-      - name: Set up two independent WASAPI endpoint pairs on the disposable guest
-        run: ./scripts/release/windows/lines.ps1
-      - name: Install the audio signal generator
-        run: python -m pip install sounddevice==0.5.3
-      - name: Verify the guest's WASAPI refusal and the absence of a recording on retry
-        run: python -u -B scripts/release/windows/meeting.py --expect-wasapi-denial "$env:RUNNER_TEMP/candidates"
+          github-token: ${{ github.token }}
+          run-id: 45707934020
+          name: voiceless-windows-prepared-stream-installers
+          path: ${{ runner.temp }}/candidates
+      - name: Confirm the core installer refused under the guest's own settings
+        run: |
+          $core = "$env:RUNNER_TEMP/candidates/voiceless-core-v0.2.0-windows-x64.exe"
+          $hash = (Get-FileHash $core -Algorithm SHA256).Hash
+          if ($hash -ne 'D4E06BE3C6620FFE284D2F4021E281C1C36982A25EBE3AED3D47ADEF903FBD14') { throw "The core installer is $hash, not d4e06be3c6620ffe284d2f4021e281c1c36982a25ebe3aed3d47adef903fbd14" }
+          Get-FileHash "$env:RUNNER_TEMP/candidates/voiceless-*.exe" -Algorithm SHA256 | Format-List Hash, Path
+      - name: Install as a standard user and check its paste, tray and integrity refusals
+        run: python -u -B scripts/release/windows/standard-user.py --candidates "$env:RUNNER_TEMP/candidates" --evidence "$env:RUNNER_TEMP/standard-user-evidence"
+      - name: Keep the standard-user evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-standard-user-evidence
+          path: ${{ runner.temp }}/standard-user-evidence
+          if-no-files-found: warn
