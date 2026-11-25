@@ -35,14 +35,21 @@ func streams(_ device: AudioObjectID, _ scope: AudioObjectPropertyScope) -> Int 
     return Int(size) / MemoryLayout<AudioStreamID>.size
 }
 
+func code(_ status: OSStatus) -> String {
+    String(format: "%c%c%c%c", (status >> 24) & 255, (status >> 16) & 255, (status >> 8) & 255, status & 255)
+}
+
 func devices() -> [AudioObjectID] {
     var property = address(kAudioHardwarePropertyDevices)
     var size: UInt32 = 0
     let system = AudioObjectID(0)
-    guard AudioObjectGetPropertyDataSize(system, &property, 0, nil, &size) == noErr else { return [] }
-    var identifiers = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-    guard AudioObjectGetPropertyData(system, &property, 0, nil, &size, &identifiers) == noErr else { return [] }
-    return identifiers
+    var status = AudioObjectGetPropertyDataSize(system, &property, 0, nil, &size)
+    guard status == noErr else { fail("the size of the device list could not be read (OSStatus \(status) \(code(status)))") }
+    var identifiers = [AudioObjectID](repeating: 0, count: max(Int(size) / MemoryLayout<AudioObjectID>.size, 1))
+    size = UInt32(identifiers.count * MemoryLayout<AudioObjectID>.size)
+    status = AudioObjectGetPropertyData(system, &property, 0, nil, &size, &identifiers)
+    guard status == noErr else { fail("the device list could not be read (OSStatus \(status) \(code(status)))") }
+    return Array(identifiers.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
 }
 
 func describe(_ device: AudioObjectID) -> [String: Any] {
