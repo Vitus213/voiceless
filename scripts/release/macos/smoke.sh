@@ -14,7 +14,10 @@ mkdir -p "$work" "$temp/module-cache"
 
 echo "== helpers compile"
 xcrun swiftc -module-cache-path "$temp/module-cache" "$here/shell.swift" -o "$temp/voiceless-shell"
-xcrun swiftc -module-cache-path "$temp/module-cache" "$here/editor.swift" -o "$temp/voiceless-editor"
+xcrun swiftc -module-cache-path "$temp/module-cache" "$here/editor.swift" "$here/editor-serve.swift" -o "$temp/voiceless-editor"
+# The guard variant needs the bridge archive of a build; its Swift and its C are checked alone here.
+xcrun swiftc -typecheck -module-cache-path "$temp/module-cache" -import-objc-header "$here/editor.h" "$here/editor.swift" "$here/editor-guard.swift"
+xcrun clang -c "$here/editor.c" -o "$temp/editor-stubs.o"
 "$temp/audio" list
 
 echo "== editor fixture on the guest's screen"

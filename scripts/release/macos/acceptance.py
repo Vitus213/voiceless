@@ -130,11 +130,13 @@ class Guest:
         if not self.audio.is_file():
             self.build(self.audio, [here / 'audio.swift'])
 
-    def build(self, target, sources, objects=(), libraries=(), frameworks=('AppKit', 'ApplicationServices')):
+    def build(self, target, sources, objects=(), libraries=(), frameworks=('AppKit', 'ApplicationServices'), header=None):
         """Compile a Swift helper of the test for this guest."""
         module = self.temp / 'module-cache'
         module.mkdir(exist_ok=True)
         command = ['xcrun', 'swiftc', '-module-cache-path', str(module), *map(str, sources), *map(str, objects), '-o', str(target)]
+        if header is not None:
+            command += ['-import-objc-header', str(header)]
         for framework in frameworks:
             command += ['-framework', framework]
         for library in libraries:
@@ -725,7 +727,8 @@ def accept(guest, repository, arguments, evidence, root, consent):
                 stub = root / 'editor-stubs.o'
                 subprocess.run(['xcrun', 'clang', '-c', str(here / 'editor.c'), '-o', str(stub)], check=True, capture_output=True, timeout=120)
                 executable = root / 'voiceless-editor-guard'
-                guest.build(executable, [here / 'editor.swift'], objects=[stub], libraries=[arguments.library],
+                guest.build(executable, [here / 'editor.swift', here / 'editor-guard.swift'], objects=[stub],
+                            libraries=[arguments.library], header=here / 'editor.h',
                             frameworks=('AppKit', 'ApplicationServices', 'AVFoundation', 'CoreAudio'))
                 report = json.loads(subprocess.check_output([str(executable), 'guard', str(root)], text=True, timeout=90))
                 expected = {'refused_after_focus_change': 1, 'second_after_refusal': '', 'first_after_refusal': '',
@@ -737,7 +740,7 @@ def accept(guest, repository, arguments, evidence, root, consent):
             evidence.check('delivery: the bridge delivers to the original field only and puts the clipboard back', True, guard)
 
         executable = root / 'voiceless-editor'
-        guest.build(executable, [here / 'editor.swift'])
+        guest.build(executable, [here / 'editor.swift', here / 'editor-serve.swift'])
         editor = Editor(executable, root / 'editor')
         try:
 

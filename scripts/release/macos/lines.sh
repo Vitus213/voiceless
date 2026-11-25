@@ -35,8 +35,8 @@ for line in '2ch 3e0f8102ed27e3528f0c186927837f9f0d843a26580c2ea7507d7c8ef019ead
 done
 
 # The HAL loads its plug-ins when coreaudiod starts.
-echo "== what the HAL answers, through this helper and through PortAudio"
-"$RUNNER_TEMP/audio" probe || echo "the helper could not list the devices (exit $?)"
+echo "== devices as the installers left them, and what PortAudio sees"
+"$RUNNER_TEMP/audio" list
 python3 -B -c 'import sounddevice as sd; print(sd.query_devices())' || echo "PortAudio could not list the devices (exit $?)"
 sudo launchctl kickstart -k system/com.apple.audio.coreaudiod || echo "restarting coreaudiod exited $?"
 status=0

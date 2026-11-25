@@ -51,17 +51,6 @@ func devices() -> [AudioObjectID] {
     return Array(identifiers.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
 }
 
-func probe() {
-    var size: UInt32 = 0
-    var literal = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMaster)
-    let first = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &literal, 0, nil, &size)
-    print("literal address \(literal) status \(first) \(code(first)) size \(size)")
-    var made = address(kAudioHardwarePropertyDevices)
-    let second = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &made, 0, nil, &size)
-    print("helper address \(made) status \(second) \(code(second)) size \(size)")
-    emit(devices().map(describe))
-}
-
 func describe(_ device: AudioObjectID) -> [String: Any] {
     let transport = number(device, kAudioDevicePropertyTransportType).map { String(format: "%c%c%c%c", ($0 >> 24) & 255, ($0 >> 16) & 255, ($0 >> 8) & 255, $0 & 255) } ?? "?"
     return [
@@ -86,8 +75,6 @@ func emit(_ value: Any) {
 
 let arguments = CommandLine.arguments
 switch arguments.count > 1 ? arguments[1] : "list" {
-case "probe":
-    probe()
 case "list":
     emit(devices().map(describe))
 case "default-input":
@@ -96,8 +83,8 @@ case "default-input":
     }
     var property = address(kAudioHardwarePropertyDefaultInputDevice)
     var value = chosen
-    let status = AudioObjectSetPropertyData(AudioObjectID(0), &property, 0, nil, UInt32(MemoryLayout<AudioObjectID>.size), &value)
-    guard status == noErr else { fail("setting the default input device failed (OSStatus \(status))") }
+    let status = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, UInt32(MemoryLayout<AudioObjectID>.size), &value)
+    guard status == noErr else { fail("setting the default input device failed (OSStatus \(status) \(code(status)))") }
     emit(["default_input": describe(chosen)])
 case "wait":
     guard arguments.count == 5, arguments[3] == "present" || arguments[3] == "absent", let limit = Double(arguments[4]) else {
