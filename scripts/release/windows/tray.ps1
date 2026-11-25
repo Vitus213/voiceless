@@ -73,9 +73,6 @@ public static RECT? IconRect(IntPtr tray, uint id) {
     function Say-Rect($Rect) {
         if ($null -eq $Rect) { 'none' } else { '({0},{1})-({2},{3})' -f $Rect.Left, $Rect.Top, $Rect.Right, $Rect.Bottom }
     }
-    function Say-ElementRect($Rect) {
-        if ($Rect.IsEmpty) { 'empty' } else { '({0},{1} {2}x{3})' -f [int]$Rect.Left, [int]$Rect.Top, [int]$Rect.Width, [int]$Rect.Height }
-    }
     function Save-Screenshot([string]$Name) {
         try {
             Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -179,14 +176,6 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
     function Find-Class($Root, [System.Windows.Automation.TreeScope]$Scope, [string]$Class) {
         $Root.FindFirst($Scope, (New-Condition $element::ClassNameProperty $Class))
     }
-    function Find-Buttons($Container) {
-        if ($Container) {
-            $Container.FindAll($descendants, (New-Condition $element::ControlTypeProperty ([System.Windows.Automation.ControlType]::Button)))
-        }
-    }
-    function Get-Names($Container) {
-        @(Find-Buttons $Container | ForEach-Object { if ($_.Current.Name) { $_.Current.Name } else { $_.Current.HelpText } }) -join ', '
-    }
     function Find-Menu([int[]]$Owners) {
         $root.FindAll($children, (New-Condition $element::ClassNameProperty '#32768')) |
             Where-Object { $_.Current.ProcessId -in $Owners } | Select-Object -First 1
@@ -241,16 +230,21 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
     if (!$area) { throw 'The Explorer taskbar has no notification area (TrayNotifyWnd)' }
     $trays = [VoicelessTest.Tray]::TrayWindows($ProcessId)
     if (!$trays.Count) { throw "The host has no notification-area window of its own (process $ProcessId), so it registered no icon" }
-    $chevron = $null
+    # The taskbar's leftmost button shows and hides the overflow that holds the hidden icons.
+    $chevron = $area.FindAll($children, (New-Condition $element::ClassNameProperty 'Button')) |
+        Sort-Object { $_.Current.BoundingRectangle.Left } | Select-Object -First 1
     $location = 'notification area'
     try {
         $shellIcon = Find-ShellIcon
-        Say "host tray window: $([VoicelessTest.Tray]::Describe($trays[0])); shell icon on the taskbar: $(if ($shellIcon) { Say-Rect $shellIcon.Rect } else { 'none' })"
-        if (!$shellIcon -or !(Test-Inside $shellIcon.Rect $taskbar.Current.BoundingRectangle)) {
-            # Hidden icons live in an overflow that only the taskbar's leftmost button shows.
-            $chevron = $area.FindAll($children, (New-Condition $element::ClassNameProperty 'Button')) |
-                Sort-Object { $_.Current.BoundingRectangle.Left } | Select-Object -First 1
-            if (!$chevron) { throw "The shell places no '$Tooltip' icon on the taskbar and the taskbar has no hidden-icons button; its buttons: $(Get-Names $area)" }
+        # While an icon is hidden, the shell reports the button that reveals it.
+        $behindChevron = $false
+        if ($chevron -and $shellIcon) {
+            $cover = $chevron.Current.BoundingRectangle
+            $behindChevron = $shellIcon.Rect.Left -lt ($cover.Left + $cover.Width) -and $cover.Left -lt $shellIcon.Rect.Right -and $shellIcon.Rect.Top -lt ($cover.Top + $cover.Height) -and $cover.Top -lt $shellIcon.Rect.Bottom
+        }
+        Say "host tray window: $([VoicelessTest.Tray]::Describe($trays[0])); shell icon: $(if ($shellIcon) { "id=$($shellIcon.Id) at $(Say-Rect $shellIcon.Rect)" } else { 'none' }); chevron: $(if ($chevron) { 'yes' } else { 'none' }); behind it: $behindChevron"
+        if (!$shellIcon -or $behindChevron) {
+            if (!$chevron) { throw "The shell has no '$Tooltip' icon and the taskbar has no hidden-icons button" }
             if (& $hidden) { Invoke-Click $chevron Left }
             $null = Wait-For { $flyout = & $overflow; $flyout -and !$flyout.Current.IsOffscreen } 'The hidden-icons button did not open the notification overflow'
             $location = 'notification overflow'
@@ -258,18 +252,20 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
                 $flyout = & $overflow
                 $found = Find-ShellIcon
                 if ($found -and $flyout -and !$flyout.Current.IsOffscreen -and (Test-Inside $found.Rect $flyout.Current.BoundingRectangle)) { $found }
-            } "The shell has no '$Tooltip' icon in the notification overflow; its buttons: $(Get-Names (& $overflow))"
+            } "The shell has no '$Tooltip' icon in the notification overflow"
+            $flyoutHandle = [IntPtr]((& $overflow).Current.NativeWindowHandle)
+            Say "overflow: $([VoicelessTest.Tray]::Describe($flyoutHandle))"
+            Save-Screenshot '2-overflow'
+            foreach ($window in [VoicelessTest.Tray]::Children($flyoutHandle)) {
+                Say "overflow child $([VoicelessTest.Tray]::Describe($window))"
+                Say-AccChildren $window 'overflow'
+            }
+            Read-Tree51 $flyoutHandle
         }
         $iconRect = $shellIcon.Rect
         $x = [int](($iconRect.Left + $iconRect.Right) / 2)
         $y = [int](($iconRect.Top + $iconRect.Bottom) / 2)
-        Say "shell icon id=$($shellIcon.Id) at $(Say-Rect $iconRect) in the $location; overflow=$(Say-ElementRect ((& $overflow).Current.BoundingRectangle))"
-        Save-Screenshot '2-icon'
-        foreach ($window in [VoicelessTest.Tray]::Children([IntPtr]((& $overflow).Current.NativeWindowHandle))) {
-            Say "overflow child $([VoicelessTest.Tray]::Describe($window))"
-            Say-AccChildren $window 'overflow'
-        }
-        Read-Tree51 ([IntPtr]((& $overflow).Current.NativeWindowHandle))
+        Say "shell icon id=$($shellIcon.Id) at $(Say-Rect $iconRect) in the $location"
         Click-At $x $y Right
         $menu = Wait-For { Find-Menu $ProcessId } "The '$Tooltip' icon did not open a menu owned by process $ProcessId"
         $menuHandle = [IntPtr]$menu.Current.NativeWindowHandle
