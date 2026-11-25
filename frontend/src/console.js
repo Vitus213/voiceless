@@ -704,7 +704,7 @@ function selectInput(obj, key, options, changed) {
  * Single-choice tiles. items: [{ value, icon, title, sub, tip }]. Returns
  * { el, set(value) }; onPick receives the picked value.
  * @template T
- * @param {{ value: T, icon: string, title: string, sub?: string, tip?: string }[]} items
+ * @param {{ value: T, icon: string, title: string, sub?: string, tip?: string, disabled?: boolean }[]} items
  * @param {T} value
  * @param {(value: T) => void} onPick
  * @param {{ small?: boolean, label?: string }} [options]
@@ -721,6 +721,7 @@ function tiles(items, value, onPick, { small = false, label } = {}) {
       {
         type: "button",
         class: `tile${small ? " sm" : ""}`,
+        disabled: item.disabled,
         "aria-label": item.title,
         "aria-description": item.sub || item.tip || null,
         onclick: (event) => {
@@ -2091,6 +2092,7 @@ function EnginePage() {
   const isLocalModel = (model) => model.kind === "gguf" || model.kind === "sherpa";
   /** Devices this build can run `model` on, as /api/models reports them. */
   const devicesOf = (model) => model.devices || [];
+  const modelDevices = (id, catalog = models) => catalog.find((model) => model.id === id)?.devices;
   /** Why this build cannot run `model` ("" when it can). */
   const unusableReason = (model) => (isLocalModel(model) && !devicesOf(model).length ? BUILD_LIMITS[model.kind] || t("当前构建不支持这个模型") : "");
   /** This build has no engine for GGUF models: the catalog lists them and none can run. */
@@ -2123,12 +2125,38 @@ function EnginePage() {
     { value: "local", icon: "brain", title: t("本地"), sub: "SenseVoice" },
   ];
 
+  function devicePicker(local) {
+    const devices = modelDevices(local.model);
+    const choices = [];
+    for (const item of providerItems) {
+      if (item.value === null || devices?.includes(item.value)) choices.push(item);
+      else if (item.value === local.provider) {
+        const reason = devices ? t("不可用") : t("未知");
+        choices.push({ ...item, disabled: true, sub: reason, tip: reason });
+      }
+    }
+    return tiles(choices, local.provider, (value) => { local.provider = value; changed(); }, { small: true, label: t("设备") }).el;
+  }
+
+  /** Only an explicit model switch can replace an incompatible device with the model default. */
+  function keepCompatibleDevice(local) {
+    const devices = modelDevices(local.model);
+    if (local.provider && devices && !devices.includes(local.provider)) local.provider = null;
+  }
+
   /** (Re)build the whole page from `draft`: after load, discard, save, a picked model and a changed installation. */
   function build() {
     const a = draft.asr;
     const l = draft.local;
     const d = draft.doubao;
     const c = draft.cloud;
+    const deviceControl = h("div", {}, devicePicker(l));
+    const modelControl = selectInput(l, "model", localModelOptions(), () => {
+      keepCompatibleDevice(l);
+      deviceControl.replaceChildren(devicePicker(l));
+      renderModels();
+      changed();
+    });
 
     const resourceList = h("datalist", { id: "doubaoResources" }, DOUBAO_RESOURCES.map(([value, label]) => h("option", { value, label })));
     const resourceInput = textInput(d, "resource_id", changed, { mono: true });
@@ -2179,8 +2207,8 @@ function EnginePage() {
         h(
           "div",
           { class: "grid span" },
-          row(t("模型"), selectInput(l, "model", localModelOptions(), changed), { cls: "s2" }),
-          row(t("设备"), tiles(providerItems, l.provider, (value) => { l.provider = value; changed(); }, { small: true, label: t("设备") }).el, { cls: "s4" }),
+          row(t("模型"), modelControl, { cls: "s2" }),
+          row(t("设备"), deviceControl, { cls: "s4" }),
           row(t("线程"), numberInput(l, "num_threads", changed, { min: 1, max: 32 }), { cls: "s2", tip: t("仅 Sherpa 模型使用") }),
           row(t("出字间隔"), fader(l, "partial_interval_ms", changed, { min: 100, max: 5000, step: 50, format: (v) => `${v} ms`, label: t("出字间隔") }), { cls: "s2", tip: t("出字后的目标刷新间隔，耗时较长时会自动放缓") }),
           row(t("单句上限"), fader(l, "max_segment_seconds", changed, { min: 1, max: 60, step: 1, format: (v) => t(`${v} 秒`), label: t("单句上限") }), { cls: "s2", tip: t("GGUF 最多 60 秒，Sherpa 最多 25 秒") }),
@@ -2442,13 +2470,15 @@ function EnginePage() {
     }
   }
 
-  /** Take a freshly read /api/models. The page is rebuilt only when what is installed changed (the [local] select lists it), so a poll leaves focused controls alone. */
+  /** Rebuild settings only when the model select or the selected model's device choices change. */
   function showModels(next) {
     const installed = (list) => list.filter((model) => model.installed).map((model) => model.id);
     const changedInstallation = !same(installed(models), installed(next));
+    const modelId = draft?.local.model;
+    const changedDevices = modelId && !same(modelDevices(modelId), modelDevices(modelId, next));
     models = next;
     modelsError = null;
-    if (changedInstallation && draft) build();
+    if (draft && (changedInstallation || changedDevices)) build();
     else {
       renderFilters();
       renderModels();
@@ -2502,6 +2532,7 @@ function EnginePage() {
   function pickModel(model) {
     if (draft.local.model === model.id) return;
     draft.local.model = model.id;
+    keepCompatibleDevice(draft.local);
     build();
     changed();
     toast(t(`已选为本地模型 ${model.id}，保存并应用后生效`));

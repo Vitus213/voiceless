@@ -452,7 +452,8 @@ select.inpt {
 .tile svg { width: 22px; height: 22px; color: var(--ink-2); }
 .tile b { font: 600 14px/1.3 var(--sans); }
 .tile span { font-size: 12.5px; color: var(--ink-3); }
-.tile:hover { border-color: var(--line); background: var(--panel-3); }
+.tile:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
+.tile:disabled { cursor: not-allowed; }
 .tile[aria-pressed="true"], .tile[aria-checked="true"] { border-color: var(--sig); background: color-mix(in srgb, var(--sig) 9%, var(--panel-2)); }
 .tile[aria-pressed="true"] svg, .tile[aria-checked="true"] svg { color: var(--sig); }
 .tile.sm { min-height: 0; flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; }
