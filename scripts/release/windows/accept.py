@@ -34,7 +34,7 @@ def main():
                 if kind == 'desktop':
                     executable = destination / 'voiceless-desktop.exe'
                     subprocess.run(['pwsh', '-NoProfile', '-File', Path(__file__).with_name('window.ps1'), executable],
-                                   env=env, check=True, timeout=120)
+                                   env=env, check=True, timeout=180)
             finally:
                 subprocess.run([destination / 'unins000.exe', *flags], check=True, timeout=90)
 

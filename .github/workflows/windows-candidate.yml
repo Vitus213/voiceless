@@ -26,6 +26,7 @@ jobs:
       - name: Select the release Rust toolchain
         run: rustup default 1.99.1-x86_64-pc-windows-msvc
       - name: Build core and desktop setup executables
+        id: build
         run: python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
       - name: Exercise shortcut, hotplug, focus and integrity contracts
         run: cargo test --locked --manifest-path rust/Cargo.toml --lib desktop::native::contract::windows
@@ -35,7 +36,8 @@ jobs:
         run: cargo test --locked --manifest-path rust/Cargo.toml --test model_manager
       - name: Install both packages, transcribe offline and reopen the desktop window
         run: python -B scripts/release/windows/accept.py "$env:RUNNER_TEMP/candidates"
-      - name: Keep the two tested installers
+      - name: Keep the two MSVC installer candidates
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: voiceless-windows-x64-candidates
@@ -43,6 +45,8 @@ jobs:
           if-no-files-found: error
           compression-level: 0
       - name: Check guarded Unicode delivery in two native editor windows
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked --manifest-path rust/Cargo.toml --lib desktop::native::interactive::windows_delivers_unicode_to_the_original_editor_only -- --ignored --exact
       - name: Check WASAPI device discovery and refusal of a missing meeting input
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked --manifest-path rust/Cargo.toml --test capture_workflows native_meeting::catalog_resolves_host_ids_and_rejects_a_missing_selection_before_recording -- --exact
