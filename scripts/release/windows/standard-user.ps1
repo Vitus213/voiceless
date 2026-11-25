@@ -147,7 +147,7 @@ $script:installed = $null
 function Start-Worker([string]$Step) {
     $script:run++
     $arguments = @('-NoProfile', '-NonInteractive', '-STA', '-File', $worker, '-Step', $Step, '-Root', $Root, '-Candidates', $Candidates,
-        '-Speech', $Speech, '-Evidence', $Evidence, '-Run', "$script:run") |
+        '-Speech', $Speech, '-Evidence', $Evidence, '-Attempt', "$script:run") |
         ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
     Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -Credential $credential -WorkingDirectory $Root -WindowStyle Hidden -LoadUserProfile -PassThru -ArgumentList $arguments
 }

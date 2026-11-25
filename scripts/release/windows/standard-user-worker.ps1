@@ -3,7 +3,7 @@
 # that user's credentials, so nothing here runs with administrative rights; the
 # account is one the harness created on the disposable guest.
 #
-#   pwsh -STA -File standard-user-worker.ps1 -Step <step> -Root <dir> -Candidates <dir> -Speech <wav> -Evidence <dir> -Run <n>
+#   pwsh -STA -File standard-user-worker.ps1 -Step <step> -Root <dir> -Candidates <dir> -Speech <wav> -Evidence <dir> -Attempt <n>
 #
 # Each step appends to worker-<step>-<n>.log in the evidence directory and leaves
 # its findings in result-<step>-<n>.json there.
@@ -13,7 +13,7 @@ param(
     [Parameter(Mandatory)][string]$Candidates,
     [Parameter(Mandatory)][string]$Speech,
     [Parameter(Mandatory)][string]$Evidence,
-    [string]$Run = '1'
+    [string]$Attempt = '1'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -Path (Join-Path $PSScriptRoot 'ProcessToken.cs')
@@ -86,7 +86,7 @@ Enter-OwnEnvironment
 $env:XDG_CONFIG_HOME = Join-Path $Root 'config'
 $env:XDG_DATA_HOME = Join-Path $Root 'data'
 $env:XDG_CACHE_HOME = Join-Path $Root 'cache'
-$log = Join-Path $Evidence "worker-$Step-$Run.log"
+$log = Join-Path $Evidence "worker-$Step-$Attempt.log"
 
 function Note([string]$Text) {
     Add-Content -LiteralPath $log -Value ('{0:HH:mm:ss.fff} {1}' -f [DateTime]::Now, $Text) -Encoding utf8
@@ -100,7 +100,7 @@ function Save-Json([string]$Path, $Value) {
 }
 
 function Save-Result($Value) {
-    Save-Json (Join-Path $Evidence "result-$Step-$Run.json") $Value
+    Save-Json (Join-Path $Evidence "result-$Step-$Attempt.json") $Value
 }
 
 function Get-InstalledCli {
@@ -282,25 +282,25 @@ public static extern bool ShowWindow(IntPtr window, int command);
                 }
                 if ([VoicelessWorker.Editor]::GetForegroundWindow() -ne $form.Handle -or !$field.Focused) { throw 'The editor did not obtain the foreground focus' }
                 Note 'The editor has the focus; the installed CLI transcribes and delivers'
-                $run = Invoke-Console $cli @('transcribe', $Speech, '--backend', 'local', '--inject', '--json') {
+                $outcome = Invoke-Console $cli @('transcribe', $Speech, '--backend', 'local', '--inject', '--json') {
                     [System.Windows.Forms.Application]::DoEvents()
                 }
                 [System.Windows.Forms.Application]::DoEvents()
-                $events = Read-Events $run.stdout
+                $events = Read-Events $outcome.stdout
                 $transcript = $events | Where-Object type -eq 'transcript' | Select-Object -First 1
                 $delivery = $events | Where-Object type -eq 'finalized' | Select-Object -First 1
                 $after = try { [System.Windows.Forms.Clipboard]::GetText() } catch { "error: $($_.Exception.Message)" }
                 Save-Result ([ordered]@{
                     integrity = [ProcessToken]::Integrity([uint32]$PID)
-                    exit = $run.exit
+                    exit = $outcome.exit
                     transcript = $transcript.text
                     injection = $delivery.injection
-                    stderr = $run.stderr
+                    stderr = $outcome.stderr
                     editor = $field.Text
                     clipboardBefore = $before
                     clipboardAfter = $after
                 })
-                Note "CLI exit $($run.exit); the editor holds $($field.Text.Length) characters"
+                Note "CLI exit $($outcome.exit); the editor holds $($field.Text.Length) characters"
                 # Stay open until the harness has recorded the screen.
                 while (!(Test-Path -LiteralPath (Join-Path $Evidence 'editor.release')) -and $timer.Elapsed.TotalSeconds -lt 150) {
                     [System.Windows.Forms.Application]::DoEvents()
@@ -309,22 +309,22 @@ public static extern bool ShowWindow(IntPtr window, int command);
             } finally { $form.Dispose() }
         }
         'inject' {
-            $run = Invoke-Console (Get-InstalledCli) @('transcribe', $Speech, '--backend', 'local', '--inject', '--json')
-            $events = Read-Events $run.stdout
+            $outcome = Invoke-Console (Get-InstalledCli) @('transcribe', $Speech, '--backend', 'local', '--inject', '--json')
+            $events = Read-Events $outcome.stdout
             $transcript = $events | Where-Object type -eq 'transcript' | Select-Object -First 1
             $delivery = $events | Where-Object type -eq 'finalized' | Select-Object -First 1
             Save-Result ([ordered]@{
                 integrity = [ProcessToken]::Integrity([uint32]$PID)
-                exit = $run.exit
+                exit = $outcome.exit
                 transcript = $transcript.text
                 injection = $delivery.injection
-                stderr = $run.stderr
+                stderr = $outcome.stderr
             })
-            Note "CLI exit $($run.exit)"
+            Note "CLI exit $($outcome.exit)"
         }
         'desktop-start' {
             $executable = Get-InstalledDesktop
-            $process = Start-Process -FilePath $executable -PassThru -RedirectStandardError (Join-Path $Evidence "desktop-stderr-$Run.log")
+            $process = Start-Process -FilePath $executable -PassThru -RedirectStandardError (Join-Path $Evidence "desktop-stderr-$Attempt.log")
             Save-Result ([ordered]@{
                 process = $process.Id
                 executable = $executable
@@ -340,14 +340,14 @@ public static extern bool ShowWindow(IntPtr window, int command);
             Note "Second launcher exited with $($process.ExitCode)"
         }
         'ctl' {
-            $run = Invoke-Console (Get-InstalledCli) @('ctl', 'status')
+            $outcome = Invoke-Console (Get-InstalledCli) @('ctl', 'status')
             $descriptor = Join-Path $env:XDG_DATA_HOME 'voiceless\console-endpoint.json'
             $runtime = $null
             if (Test-Path -LiteralPath $descriptor) { $runtime = (Get-Content -Raw -LiteralPath $descriptor | ConvertFrom-Json).runtime_id }
             $lookup = Get-Lookup
             Save-Result ([ordered]@{
-                exit = $run.exit
-                status = ($run.stdout + $run.stderr).Trim()
+                exit = $outcome.exit
+                status = ($outcome.stdout + $outcome.stderr).Trim()
                 runtimeId = $runtime
                 resolved = $lookup.resolved
                 where = $lookup.where
@@ -355,7 +355,7 @@ public static extern bool ShowWindow(IntPtr window, int command);
                 pathKind = $lookup.pathKind
                 version = $lookup.version
             })
-            Note "voiceless ctl status exited with $($run.exit)"
+            Note "voiceless ctl status exited with $($outcome.exit)"
         }
         'uninstall' {
             $flags = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
