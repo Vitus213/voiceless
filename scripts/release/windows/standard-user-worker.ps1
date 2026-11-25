@@ -26,8 +26,15 @@ function Note([string]$Text) {
     Add-Content -LiteralPath $log -Value ('{0:HH:mm:ss.fff} {1}' -f [DateTime]::Now, $Text) -Encoding utf8
 }
 
+# Written whole and then renamed: the harness polls for these files and must
+# never read a half-written one.
+function Save-Json([string]$Path, $Value) {
+    $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$Path.partial" -Encoding utf8
+    Move-Item -LiteralPath "$Path.partial" -Destination $Path -Force
+}
+
 function Save-Result($Value) {
-    $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Evidence "result-$Step-$Run.json") -Encoding utf8
+    Save-Json (Join-Path $Evidence "result-$Step-$Run.json") $Value
 }
 
 function Get-InstalledCli {
@@ -198,8 +205,7 @@ public static extern bool ShowWindow(IntPtr window, int command);
                     [System.Windows.Forms.Clipboard]::SetText($sentinel)
                     $before = if ([System.Windows.Forms.Clipboard]::GetText() -ceq $sentinel) { 'sentinel' } else { 'unreadable' }
                 } catch { $before = "error: $($_.Exception.Message)" }
-                [ordered]@{ form = $form.Handle.ToInt64() } | ConvertTo-Json |
-                    Set-Content -LiteralPath (Join-Path $Evidence 'editor.ready') -Encoding utf8
+                Save-Json (Join-Path $Evidence 'editor.ready') ([ordered]@{ form = $form.Handle.ToInt64() })
                 # The harness clicks the field, as a person does before dictating into it.
                 while ($timer.Elapsed.TotalSeconds -lt 45 -and ([VoicelessWorker.Editor]::GetForegroundWindow() -ne $form.Handle -or !$field.Focused)) {
                     [System.Windows.Forms.Application]::DoEvents()

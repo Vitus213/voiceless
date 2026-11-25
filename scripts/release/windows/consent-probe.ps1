@@ -19,6 +19,11 @@ function Read-Key([string]$Path) {
     [ordered]@{ key = $Path; exit = $LASTEXITCODE; lines = $lines }
 }
 
+function Save-Record {
+    $Value = $record | ConvertTo-Json -Depth 8
+    Set-Content -LiteralPath (Join-Path $Output 'consent-inventory.json') -Value $Value -Encoding utf8
+}
+
 function Save-Screen([string]$Name) {
     try {
         $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -74,7 +79,7 @@ function Open-Settings([string]$Page) {
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     if (!$window) { return $null }
-    try { $window.SetFocus() } catch { Write-Output "Settings could not be brought forward: $($_.Exception.Message)" }
+    try { $window.SetFocus() } catch { Write-Host "Settings could not be brought forward: $($_.Exception.Message)" }
     Start-Sleep -Seconds 5
     $window
 }
@@ -99,6 +104,7 @@ $record = [ordered]@{
     )
     pages = @()
 }
+Save-Record
 
 # The Privacy hub lists the pages this system offers a user; the microphone page
 # is the one the installed CLI's refusal message tells a user to open.
@@ -121,7 +127,7 @@ foreach ($page in 'ms-settings:privacy', 'ms-settings:privacy-microphone') {
     }
     Save-Screen "settings-$name"
 }
-$record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Output 'consent-inventory.json') -Encoding utf8
+Save-Record
 
 foreach ($key in @($record.store) + @($record.policies)) {
     Write-Output "$($key.key) (reg exit $($key.exit))"

@@ -113,16 +113,18 @@ if ((Get-Service -Name seclogon).Status -eq 'Stopped') {
 $report.guest.secondaryLogon = [string](Get-Service -Name seclogon).Status
 
 # The standard account and its access to the working directory that holds the
-# model, the audio and the scripts.
+# model, the audio and the scripts, to the evidence directory it writes to, and
+# to the two installers.
 $name = 'VoicelessStandard'
 $bytes = [byte[]]::new(18)
 [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-$plain = [Convert]::ToBase64String($bytes) + 'aA1!'
-& net.exe user $name $plain /add /fullname:"Voiceless standard-user acceptance" /comment:"Standard user the acceptance creates on this disposable guest" /passwordchg:no /expires:no | Out-Null
+# Hexadecimal only: `net user` would read a leading slash as one of its own options.
+$plain = [Convert]::ToHexString($bytes) + 'a1!A'
+$created = & net.exe user $name $plain /add
 if ($LASTEXITCODE -ne 0) {
     # An account left by an earlier attempt keeps its name; its password is set again.
-    & net.exe user $name $plain | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "The standard user could not be created ($LASTEXITCODE)" }
+    $created = & net.exe user $name $plain
+    if ($LASTEXITCODE -ne 0) { throw "The standard user could not be created ($LASTEXITCODE): $created" }
 }
 $credential = [pscredential]::new("$env:COMPUTERNAME\$name", (ConvertTo-SecureString $plain -AsPlainText -Force))
 $report.standardAccount = $name
@@ -131,6 +133,9 @@ New-Item -Type Directory -Path $workerDirectory -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'standard-user-worker.ps1'), (Join-Path $PSScriptRoot 'ProcessToken.cs') -Destination $workerDirectory
 & icacls.exe $Root /grant "${name}:(OI)(CI)M" /T /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "The standard user could not be given access to the working directory ($LASTEXITCODE)" }
+& icacls.exe $Evidence /grant "${name}:(OI)(CI)M" /Q | Out-Null
+& icacls.exe $Candidates /grant "${name}:(OI)(CI)RX" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "The standard user could not be given access to the evidence directory and the installers ($LASTEXITCODE)" }
 $worker = Join-Path $workerDirectory 'standard-user-worker.ps1'
 
 $script:run = 0
