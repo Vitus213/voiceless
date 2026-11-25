@@ -30,8 +30,7 @@ jobs:
         run: python3 -m pip install sounddevice==0.5.3
       - name: Set up two test-owned loopback endpoints on the disposable guest
         run: bash scripts/release/macos/lines.sh
-      # A commit whose message carries "[no build]" spends none: the exercise then
-      # runs against the images of the last published candidate, run 45694716105.
+      # Fixture-only changes can rerun against the same DMGs built with the consent fix.
       - uses: actions/setup-node@v6
         if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
         with:
@@ -42,13 +41,13 @@ jobs:
         run: |
           rustup default 1.99.1-aarch64-apple-darwin
           python3 -B scripts/release/macos/package.py "$RUNNER_TEMP/candidates"
-      - name: Or take the images of the published candidate
+      - name: Reuse the images built with the consent fix
         if: ${{ contains(github.event.head_commit.message, '[no build]') }}
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 45694716105
-          name: voiceless-macos-arm64-textedit-candidates
+          run-id: 45703453204
+          name: voiceless-macos-arm64-unanswered-candidates
           path: ${{ runner.temp }}/candidates
       - name: Keep the two images
         if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[no build]') }}

@@ -422,7 +422,7 @@ def main():
         env = private_roots(root / 'user', root / 'home')
         config = Path(env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
         config.parent.mkdir(parents=True)
-        config.write_text('batch_backend="local"\n[console]\nport=0\n[audio]\npause_media=false\ncues=false\n')
+        config.write_text('[asr]\nbatch_backend="local"\n[console]\nport=0\n[audio]\npause_media=false\ncues=false\n')
         config.chmod(0o600)
         evidence.note('installed version', subprocess.check_output([root / 'home/.local/bin/voiceless', '--version'],
                                                                    env=env, text=True, timeout=60).strip())
