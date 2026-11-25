@@ -62,6 +62,8 @@ the day the work landed on `main`; commit hashes refer to
   correctly installed SenseVoice and bilingual Paraformer models load again.
 - Windows reports the selected audio source when WASAPI denies recording
   permission, including when the privacy settings allowed the initial check.
+- `record` and `transcribe` honor `--config`. Recording uses the microphone
+  from the same configuration that selects the transcription backend.
 - Windows checkouts with CRLF line endings can build the web console. The
   build still rejects a settings index that differs from the source.
 - A second `voiceless daemon` on the same session bus is refused instead of

@@ -42,7 +42,8 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 ## Linux 运行要求
 
 - **原生 ABI。** 在明确的 glibc 基线构建，产物需检查 ELF 解释器、`DT_NEEDED`、glibc 和 C++ 运行库版本、CPU 指令集与传递依赖。现有 flake 向包装脚本注入 Nix 路径，Cargo 依赖钉住 Sherpa-ONNX `1.13.3` 的 `shared` 特性，构建脚本链接 `sherpa-onnx-c-api` 和 `onnxruntime`。随包携带许可允许且实际需要的共享库，用 `$ORIGIN` 相对查找并验证传递依赖。`DT_RUNPATH` 只适用于该 ELF 的直接依赖，子库需有各自的搜索路径或由系统提供。具体发行版、最低 glibc 和 CPU 基线待实机验证。musl、CUDA、带 AVX2 的 GGUF 和 NixOS 上不借助 Nix 的启动能力都需分别验证后才对外承诺。 [Cargo 依赖与特性](../rust/Cargo.toml#L12-L48) · [现有 flake 包装](../flake.nix#L149-L220) · [Sherpa 构建脚本](https://docs.rs/crate/sherpa-onnx-sys/1.13.3/source/build.rs) · [Linux 动态加载器](https://man7.org/linux/man-pages/man8/ld.so.8.html)
-- **桌面和音频。** 录音要有可用的 PipeWire 会话、麦克风和 `pw-record`。声音提示可用 `pw-play`。文字注入依赖 Wayland 与所选方法所需的 `wtype`、`wl-copy` 或 Fcitx5 bridge，且受 compositor 支持范围制约。常驻 `daemon` 和 `ctl` 需要用户 D-Bus 会话，Portal GlobalShortcuts 取决于对应后端，配置 evdev 快捷键时还需读取目标输入设备的权限。systemd 用户单元是常驻方式之一。 [项目运行要求](../README.zh.md#适配) · [doctor 探测逻辑](../rust/src/doctor.rs#L36-L53) · [声音提示](../rust/src/media.rs#L1-L10) · [daemon 激活来源](../rust/src/daemon.rs#L1-L14) · [Fcitx5 bridge](../rust/src/fcitx5.rs#L1-L23)
+- **桌面和音频。** 录音需要可用的 PipeWire 会话与麦克风。较新的 `pw-record` 可直接采集，Ubuntu 22.04 自带的旧版则使用 GStreamer。该系统需安装 `pipewire-bin`、`gstreamer1.0-tools` 和 `gstreamer1.0-pipewire`。运行 `voiceless doctor` 可查看本机选用的录音工具。声音提示使用 `pw-play`。文字注入依赖 Wayland 与所选方法所需的 `wtype`、`wl-copy` 或 Fcitx5 bridge，并受合成器能力制约。常驻 `daemon` 和 `ctl` 需要用户 D-Bus 会话，Portal GlobalShortcuts 取决于对应后端，配置 evdev 快捷键时还需读取目标输入设备的权限。systemd 用户单元是常驻方式之一。 [项目运行要求](../README.zh.md#适配) · [录音工具诊断](../rust/src/doctor.rs) · [声音提示](../rust/src/media.rs#L1-L10) · [daemon 激活来源](../rust/src/daemon.rs#L1-L14) · [Fcitx5 bridge](../rust/src/fcitx5.rs#L1-L23)
+- **文件解码与 X11。** 文件队列内置未压缩 WAV 解码。导入 FLAC、MP3 或视频需要在 `PATH` 中安装 `ffmpeg`。原生 X11 上，`xdotool` 提供活动窗口标识，`x11-utils` 包里的 `xprop` 读取窗口类别。 [媒体解码](../rust/src/transcription_jobs/media.rs) · [目标窗口识别](../rust/src/desktop/focus.rs)
 - **识别后端。** 云端识别需要网络、TLS 信任链和服务凭据。本地识别沿用 `voiceless model install` 和现有模型目录。Bun 和 Nix 的 Vulkan 构建使用相同的 `[local]` 配置。使用 CUDA 的配置迁移到 Vulkan 构建时，改用 `provider = "auto"` 或 `"vulkan"`。 [项目模型与 CPU 变体](../README.zh.md#模型目录)
 - **Bun 安装入口。** 需要 Bun 来安装和更新全局包，`voiceless` 命令由原生可执行文件提供。Bun 官方 Linux glibc 版本要求 glibc 2.17 或更高，x64 要求 SSE4.2，并另发 musl 可执行文件。Voiceless 的 ABI 以自身 ELF 和共享库的实测为准。 [Bun 安装与运行要求](https://bun.com/docs/installation#musl-binaries)
 
@@ -96,3 +97,79 @@ Bun 可以从 GitHub 上的 URL 安装一个符合 npm 包结构的 `.tgz`。这
 - **发布候选包。** 在 amd64 Ubuntu 22.04 容器用 Rust 1.99.1 构建两版真实程序 `0.1.0` 与 `0.1.1`。候选包验证了 ELF 依赖、独立安装、真实 SenseVoice 转写和 Bun 全局命令。在断网容器内拒绝错误摘要，之后独立安装 `0.1.0`，用已校验的本地归档升到 `0.1.1`，再运行 `voiceless update --rollback` 离线回到 `0.1.0`。测试历史文件保持原样。独立的 Bun 1.4.5 全局目录从本地注册表安装 `0.1.0`，由 `voiceless update` 请求精确版本并验证 `0.1.1`。GitHub 尚无正式发布资产，在线获取新版的完整路径仍需在发布后验证。ARM64 候选包由单独的原生 CI runner 构建和验收，本机未运行该架构。
 - **Bun 与 Nix 的 Vulkan 回放。** Ubuntu 22.04 x86-64 候选包通过 ELF ABI、独立安装、Bun 1.4.5 全局安装和 SenseVoice 转写。程序从包内解析 `libvulkan.so.1`。Nix Vulkan 构建通过 169 项沙箱测试。NixOS 上，两种安装产物用同一段 4.69 秒音频回放 Qwen3-ASR 1.7B Q8_0，均默认选中 RTX 4060。屏蔽驱动后均自动回退到 CPU，四次最终文本一致，显式 `vulkan` 均退出 1。PCM SHA-256 为 `5f155fce4d2671593880265f63a0e5604f07ed350ea7a10824846b59740cd54c`。
 - **现有服务。** 桌面命令来自用户 Nix profile，`systemctl --user show voiceless.service` 确认 `ExecStart` 直接指向 `/nix/store/…/bin/voiceless`。测试期间服务保持运行。服务迁移的验证范围限于当前入口和源码，实际切换须在匹配的发行变体准备好后执行。
+
+### `0.2.0` 私有候选的 Linux 回放（2026-11-25）
+
+Apollo 上的 x86-64 独立包从公开 `0.1.3` 升级后，保留了旧配置、历史和录音。练习模式结束时，测试终端仍为空。在 quick 模式下，同一终端实际收到与定稿逐字节一致的 45 字节 UTF-8 文本，历史重转写也保存了一个版本。该轮使用 ELF `c56e81f2…`，归档 SHA-256 为 `093e55b15656930c176cdca9004165eacc19a6f4c5468eceb4cc33192fc0fead`。
+
+| 设备与模型 | `0.1.3` 停录到定稿 | 候选停录到定稿 | 采样方式 |
+| --- | ---: | ---: | --- |
+| Apollo RTX 3070，Vulkan，Qwen3-ASR 1.7B Q8_0 | 3.28 秒 | 3.18 秒 | 每版两次，取平均 |
+| Apollo Ryzen 5 5600，屏蔽显卡驱动，同一 GGUF | 25.55 秒 | 29.32 秒 | 每版两次，取平均 |
+| M1 上的 ARM64 Linux，CPU，SenseVoice INT8 | 0.17 秒 | 0.20 秒 | 每版一次 |
+
+三组都回放同一段 16 kHz PCM。Apollo 候选在 `auto` 下分别报告 `Vulkan0` 和 CPU 回退原因 `no_gpu_device`。M1 使用 Jammy 构建的 ARM64 归档，候选报告 `sherpa-onnx` 和 `cpu`。本地延迟测量使用新启动的 CLI，ARM64 未测上屏。云端 quick 的准确度和延迟单独统计。 [逐次本地测量、设备及包摘要](../scripts/asr_benchmark/reports/linux-local-replay-2026-11-25.json) · [两版云端门禁](../scripts/asr_benchmark/README.md#2026-11-25-云端实时验收)
+
+上述 Apollo 归档曾把 DashScope 流式 WAV 的占位长度判作损坏。修复后的演练归档（SHA-256 `5ed2822f136de3382143c5834a591ac1a51e5dfb7fff951ac8121890fecbb359`）可导入这类文件，实际截断的 WAV 仍报 `corrupt`。 [同一 TTS 编码器产生的文件头样本](https://github.com/ArcReel/ArcReel/issues/3994)
+
+修正后的 Jammy x86-64 独立包（SHA-256 `b0b3a1adee9baf582a8b26844a4c4d3ef62af2e21fc8cb9b6b8064dd9b591982`）在 RTX 4060 上从公开 `0.1.3` 升级，自动选中 Vulkan。练习向目标终端写入 0 字节，正式听写写入「你好，世界！欢迎使用语音输入。」，45 字节与定稿一致。历史保留原音和重转写版本，同一 WAV 在文件队列中完成，生成一个分段。回滚并恢复快照后，`0.1.3` 读出的配置与旧历史均与升级前一致。
+
+### Linux 会议双轨、断线恢复与权限
+
+使用上述 SHA-256 为 `b0b3a1ad…` 的独立包，在两个仅有回环网络的 Ubuntu x86-64 环境中，启动发行版自带的 PipeWire 和 WirePlumber。向所选麦克风的回环播放短句，向所选输出播放 440 Hz 音，再向第三个设备播放另一段录音。两条保存的 WAV 都匹配各自的信号，停止后分别生成了本地转写任务。
+
+| 环境 | 实际录音程序 | 麦克风 WAV 与短句的归一化相关系数 | 系统 WAV 的主频 | 移除麦克风 / 输出后报告中断 |
+| --- | --- | ---: | ---: | --- |
+| Ubuntu 22.04，PipeWire 0.3.48 | GStreamer `pipewiresrc` | 0.999 | 440 Hz | 1.06 秒 / 0.98 秒 |
+| Ubuntu 24.04，PipeWire 1.0.5 | `pw-record` | 0.989 | 440 Hz | 0.11 秒 / 0.16 秒 |
+
+移除设备后，两套环境都报告了消失的来源名称。选择恢复后，两轨已写入的语音和测试音仍可播放。开始前已拔掉的来源返回 HTTP 409，会议列表为空。
+
+在 Ubuntu 22.04 上，单独用 PipeWire 的访问规则拒绝 `gst-launch-1.0`，同时保留控制台枚举麦克风的权限。服务端记录了被拒进程的 PID。会议报告 `permission-denied` 及所选来源，收到 0 字节，退出了录音进程，并提供授权、改选来源或丢弃的操作。默认麦克风和指定麦克风的 CLI 听写也都报告了权限错误和恢复方法。两套环境另测了整个音频套接字不可访问的情况，API 均返回 HTTP 503，恢复访问后可重新列出来源。
+
+公开的 ARM64 `.deb` 在 Ubuntu 22.04 客户机中也走通了五个会议场景。麦克风短句的相关系数为 0.989，系统轨主频为 440 Hz，两轨各生成一个转写任务。移除麦克风或输出后，分别在 0.60 秒和 0.48 秒内报告中断，恢复后两条 WAV 均保有各自的信号。已移除的来源在开始前返回 409。让 PipeWire 单独拒绝录音进程时，会议标记麦克风 `permission-denied`，提交 0 字节，录音子进程全部退出。 [受测 ARM64 安装包](https://github.com/Vitus213/voiceless/actions/runs/45668781010/artifacts/15050695493)
+
+首次设置在 Apollo 上测了两支实体麦克风。Lian II 恢复可用后练习窗口仍有焦点，扬声器播放短句与麦克风采样的相关系数为 0.018。使用修正后的 x86-64 包，从失效来源切到 DJI Wireless Mic Rx 后，RTX 3070 上的 Vulkan 识别完成，练习期间隔离终端保持 0 字节。这次定稿没有命中约定短句，真人试说与对应的显式上屏仍待核对。
+
+### `0.2.0` 桌面候选包验收
+
+公开的 `v0.1.3` 提供 Linux 包。以下 `0.2.0` 产物用于候选验收，版本号只在打包用的源码副本中调整。
+
+| 平台 | 安装 CLI | 安装桌面应用 |
+| --- | --- | --- |
+| Windows x64 | 运行 `core` 安装包。它将 `voiceless` 加入当前用户的 `PATH`，新开终端即可使用。 | 安装 Microsoft Edge WebView2 Evergreen Runtime，再运行 `desktop` 安装包。从开始菜单打开 Voiceless。 |
+| Apple Silicon | 从 CLI DMG 运行 `install-cli.command`，命令入口为 `~/.local/bin/voiceless`。 | 将桌面 DMG 中的 `Voiceless.app` 拖入「应用程序」。随包的 ONNX Runtime 要求 macOS 15.5 或更新版本。 |
+
+这两种平台的候选包均已使用随包的 Sherpa-ONNX 运行库在 CPU 上完成离线转写。 [Windows 安装定义](../desktop/packaging/windows.iss) · [macOS 安装脚本](../scripts/release/macos/install-cli.command)
+
+Linux x86-64 的独立包、npm 平台包和桌面 `.deb` 携带同一份 CLI，ELF SHA-256 为 `958e9360e09c68c99853272f0a6eb2c9b1837e8881ac6ce91c6295065b177055`。Ubuntu 22.04.5 构建机运行 `native.py` 和 `validate.py`，独立安装与 Bun 安装均完成 SenseVoice 离线转写，内嵌控制台可访问。 [构建脚本](../scripts/release/native.py) · [产物验收脚本](../scripts/release/validate.py)
+
+在只读的官方 Ubuntu 22.04 根文件系统中，核心包在断网且没有 Node、Bun、GTK 或 WebKit 的条件下，将测试 WAV 转成「你好我是小助手」。`voiceless web --no-open` 提供的 HTML、JS 和 CSS 均返回 HTTP 200。`/api/totals` 带控制台令牌时返回 200，省略令牌时返回 403。
+
+桌面 `.deb`（SHA-256 `c29e7b33a79df492fcf3d3ddee6f50481df1b322ccb2d290045137fb54851769`）经 `apt` 安装后，在 Ubuntu 22.04.5 的 Sway 和 24.04.5 的 Niri 上均完成试说。两套桌面回放「你好我是小助手」时，练习结束后输入框为空，点击“测试上屏”才得到完整短句。由托盘重开窗口时，宿主和守护进程的 PID 均保持一致。
+
+Sway 另测了两个独立窗口。在窗口 A 开始听写、停录前切到窗口 B 时，两边的输入框均未被写入，定稿保留在控制台。Sway 1.7 的无头测试会话保留了一个虚拟键盘，移除最后一个键盘时，单独运行 `wtype` 也出现过漏掉首字的情况。
+
+公开候选工作流也在 Ubuntu 22.04 的 x86-64 和 ARM64 原生 runner 上分别运行了 `native.py` 和 `validate.py`。两种架构的独立包及 Bun 安装均用 SenseVoice 完成离线转写，桌面包各自打开了一个连接本机守护进程的窗口。该次运行共生成两个独立包、三个 npm 包和两个桌面包。 [原生构建与验收](https://github.com/Vitus213/voiceless/actions/runs/45668781010) · [同一次运行的七份产物](https://github.com/Vitus213/voiceless/actions/runs/45668781010/artifacts/15050695493)
+
+从这批产物下载的 x86-64 `.deb`（SHA-256 `49c24799498c233f800f4adc9e5f8061e5270e902083d5323267beb50c76efa5`）在 Sway 和 Niri 上都通过了练习、显式上屏、托盘重开和运行库检查。ARM64 独立包（`b54ca7cc88428c39cc2f7408e448235765b0ae6572ce20e0eb4a8ca645c78e0c`）另在 Apple M1 上的 ARM64 Linux 客户机中离线运行。SenseVoice 从回放音频识别出英文测试句。未安装 Node、Bun、GTK 或 WebKit 的环境可访问内嵌页面、脚本和样式，历史统计接口带令牌返回 200，省略令牌返回 403。
+
+同批 ARM64 `.deb`（SHA-256 `830bc32355d145b1ed2f047c5d9b71768c0ef35910aa834c1d5155ba63cd2ccc`）经 `apt` 安装到 QEMU 的 Ubuntu 22.04.5 客户机，在 Sway 1.7 上用 PipeWire 回放「你好我是小助手」。练习时两个 GTK 输入框均为空，显式上屏和随后两次听写均只写入选定窗口。验收等 GTK 消费全部按键后再比较文字。托盘重开了原窗口，宿主和守护进程的 PID 保持一致，两个安装后的可执行文件均通过运行库检查。
+
+公开的 x86-64 独立包（SHA-256 `1015c2648484828c838f4d41df33e2253156c71bde6bd1e7a67bfaab7cc8e01d`）在断网的原版 Jammy 根文件系统中完成了 CPU 转写与 Web 验收。另在 RTX 4060 的隔离桌面从 `0.1.3` 升级，`auto` 选中 Vulkan。练习留下 0 字节，正式听写与目标终端中的 45 字节逐字相同。历史重转写和文件队列均完成，恢复快照后旧版重新读出了原配置和历史。 [包摘要、终端收到的字节、历史版本和恢复结果](../scripts/asr_benchmark/reports/linux-upgrade-replay-2026-11-25.json)
+
+在 Apple M1 的 macOS 26.5 上，从 CLI DMG 安装到独立用户目录，并从桌面 DMG 复制出 `Voiceless.app`。两个安装都完成了本地文件转写。再次启动桌面入口时，已运行的宿主显示原窗口。包内二进制通过 ad-hoc 签名校验。随包 ONNX Runtime 要求 macOS 15.5，实际运行的系统为 26.5。锁屏会话能枚举三个麦克风，未获得麦克风、输入监控和辅助功能授权。菜单栏、实体试说、向前台应用上屏和 Developer ID 签名公证仍待验收。 [macOS 打包入口](../scripts/release/macos/package.py)
+
+这轮 M1 验收的 CLI DMG SHA-256 为 `3f5463c4a126225aef56fc4aedfe609ad80aacabf631de1917496ca55f8be400`，桌面 DMG 为 `f3e55faa0e9497f18bf89de78b11954c138e3b37c4bf00cb19b53bccf31709de`。安装后的 CLI 守护进程用 SenseVoice INT8 将 3.884 秒的流式 WAV 转为「你好世界欢迎使用语音输入」，并成功导出 TXT 与 JSON。这个 WAV 的文件头使用占位长度，保留前半段完整采样仍是有效的 1.941 秒音频。另一个文件的头部已损坏，导入失败后再次提交原件仍然成功。
+
+历史并发修复后的 M1 CLI DMG（SHA-256 `3f7fec0e72ea3e2529c671b73286d191aeb9baf8cf806f8482eab0313b0fbb92`）和桌面 DMG（`fbd2a8eabc63d1a98e56194863b5e0034c64294f08213f23881f19fdd8fb567b`）均在安装后复测。对每份包，8 个进程同时打开全新历史库的 60 轮、32 个进程的 10 轮全部成功。写锁持有 0.8 秒时，读取等待释放后成功。持锁 7.5 秒时，读取在约 5 秒后退出，释放锁后历史仍可读。历史库损坏时控制台退出，未打印可访问地址。两包使用 ad-hoc 签名，Gatekeeper 返回退出码 3。
+
+Windows x64 的两份 Inno Setup 安装包在 Linux 上用 MinGW 构建，并在 Wine 11.0 中安装和卸载。安装后的 CLI 校验了带子目录的 SenseVoice 模型，离线队列把上面的流式 WAV 转写为「你好世界欢迎使用语音输入」。双轨分别采到 330 Hz 麦克风和 880 Hz 系统音频，拒绝麦克风时返回 409。核心安装包 SHA-256 为 `6111e7453edd7cc530fde145d4a076a84387483664e05dc42bbf9b62b2a2be40`，桌面安装包为 `14d6fa46375137418b029975e5b82e89251a986ffa9ae0bd108fce074997bb29`。
+
+Windows Server 2022 上使用 MSVC 构建并安装了 CLI 和桌面候选包。两个包各自的 `voiceless.exe` 都用 SenseVoice 在 CPU 上转写了测试音频。桌面入口打开 WebView2 窗口，关闭后再次运行启动器能显示原窗口，守护进程的 `runtime_id` 保持一致。26 项原生测试通过，包括系统快捷键冲突、失效 WASAPI 来源，以及在两个编辑窗口间切换焦点时，只向原目标写入 Unicode。 [原生运行日志](https://github.com/Vitus213/voiceless/actions/runs/45667788670) · [两份 MSVC 安装包](https://github.com/Vitus213/voiceless/actions/runs/45667788670/artifacts/15049053581)
+
+随后在 Windows Server 2022 上，以安装后的 `voiceless.exe transcribe --inject` 转写音频。程序通过剪贴板交付，原生编辑框收到的 83 个字符与 CLI 返回的完整定稿逐字一致。 [安装到上屏的运行记录](https://github.com/Vitus213/voiceless/actions/runs/45669746118) · [对应安装包](https://github.com/Vitus213/voiceless/actions/runs/45669746118/artifacts/15049464041)
+
+在同版 Windows Server 上安装 CLI 后，用两对虚拟音频端点分别输入 330 Hz 和 880 Hz。Voiceless 将两种频率分别录到麦克风和系统回环的 WAV，各生成一个转写任务。通过 Windows 声音控制接口禁用所选麦克风后，会议报告该来源失效；选择恢复后，两条 WAV 都保有原来的信号。重新启用端点后，`voiceless record` 从指定的非默认麦克风识别出参考英文句中的连续词组。关闭桌面应用麦克风权限返回 HTTP 409，会议数保持不变。 [安装后双轨、断开恢复与听写](https://github.com/Vitus213/voiceless/actions/runs/45682688445)
+
+另一个 MSVC 候选测了 WASAPI 本身拒绝打开设备的情况。即使注册表预检查放行，安装包也将 `0x80070005` 报为所选麦克风的权限错误，返回 HTTP 409，会议列表为空。 [权限修复运行记录](https://github.com/Vitus213/voiceless/actions/runs/45681535946) · [对应安装包](https://github.com/Vitus213/voiceless/actions/runs/45681535946/artifacts/15053794610)
