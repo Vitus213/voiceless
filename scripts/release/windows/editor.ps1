@@ -53,7 +53,7 @@ if ($Serve) {
     $null = $field.Focus()
     $field.Select($field.TextLength, $field.TextLength)
     Write-State 'shown'
-    $watch = [System.Diagnostics.Stopwatch]::new()
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($script:running) {
         [System.Windows.Forms.Application]::DoEvents()
         if ($watch.ElapsedMilliseconds -ge 40) {
