@@ -142,11 +142,6 @@ def run(cli, root, env, speech):
         mic, output = node('microphones', 1), node('system_outputs', 2)
         instance = {'runtime_id':api('meetings')['runtime_id']}
         selection = dict(instance, microphone=mic, system=output)
-        with denied_microphone():
-            refusal = api('meetings/start', selection, 409)['error']
-            assert 'denied' in refusal.lower() and mic.lower() in refusal.lower(), refusal
-            assert not api('meetings')['meetings']
-            print('Privacy refusal, HTTP 409, zero meetings:', refusal)
         feed, selected = line_index(1), line_index(2)
         rate1, rate2 = (int(sd.query_devices(i)['default_samplerate']) for i in (feed, selected))
         def capture():
@@ -168,9 +163,11 @@ def run(cli, root, env, speech):
                 return view if view['state'] == 'completed' and all(t['job_id'] for t in view['tracks']) else None
             validate_tracks(wait_for(finalized, 'WAV files and background jobs'))
             interrupted_path = capture()
-        device_id = os.environ['VOICELESS_VAC_DEVICE']
-        subprocess.run(['pnputil', '/disable-device', device_id], check=True, timeout=30)
+        endpoint_switch = ['pwsh', '-NoProfile', '-NonInteractive', '-File', Path(__file__).with_name('endpoint.ps1')]
+        subprocess.run([*endpoint_switch, 'disable'], check=True, timeout=30)
         try:
+            wait_for(lambda: all(d['node'] != mic for d in api('meetings/sources')['microphones']),
+                     'the selected capture endpoint to disappear')
             def interrupted():
                 view = api(interrupted_path)
                 return view if view['state'] == 'interrupted' else None
@@ -185,25 +182,38 @@ def run(cli, root, env, speech):
                 return view if view['state'] == 'recovered' and all(t['job_id'] for t in view['tracks']) else None
             validate_tracks(wait_for(recovered, 'interrupted tracks to recover'))
         finally:
-            subprocess.run(['pnputil', '/enable-device', device_id], check=True, timeout=30)
+            subprocess.run([*endpoint_switch, 'enable'], check=True, timeout=30)
         wait_for(lambda: any(d['node'] == mic for d in api('meetings/sources')['microphones']), 'reconnected microphone')
         with wave.open(str(speech), 'rb') as wav:
             assert wav.getsampwidth() == 2 and wav.getnchannels() == 1
             pcm, _ = audioop.ratecv(wav.readframes(wav.getnframes()), 2, 1, wav.getframerate(), rate1, None)
         clip_seconds = len(pcm) / (2*rate1)
-        signal = audioop.tostereo(pcm, 2, 1, 1) + bytes(4*rate1)
+        signal = bytes(4*rate1) + audioop.tostereo(pcm, 2, 1, 1) + bytes(4*rate1*6)
+        # A separate explicit config must win even when the default config cannot parse.
+        record_env = dict(env, XDG_CONFIG_HOME=str(root / 'cli-config'))
+        default_config = Path(record_env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
+        default_config.parent.mkdir(parents=True)
+        default_config.write_text('[asr]\nbatch_backend="unused-default"\n', encoding='utf-8')
         capture_config = root / 'record.toml'
         capture_config.write_text(config.read_text() + f'source={json.dumps(mic)}\n', encoding='utf-8')
-        baseline = json.loads(subprocess.check_output([cli,'--config',capture_config,'transcribe',speech,'--backend','local','--json'], env=env, timeout=75))['text']
+        command = [cli, '--config', capture_config]
+        baseline = json.loads(subprocess.check_output([*command, 'transcribe', speech, '--backend', 'local', '--json'], env=record_env, timeout=75))['text']
         # Re-open PortAudio after the Windows endpoint was removed and registered again.
-        sd._terminate(); sd._initialize()
+        sd._terminate()
+        sd._initialize()
         with render(line_index(1), rate1, signal):
-            command = [cli,'--config',capture_config,'record','--seconds',str(clip_seconds + 4),'--backend','local','--no-inject','--json']
-            recorded = json.loads(subprocess.check_output(command, env=env, timeout=90))['text']
+            record = [*command, 'record', '--seconds', str(clip_seconds + 3), '--backend', 'local', '--no-inject', '--json']
+            recorded = json.loads(subprocess.check_output(record, env=record_env, timeout=90))['text']
         words = re.findall(r'[a-z]+', baseline.lower())
         spoken = ' '.join(re.findall(r'[a-z]+', recorded.lower()))
         assert len(words) >= 5 and any(' '.join(words[i:i+5]) in spoken for i in range(len(words)-4)), (baseline, recorded)
         print('Installed microphone recording recovered the reference speech:', recorded)
+        previous_ids = [m['id'] for m in api('meetings')['meetings']]
+        with denied_microphone():
+            refusal = api('meetings/start', selection, 409)['error']
+            assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
+            assert [m['id'] for m in api('meetings')['meetings']] == previous_ids
+            print('Privacy refusal, HTTP 409, zero new meetings:', refusal)
 
 
 def main():
@@ -217,8 +227,10 @@ def main():
         env = dict(os.environ, XDG_CONFIG_HOME=str(root/'config'), XDG_DATA_HOME=str(root/'data'), XDG_CACHE_HOME=str(root/'cache'))
         speech = recognition_fixture(root, env)
         dest = root / 'core'
-        flags = ['/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART']
-        subprocess.run([args.candidates/'voiceless-core-v0.2.0-windows-x64.exe', *flags, f'/DIR={dest}'], check=True, timeout=120)
+        flags = ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART']
+        version = json.loads((Path(__file__).resolve().parents[3] / 'desktop/tauri.conf.json').read_text())['version']
+        installer = args.candidates / f'voiceless-core-v{version}-windows-x64.exe'
+        subprocess.run([installer, *flags, f'/DIR={dest}'], check=True, timeout=120)
         try:
             run(dest/'voiceless.exe', root, env, speech)
         finally:

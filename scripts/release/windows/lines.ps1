@@ -1,7 +1,7 @@
 # Install a signed, two-line evaluation driver on this disposable guest. The driver
 # and its catalogs are fetched from the vendor and are never included in a candidate.
 $ErrorActionPreference = 'Stop'
-if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:GITHUB_REF_NAME -notin @('ci/windows-candidate/meeting-0.2.0', 'ci/windows-candidate/practice-0.2.0')) { throw 'Requires the hosted Windows meeting test guest' }
+if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Requires a disposable GitHub-hosted Windows guest' }
 $work = Join-Path $env:RUNNER_TEMP 'vac-evaluation'
 New-Item -Type Directory -Path $work | Out-Null
 $archive = Join-Path $work 'vac471.zip'
@@ -41,4 +41,15 @@ foreach ($port in @(@{name='MIC'; label='Line 1'; prefix='{0.0.1.'}, @{name='OUT
     $ids = @($lines | Where-Object FriendlyName -eq "$($port.label) (Virtual Audio Cable)" | ForEach-Object { ($_.InstanceId -split '\\')[-1] } | Where-Object { $_.StartsWith($port.prefix) })
     if ($ids.Count -ne 1) { throw "Missing unique $($port.name) endpoint for $($port.label)" }
     "VOICELESS_VAC_$($port.name)=wasapi:$($ids[0])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+}
+# Both endpoints are virtual, and this guest is discarded after the test.
+$permission = 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'
+foreach ($hive in @([Microsoft.Win32.Registry]::LocalMachine, [Microsoft.Win32.Registry]::CurrentUser)) {
+    foreach ($path in @($permission, "$permission\NonPackaged")) {
+        $key = $hive.CreateSubKey($path)
+        try {
+            Write-Output "Fixture consent $($key.Name): $($key.GetValue('Value', '<inherited>')) -> Allow"
+            $key.SetValue('Value', 'Allow', [Microsoft.Win32.RegistryValueKind]::String)
+        } finally { $key.Dispose() }
+    }
 }
