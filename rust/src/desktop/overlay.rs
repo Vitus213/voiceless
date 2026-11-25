@@ -79,7 +79,7 @@ pub(crate) async fn overlay_support() -> OverlaySupport {
 /// The recording status is available in the desktop window.
 #[cfg(not(target_os = "linux"))]
 pub(crate) async fn overlay_support() -> OverlaySupport {
-    unavailable("The Wayland recording overlay is unavailable on this desktop.".to_owned())
+    unavailable("On this platform, the Voiceless window shows the recording status.".to_owned())
 }
 
 fn unavailable(reason: String) -> OverlaySupport {

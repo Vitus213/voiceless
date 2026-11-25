@@ -3309,7 +3309,7 @@ function HotkeyPage() {
           row(t("Ctrl 模式"), selectInput(k, "ctrl_mode", ctrlOptions, changed)),
           row(t("按住阈值"), fader(k, "hold_threshold_ms", changed, { min: 100, max: 1000, step: 10, format: (v) => `${v} ms`, label: t("按住阈值") })),
           listenerSlot),
-        h("details", { class: "fold" }, h("summary", {}, icon("terminal"), t("合成器绑定")),
+        h("details", { class: "fold" }, h("summary", {}, icon("terminal"), t("快捷键的 CLI 命令")),
           h("div", { class: "fold-body" }, ...[
             [t("按住说话"), "voiceless ctl start / voiceless ctl stop"],
             [t("点按切换"), "voiceless ctl toggle"], [t("取消录音"), "voiceless ctl cancel"],

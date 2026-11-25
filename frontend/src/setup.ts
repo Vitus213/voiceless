@@ -274,7 +274,7 @@ export function SetupPage() {
         armInstance = instance;
         armTimer = window.setTimeout(() => {
           clearArm();
-          actionError = t('没有收到快捷键，请检查键盘权限或合成器绑定');
+          actionError = t('等待快捷键超时。请检查“快捷键与上屏”中的绑定，或点“开始试说”。');
           render();
         }, response.armed_for_ms);
       }
