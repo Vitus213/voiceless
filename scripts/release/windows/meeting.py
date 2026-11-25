@@ -142,7 +142,7 @@ def queued_meeting(api, path, state):
     return wait_for(linked, f'{path} to be {state} with both transcription jobs')
 
 
-def run(cli, root, env, speech):
+def run(cli, root, env, speech, expect_wasapi_denial=False):
     config = Path(env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
     config.write_text(config.read_text() + 'batch_backend="local"\n[console]\nport=0\n[audio]\npause_media=false\ncues=false\n', encoding='utf-8')
     with installed_daemon(cli, config, env, root / 'daemon.log') as (daemon, api):
@@ -156,6 +156,17 @@ def run(cli, root, env, speech):
         mic, output = node('microphones', 'VOICELESS_VAC_MIC'), node('system_outputs', 'VOICELESS_VAC_OUTPUT')
         instance = {'runtime_id':api('meetings')['runtime_id']}
         selection = dict(instance, microphone=mic, system=output)
+        if expect_wasapi_denial:
+            listing = api('meetings')
+            directory = Path(listing['data_location'])
+            assert not listing['meetings'] and not any(directory.rglob('*'))
+            for attempt in range(1, 3):
+                refusal = api('meetings/start', selection, 409)['error']
+                assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
+                assert '0x80070005' in refusal, refusal
+                assert not api('meetings')['meetings'] and not any(directory.rglob('*'))
+                print(f'WASAPI refusal {attempt}: HTTP 409, no meeting or track on disk: {refusal}')
+            return
         feed, selected = line_index(1), line_index(2)
         rate1, rate2 = (int(sd.query_devices(i)['default_samplerate']) for i in (feed, selected))
         def capture():
@@ -245,6 +256,7 @@ def run(cli, root, env, speech):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('candidates', type=Path)
+    parser.add_argument('--expect-wasapi-denial', action='store_true')
     args = parser.parse_args()
     if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or not os.environ.get('VOICELESS_VAC_DEVICE'):
         parser.error('requires the hosted evaluation device')
@@ -258,7 +270,7 @@ def main():
         installer = args.candidates / f'voiceless-core-v{version}-windows-x64.exe'
         subprocess.run([installer, *flags, f'/DIR={dest}'], check=True, timeout=120)
         try:
-            run(dest/'voiceless.exe', root, env, speech)
+            run(dest/'voiceless.exe', root, env, speech, args.expect_wasapi_denial)
         finally:
             subprocess.run([dest/'unins000.exe', *flags], check=True, timeout=90)
 
