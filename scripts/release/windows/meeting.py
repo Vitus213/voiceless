@@ -163,7 +163,10 @@ def run(cli, root, env, speech, expect_wasapi_denial=False):
             for attempt in range(1, 3):
                 refusal = api('meetings/start', selection, 409)['error']
                 assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
-                assert '0x80070005' in refusal, refusal
+                # Windows can remember the first WASAPI refusal in its privacy settings.
+                backend_refusal = '0x80070005' in refusal
+                remembered_refusal = 'Microphone access is denied. In Windows Settings' in refusal
+                assert backend_refusal or (attempt == 2 and remembered_refusal), refusal
                 assert not api('meetings')['meetings'] and not any(directory.rglob('*'))
                 print(f'WASAPI refusal {attempt}: HTTP 409, no meeting or track on disk: {refusal}')
             return
