@@ -8,7 +8,7 @@ import sys
 import time
 import urllib.request
 
-from acceptance import MICROPHONE, Output, private_roots, refuse, screenshot, stereo, wait_for
+from acceptance import MICROPHONE, Output, open_editor, private_roots, refuse, saved_text, screenshot, stereo, wait_for
 
 
 class Window:
@@ -26,17 +26,6 @@ class Window:
 
     def press(self, *names, timeout=40):
         self.control('press', 'AXButton', *names, timeout=timeout)
-
-
-def open_editor(document):
-    subprocess.run(['open', '-a', 'TextEdit', str(document)], check=True, timeout=10)
-
-
-def saved_text(document):
-    subprocess.run(['osascript', '-e', 'tell application "System Events" to tell application process "TextEdit"',
-                    '-e', 'if not frontmost then error "Test document is not in front"',
-                    '-e', 'keystroke "s" using command down', '-e', 'end tell'], check=True, timeout=12)
-    return document.read_text(encoding='utf-8-sig')
 
 
 def run(root, evidence):

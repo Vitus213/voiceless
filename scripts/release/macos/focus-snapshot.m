@@ -2,7 +2,8 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import "editor.h"
 
-// Inspect only the foreground TextEdit document on this disposable guest.
+// Inspect only the foreground TextEdit document on this disposable guest: the
+// title of its focused window, the role of its focused input and that input's text.
 static id readAX(AXUIElementRef element, CFStringRef name, NSMutableDictionary *log, NSString *label) {
     if (!element) return nil;
     CFTypeRef value = NULL;
@@ -36,6 +37,8 @@ static NSDictionary *snapshot(void) {
         }
         if (field && CFGetTypeID((__bridge CFTypeRef)field) == AXUIElementGetTypeID()) {
             log[@"app_role"] = readAX((__bridge AXUIElementRef)field, kAXRoleAttribute, log, @"app_role_error");
+            id text = readAX((__bridge AXUIElementRef)field, kAXValueAttribute, log, @"value_error");
+            if ([text isKindOfClass:NSString.class]) log[@"text"] = text;
         }
         CFRelease(process);
         CFRelease(system);

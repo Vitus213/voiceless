@@ -452,6 +452,39 @@ def screenshot(path):
     subprocess.run(['screencapture', '-x', '-t', 'png', str(path)], capture_output=True, timeout=30)
 
 
+def open_editor(document):
+    """Open `document` in TextEdit: its window comes to the front with its text area focused."""
+    subprocess.run(['open', '-a', 'TextEdit', str(document)], check=True, timeout=10)
+
+
+def save(document):
+    """⌘S in the frontmost TextEdit, through System Events; what the document's file holds afterwards."""
+    subprocess.run(['osascript', '-e', 'tell application "System Events" to tell application process "TextEdit"',
+                    '-e', 'if not frontmost then error "Test document is not in front"',
+                    '-e', 'keystroke "s" using command down', '-e', 'end tell'], check=True, timeout=12)
+    return document.read_bytes()
+
+
+def saved_text(document):
+    """The text of the frontmost TextEdit `document` once it is saved."""
+    return save(document).decode('utf-8-sig')
+
+
+def focus(snapshot):
+    """What `focus-snapshot` (focus-snapshot.m with Voiceless's bridge) reports of the frontmost TextEdit
+    document: the title of its focused window and the role and text of its focused input; little else
+    while TextEdit is not in front."""
+    return json.loads(subprocess.check_output([str(snapshot)], timeout=15))['main']
+
+
+def focused(snapshot, document, timeout=25):
+    """The focus report once TextEdit's `document` is the focused window and its text area the focused input."""
+    def ready():
+        report = focus(snapshot)
+        return report if document.stem in report.get('title', '') and report.get('app_role') == 'AXTextArea' else None
+    return wait_for(ready, f'TextEdit to focus {document.name}', timeout)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--candidates', type=Path, required=True)
