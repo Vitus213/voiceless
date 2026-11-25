@@ -241,7 +241,7 @@ try {
                 shortcut = $shortcut
                 shortcutPresent = Test-Path -LiteralPath $shortcut
                 shortcutTarget = $target
-                uninstallEntries = Get-UninstallEntries
+                uninstallEntries = @(Get-UninstallEntries)
                 doctor = Invoke-Console $cli @('doctor')
             })
         }
@@ -383,7 +383,7 @@ public static extern bool ShowWindow(IntPtr window, int command);
                 shortcut = Test-Path -LiteralPath (Get-InstalledShortcut)
                 cliDirectory = Test-Path -LiteralPath (Split-Path (Get-InstalledCli))
                 desktopDirectory = Test-Path -LiteralPath (Split-Path (Get-InstalledDesktop))
-                uninstallEntries = Get-UninstallEntries
+                uninstallEntries = @(Get-UninstallEntries)
             })
         }
     }

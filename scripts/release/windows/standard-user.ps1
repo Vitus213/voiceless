@@ -344,8 +344,6 @@ try {
     $runtime = Wait-Runtime "$script:run" $null
     Save-Screen 'desktop-window-standard-user'
     . (Join-Path $PSScriptRoot 'tray.ps1')
-    $firstAttempt = $null
-    $tray = $null
     # The session's one taskbar belongs to the runner account's Explorer. Whether
     # it takes the icon of a process of another account is what this step records.
     $firstAttempt = $null
