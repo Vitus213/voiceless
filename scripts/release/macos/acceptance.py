@@ -471,9 +471,7 @@ def saved_text(document):
 
 
 def focus(snapshot):
-    """What `focus-snapshot` (focus-snapshot.m with Voiceless's bridge) reports of the frontmost TextEdit
-    document: the title of its focused window and the role and text of its focused input; little else
-    while TextEdit is not in front."""
+    """Report the foreground TextEdit window title and the focused field's role."""
     return json.loads(subprocess.check_output([str(snapshot)], timeout=15))['main']
 
 

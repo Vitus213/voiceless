@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
-from acceptance import (MICROPHONE, TEXT, Evidence, Output, Refused, focus, focused, open_editor, private_roots,
+from acceptance import (MICROPHONE, TEXT, Evidence, Output, Refused, focused, open_editor, private_roots,
                         quiet, refuse, save, screenshot, stereo, wait_for)
 
 UNTOUCHED = 'Voiceless guard B keeps this line'
@@ -94,15 +94,14 @@ def delivered(console, snapshot, directory, document):
     outcome = console.post('inject/test', {'text': TEXT, 'delay_ms': 0})
     refuse(outcome['ok'], f'the installed desktop did not deliver to the focused document: {outcome}')
     clipboard = subprocess.check_output(['pbpaste'], timeout=15).decode()
-    refuse(clipboard == SENTINEL, f'the clipboard holds {clipboard!r} after the delivery, not the sentinel')
+    refuse(clipboard == SENTINEL, 'the clipboard sentinel was not restored after delivery')
     screenshot(directory / 'delivered.png')
 
     def saved():
         data = save(document)
         return data if data.decode('utf-8-sig', errors='replace') == TEXT else None
     data = wait_for(saved, f'{document.name} to hold the delivered text once saved', 15)
-    return {'injection': outcome['injection'], 'clipboard': 'the sentinel, put back', 'file_utf8_bytes': len(data),
-            'shown': focus(snapshot).get('text')}
+    return {'injection': outcome['injection'], 'clipboard': 'the sentinel, put back', 'file_utf8_bytes': len(data)}
 
 
 def session_at(console, identity, wanted, description, timeout):
@@ -120,12 +119,26 @@ def session_at(console, identity, wanted, description, timeout):
     return wait_for(ready, description, timeout)
 
 
-def opened(snapshot, document):
-    """A document brought to the front in TextEdit: what it shows, when TextEdit reports that, and what its
-    file holds once it is saved."""
+def opened(snapshot, document, *, close=False):
+    """Save the fixture document. On the final read, wait for TextEdit to close it and finish saving."""
     open_editor(document)
     report = focused(snapshot, document)
-    return {'file': save(document), 'text': report.get('text'), 'title': report.get('title')}
+    save(document)
+    if close:
+        script = '''on run argv
+            set wanted to item 1 of argv
+            tell application "System Events" to tell application process "TextEdit"
+                if not frontmost or name of front window does not contain wanted then error "Wrong test document"
+                keystroke "w" using command down
+                repeat 100 times
+                    if not (exists (windows whose name contains wanted)) then return
+                    delay 0.1
+                end repeat
+                error "The test document did not close"
+            end tell
+        end run'''
+        subprocess.run(['osascript', '-e', script, document.stem], check=True, timeout=15)
+    return {'file': document.read_bytes(), 'title': report['title']}
 
 
 def digest(documents):
@@ -171,15 +184,14 @@ def refused(console, snapshot, directory, first, second):
            and record['app_id'] == 'com.apple.TextEdit',
            f'the history row does not hold the kept text of a dictation started in TextEdit: {record}')
     clipboard = subprocess.check_output(['pbpaste'], timeout=15).decode()
-    refuse(clipboard == SENTINEL, f'the clipboard holds {clipboard!r} after the refused delivery, not the sentinel')
+    refuse(clipboard == SENTINEL, 'the clipboard sentinel changed during refused delivery')
     after = {}
     for document in (second, first):
-        after[document.name] = opened(snapshot, document)
-    changed = {name: {'before': before[name], 'after': after[name]} for name in after if after[name] != before[name]}
-    refuse(not changed, f'the saved documents changed: {changed}')
+        after[document.name] = opened(snapshot, document, close=True)
+    refuse(all(after[name]['file'] == state['file'] for name, state in before.items()),
+           f'the saved documents changed: {digest(before)} -> {digest(after)}')
     return {'injection': injection, 'kept': record['final_text'], 'focus_at_start': before[first.name]['title'],
-            'focus_at_stop': moved['title'], 'clipboard': 'the sentinel, untouched', 'documents': digest(after),
-            'shown': {name: state['text'] for name, state in after.items()}, 'session': console.get('status')['last_session']}
+            'focus_at_stop': moved['title'], 'clipboard': 'the sentinel, untouched', 'documents': digest(after)}
 
 
 def run(root, evidence):
