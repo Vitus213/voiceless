@@ -49,7 +49,9 @@ def verify(root, candidates, evidence):
             search = page.locator('#dialog input[type=search]')
             search.fill('wtype')
             expect(page.get_by_text(either('没有匹配的设置', 'No matching setting'))).to_be_visible()
-            page.keyboard.press('Escape')
+            dialog = page.get_by_role('dialog')
+            dialog.get_by_role('button', name=either('关闭', 'Close')).click()
+            expect(dialog).to_have_count(0)
             save = page.locator('.savebar').get_by_role('button', name=either('保存', 'Save'))
             for tile, preference in [(copy, 'copy'), (paste, 'clipboard')]:
                 tile.click()
