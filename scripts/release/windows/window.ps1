@@ -51,6 +51,12 @@ try {
     $original = Get-RuntimeId
     if (![VoicelessTest.Window]::RequestClose($window)) { throw 'Desktop did not accept WM_CLOSE' }
     $null = Wait-Window $false
+    . (Join-Path $PSScriptRoot 'tray.ps1')
+    Write-Output (Invoke-TrayItem -ProcessId $desktop.Id)
+    $reopened = Wait-Window $true
+    if ($reopened -ne $window -or (Get-RuntimeId) -ne $original) { throw 'Tray activation did not reopen the original window and runtime' }
+    if (![VoicelessTest.Window]::RequestClose($reopened)) { throw 'The reopened window did not accept WM_CLOSE' }
+    $null = Wait-Window $false
     $second = Start-Process -FilePath $Executable -PassThru
     if (!$second.WaitForExit(15000)) { throw 'Second launcher did not reuse the resident desktop' }
     $null = Wait-Window $true
