@@ -95,12 +95,12 @@ def delivered(console, snapshot, directory, document):
     refuse(outcome['ok'], f'the installed desktop did not deliver to the focused document: {outcome}')
     clipboard = subprocess.check_output(['pbpaste'], timeout=15).decode()
     refuse(clipboard == SENTINEL, 'the clipboard sentinel was not restored after delivery')
-    screenshot(directory / 'delivered.png')
 
     def saved():
-        data = save(document)
+        data = opened(snapshot, document)['file']
         return data if data.decode('utf-8-sig', errors='replace') == TEXT else None
     data = wait_for(saved, f'{document.name} to hold the delivered text once saved', 15)
+    screenshot(directory / 'delivered.png')
     return {'injection': outcome['injection'], 'clipboard': 'the sentinel, put back', 'file_utf8_bytes': len(data)}
 
 
