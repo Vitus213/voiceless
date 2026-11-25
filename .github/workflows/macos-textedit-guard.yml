@@ -1,0 +1,54 @@
+name: Installed macOS TextEdit delivery guard
+
+on:
+  push:
+    branches: ['ci/macos-candidate/installed-guard-0.2.0']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+  actions: read
+
+jobs:
+  guard:
+    name: Put the clipboard back after pasting into TextEdit, and refuse a dictation that stops in another document
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45694716105
+          name: voiceless-macos-arm64-textedit-candidates
+          path: ${{ runner.temp }}/candidates
+      - name: Install the audio signal generator
+        run: python3 -m pip install sounddevice==0.5.3
+      - name: Set up two test-owned loopback endpoints on the disposable guest
+        run: bash scripts/release/macos/lines.sh
+      - name: Install the desktop image and check its delivery in TextEdit
+        run: |
+          set -eu
+          root=$(mktemp -d "$RUNNER_TEMP/voiceless-guard.XXXXXXXX")
+          mkdir "$root/volume"
+          hdiutil attach -readonly -noautoopen -nobrowse -mountpoint "$root/volume" "$RUNNER_TEMP/candidates/voiceless-desktop-v0.2.0-macos-arm64.dmg"
+          ditto "$root/volume/Voiceless.app" "$root/Voiceless.app"
+          hdiutil detach "$root/volume"
+          xcrun clang -fobjc-arc -fblocks scripts/release/macos/focus-snapshot.m rust/src/desktop/macos/bridge.m \
+            scripts/release/macos/editor.c -framework AppKit -framework ApplicationServices -framework CoreAudio \
+            -framework AVFoundation -o "$root/focus-snapshot"
+          python3 -X utf8 -u -B scripts/release/macos/textedit-guard.py "$root" "$RUNNER_TEMP/evidence"
+      - name: Keep the evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-macos-installed-guard
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: warn
+          retention-days: 14
