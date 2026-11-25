@@ -47,6 +47,13 @@ public static class AcceptanceDesktop {
     return owner == processId;
   }
 
+  /// <summary>The process of the window in front, or zero.</summary>
+  public static uint ForegroundOwner() {
+    uint owner;
+    GetWindowThreadProcessId(GetForegroundWindow(), out owner);
+    return owner;
+  }
+
   public static bool RequestClose(IntPtr window) {
     // WM_CLOSE
     return PostMessageW(window, 0x0010, IntPtr.Zero, IntPtr.Zero);

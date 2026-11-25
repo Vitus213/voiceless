@@ -80,20 +80,26 @@ function Show-Editor([string]$Title, [string]$Text) {
     $script:editorForm, $script:editorField = $form, $field
 }
 
-# The focus of the harness's own window: waited for, then clicked for as a person would.
+# The focus of the harness's own window: waited for, then clicked for as a person
+# would, up to six times; what stands in front is reported when it never comes.
 function Wait-OwnFocus($Form, $Field, [string]$Failure) {
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     while ($timer.Elapsed.TotalSeconds -lt 5 -and ([AcceptanceDesktop]::GetForegroundWindow() -ne $Form.Handle -or !$Field.Focused)) {
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 15
     }
-    if ([AcceptanceDesktop]::GetForegroundWindow() -ne $Form.Handle) { [AcceptanceDesktop]::Click($Form.Handle) }
-    $timer.Restart()
-    while ($timer.Elapsed.TotalSeconds -lt 10 -and ([AcceptanceDesktop]::GetForegroundWindow() -ne $Form.Handle -or !$Field.Focused)) {
+    foreach ($attempt in 1..6) {
+        if ([AcceptanceDesktop]::GetForegroundWindow() -eq $Form.Handle -and $Field.Focused) { return }
+        [AcceptanceDesktop]::Click($Form.Handle)
         [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 15
+        Start-Sleep -Milliseconds 700
     }
-    if ([AcceptanceDesktop]::GetForegroundWindow() -ne $Form.Handle -or !$Field.Focused) { throw $Failure }
+    Save-Screen 'elevated-editor-unfocused'
+    $inFront = [int][AcceptanceDesktop]::ForegroundOwner()
+    $owner = if ($inFront) { (Get-Process -Id $inFront -ErrorAction SilentlyContinue).ProcessName } else { 'no window' }
+    $rect = [AcceptanceDesktop+RECT]::new()
+    $null = [AcceptanceDesktop]::GetWindowRect($Form.Handle, [ref]$rect)
+    throw "$Failure. In front: window $([AcceptanceDesktop]::GetForegroundWindow()) of '$owner' (process $inFront); the editor is window $($Form.Handle) at $($rect.Left),$($rect.Top) $($rect.Right - $rect.Left)x$($rect.Bottom - $rect.Top), field focused: $($Field.Focused)"
 }
 
 $session = (Get-Process -Id $PID).SessionId
