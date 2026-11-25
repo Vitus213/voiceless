@@ -143,6 +143,16 @@ def run(cli, root, env, speech):
         mic, output = node('microphones', 'VOICELESS_VAC_MIC'), node('system_outputs', 'VOICELESS_VAC_OUTPUT')
         instance = {'runtime_id':api('meetings')['runtime_id']}
         selection = dict(instance, microphone=mic, system=output)
+        if os.environ.get('VOICELESS_TEST_WASAPI_DENIAL') == '1':
+            with denied_microphone():
+                refusal = api('meetings/start', selection, 409)['error']
+                assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
+                print('Privacy refusal before opening WASAPI:', refusal)
+            refusal = api('meetings/start', selection, 409)['error']
+            assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
+            assert '0x80070005' in refusal and not api('meetings')['meetings'], refusal
+            print('WASAPI rejected capture; HTTP 409, selected microphone, HRESULT and zero meetings:', refusal)
+            return
         feed, selected = line_index(1), line_index(2)
         rate1, rate2 = (int(sd.query_devices(i)['default_samplerate']) for i in (feed, selected))
         def capture():
