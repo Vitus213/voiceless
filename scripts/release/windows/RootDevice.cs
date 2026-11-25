@@ -53,7 +53,8 @@ public static class RootDevice {
       Check(SetupDiRegisterDeviceInfo(set, ref data, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero), "SetupDiRegisterDeviceInfo");
       IntPtr buffer = Marshal.AllocHGlobal(1024);
       try {
-        if (CM_Get_Device_IDW(data.DevInst, buffer, 512, 0) != 0) return "<id unavailable>";
+        uint status = CM_Get_Device_IDW(data.DevInst, buffer, 512, 0);
+        if (status != 0) throw new InvalidOperationException("CM_Get_Device_IDW failed with configuration status " + status);
         return Marshal.PtrToStringUni(buffer);
       } finally {
         Marshal.FreeHGlobal(buffer);
