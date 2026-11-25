@@ -1,0 +1,41 @@
+{
+  "candidate_version": "0.2.0",
+  "macos_arm64": {
+    "environment": "GitHub-hosted macOS 15.8.2 on Apple Silicon",
+    "installer_run": "https://github.com/Vitus213/voiceless/actions/runs/45694716105",
+    "installer_artifact_id": 15060303768,
+    "installer_artifact_zip_sha256": "2a17d1e847d0dded12ada00d2373457aab886512013456e34450f7514c755942",
+    "acceptance_run": "https://github.com/Vitus213/voiceless/actions/runs/45699297883",
+    "evidence_artifact_id": 15063165403,
+    "evidence_artifact_zip_sha256": "421cbaae9f86da4166ef8777cbdd302d49109d467f52a0c8485ca4aaef4d0454",
+    "input": "Prerecorded JFK speech via BlackHole 2ch",
+    "engine": "sense-voice-int8 on cpu",
+    "target": "TextEdit",
+    "practice_preview": "AND SO MY FELLOW AMERICANS A NOT WHAT YOUR COUNTRY CAN DO FOR YOU AK WHAT YOU CAN DO FOR YOUR COUNTRY",
+    "saved_bytes_before_explicit_delivery": 0,
+    "saved_bytes_after_explicit_delivery": 101,
+    "saved_text_matches_preview": true,
+    "physical_microphone_tested": false,
+    "developer_id_notarized": false
+  },
+  "windows_x64": {
+    "environment": "GitHub-hosted Windows Server 2022, WebView2",
+    "installer_run": "https://github.com/Vitus213/voiceless/actions/runs/45688407733",
+    "installer_artifact_id": 15058087523,
+    "installer_artifact_zip_sha256": "8921983d89494fe7d1897aacbc7fcd6c7c16e1fd2d326dfeee64631854ade3a2",
+    "acceptance_run": "https://github.com/Vitus213/voiceless/actions/runs/45690514706",
+    "evidence_artifact_id": 15058916490,
+    "evidence_artifact_zip_sha256": "fb51925879fe82c3d2436277b5870ac309ee4a765357843a60378d960052fe3f",
+    "input": "Prerecorded English reference speech via Virtual Audio Cable",
+    "engine": "sense-voice-int8 on cpu",
+    "target": "Native editor A",
+    "practice_preview": "THE TRIBL CHIEF TIN CALLED FOR THE BOY AND PRESENTED HIM WITH FIFTY PIECES OF COOD",
+    "practice_injection": null,
+    "editor_after_explicit_delivery": "Voiceless practice editor A: THE TRIBL CHIEF TIN CALLED FOR THE BOY AND PRESENTED HIM WITH FIFTY PIECES OF COOD [edited in the preview]",
+    "dictation_reported_delivery": "unconfirmed",
+    "changed_target_reported_delivery": "not-delivered",
+    "both_editors_unchanged_after_focus_switch": true,
+    "physical_microphone_tested": false,
+    "physical_hotkey_tested": false
+  }
+}

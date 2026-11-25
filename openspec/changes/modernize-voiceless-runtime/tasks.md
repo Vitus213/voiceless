@@ -65,4 +65,4 @@
 
 ## 9. 整体升级和回归验收
 
-- [ ] 9.1 `[Requirement: 发布验证与数据迁移证据]` `[Scenario: 对现有 Linux 部署执行升级验收]` `[Requirement: 听写延迟和质量可独立复核]` `[Scenario: 本地和云端分别实测]` `[Scenario: 缺少实测环境]` 在已有 Linux 安装上从候选包完成「升级 → 试说 → 自动选设备 → 上屏 → 历史重转写 → 文件排队 → 数据回滚」，再在 macOS 和 Windows 完成各自安装与上屏路径。运行 `just check`、`bun run --cwd frontend test:e2e` 和 4.3 的实测门禁，存放逐平台证据。对已承诺的能力，未验证结果不计入通过。
+- [x] 9.1 `[Requirement: 发布验证与数据迁移证据]` `[Scenario: 对现有 Linux 部署执行升级验收]` `[Requirement: 听写延迟和质量可独立复核]` `[Scenario: 本地和云端分别实测]` `[Scenario: 缺少实测环境]` 在已有 Linux 安装上从候选包完成「升级 → 试说 → 自动选设备 → 上屏 → 历史重转写 → 文件排队 → 数据回滚」，再在 macOS 和 Windows 完成各自安装与上屏路径。运行 `just check`、`bun run --cwd frontend test:e2e` 和 4.3 的实测门禁，存放逐平台证据。对已承诺的能力，未验证结果不计入通过。 [Linux 升级与恢复](../../../scripts/asr_benchmark/reports/linux-upgrade-replay-2026-11-25.json) · [Mac 与 Windows 安装版上屏](../../../scripts/asr_benchmark/reports/native-desktop-delivery-2026-11-25.json) · [门禁与实测范围](../../../docs/non-nix-distribution.md#020-桌面候选包验收)
