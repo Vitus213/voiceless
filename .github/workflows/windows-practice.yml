@@ -38,7 +38,7 @@ jobs:
           PYTHONUTF8: '1'
         run: |
           python -m pip install sounddevice==0.5.3 playwright==1.65.2
-          python -u -B scripts/release/windows/typing.py "$env:RUNNER_TEMP/candidates"
+          python -u -B scripts/release/windows/typing-settings.py "$env:RUNNER_TEMP/candidates"
       - name: Keep the evidence of this guest
         if: always()
         uses: actions/upload-artifact@v4
