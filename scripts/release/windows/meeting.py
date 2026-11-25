@@ -104,10 +104,8 @@ def denied_microphone():
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
 
 
-def run(cli, root, env, speech):
-    config = Path(env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
-    config.write_text(config.read_text() + 'batch_backend="local"\n[console]\nport=0\n[audio]\npause_media=false\ncues=false\n', encoding='utf-8')
-    log = root / 'daemon.log'
+@contextmanager
+def installed_daemon(cli, config, env, log):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with log.open('wb') as stream, ExitStack() as cleanup:
         daemon = subprocess.Popen([cli, '--config', config, 'daemon', '--no-inject'], env=env, stdout=stream, stderr=stream)
@@ -133,6 +131,21 @@ def run(cli, root, env, speech):
                 data = json.load(reply)
                 assert reply.status == expected, (path, reply.status, data)
                 return data
+        yield daemon, api
+
+
+def queued_meeting(api, path, state):
+    def linked():
+        meeting = api(path)
+        if meeting['state'] == state and all(track['job_id'] for track in meeting['tracks']):
+            return meeting
+    return wait_for(linked, f'{path} to be {state} with both transcription jobs')
+
+
+def run(cli, root, env, speech):
+    config = Path(env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
+    config.write_text(config.read_text() + 'batch_backend="local"\n[console]\nport=0\n[audio]\npause_media=false\ncues=false\n', encoding='utf-8')
+    with installed_daemon(cli, config, env, root / 'daemon.log') as (daemon, api):
         devices = api('meetings/sources')
         print('Voiceless input and output labels:', {kind:[d['label'] for d in devices[kind]] for kind in ('microphones','system_outputs')})
         def node(kind, variable):
@@ -159,10 +172,7 @@ def run(cli, root, env, speech):
         with render(feed, rate1, sine(rate1, 330)), render(selected, rate2, sine(rate2, 880)):
             path = capture()
             api(path + '/stop', instance)
-            def finalized():
-                view = api(path)
-                return view if view['state'] == 'completed' and all(t['job_id'] for t in view['tracks']) else None
-            validate_tracks(wait_for(finalized, 'WAV files and background jobs'))
+            validate_tracks(queued_meeting(api, path, 'completed'))
             interrupted_path = capture()
         endpoint_switch = ['pwsh', '-NoProfile', '-NonInteractive', '-File', Path(__file__).with_name('endpoint.ps1')]
         subprocess.run([*endpoint_switch, 'disable'], check=True, timeout=30)
@@ -178,10 +188,7 @@ def run(cli, root, env, speech):
             missing = api('meetings/start', selection, 409)['error']
             assert mic.lower() in missing.lower() and 'unavailable' in missing.lower(), missing
             api(interrupted_path + '/recover', instance)
-            def recovered():
-                view = api(interrupted_path)
-                return view if view['state'] == 'recovered' and all(t['job_id'] for t in view['tracks']) else None
-            validate_tracks(wait_for(recovered, 'interrupted tracks to recover'))
+            validate_tracks(queued_meeting(api, interrupted_path, 'recovered'))
         finally:
             subprocess.run([*endpoint_switch, 'enable'], check=True, timeout=30)
         wait_for(lambda: any(d['node'] == mic for d in api('meetings/sources')['microphones']), 'reconnected microphone')
@@ -215,6 +222,24 @@ def run(cli, root, env, speech):
             assert refusal.startswith(f'the system denied access to the microphone "{mic}"'), refusal
             assert [m['id'] for m in api('meetings')['meetings']] == previous_ids
             print('Privacy refusal, HTTP 409, zero new meetings:', refusal)
+
+        with render(line_index(1), rate1, sine(rate1, 330)), render(line_index(2), rate2, sine(rate2, 880)):
+            crash_path = capture()
+            committed = {t['kind']: t['committed_bytes'] for t in api(crash_path)['tracks']}
+            daemon.kill()
+            daemon.wait(timeout=15)
+
+    with installed_daemon(cli, config, env, root / 'restart.log') as (_, api):
+        restarted = {'runtime_id': api('meetings')['runtime_id']}
+        assert restarted != instance, restarted
+        pending = api(crash_path)
+        assert pending['state'] == 'interrupted' and pending['failure']['kind'] == 'process-interrupted', pending
+        assert {'recover', 'discard'}.issubset(pending['actions']), pending
+        for track in pending['tracks']:
+            assert track['job_id'] is None and track['committed_bytes'] >= committed[track['kind']], track
+        api(crash_path + '/recover', restarted)
+        validate_tracks(queued_meeting(api, crash_path, 'recovered'))
+        print('Daemon restart preserved both committed tracks and waited for explicit recovery:', committed)
 
 
 def main():
