@@ -5,6 +5,10 @@ The console is served by `voiceless daemon`, `voiceless web` and
 single embedded app built from `frontend/`. Everything below is JSON
 over HTTP unless noted.
 
+The served page identifies the runtime's operating system in the
+`voiceless-platform` meta tag (`linux`, `macos` or `windows`). The settings
+page uses it to show the available text delivery methods and filter search results.
+
 ## Security
 
 - The console listens on loopback only. A configured wildcard resolves to

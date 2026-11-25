@@ -30,6 +30,8 @@
 // every page load; it is read once into TOKEN and sent on every /api call.
 // The server also refuses cross-origin writes, so the page needs no CSRF
 // handling of its own. Vite bundles this module into the embedded app.js.
+// The server also names its own system in <meta name="voiceless-platform">:
+// the typing settings follow that runtime, not the browser (NATIVE below).
 import { t } from './i18n';
 import { historyRevisions, offlineModels } from './history-revisions';
 import { exportHistory, retentionSettings, recoveryList } from './retention';
@@ -136,6 +138,18 @@ function tip(el, text, pos = "b") {
 
 /** Session token the server substituted into the page; "" if absent (API calls then 403). */
 let TOKEN = document.querySelector('meta[name="voiceless-token"]')?.content || "";
+/**
+ * The system the serving CLI or daemon runs on ("linux", "macos" or
+ * "windows"), which it names in <meta name="voiceless-platform">; "" when the
+ * page did not come from it (a dev server), which then gets Linux's page.
+ */
+const PLATFORM = document.querySelector('meta[name="voiceless-platform"]')?.content || "";
+/**
+ * Windows and macOS paste through their own API and have none of the Linux
+ * typing tools. Text is delivered on the runtime's system, which is why this
+ * is never read off the browser.
+ */
+const NATIVE = PLATFORM === "windows" || PLATFORM === "macos";
 /** querySelector / querySelectorAll shorthands scoped to `root`. */
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -309,6 +323,12 @@ const INJECT_METHODS = [
   ["wtype", t("模拟按键"), "keyboard"],
   ["copy", t("复制到剪贴板"), "copy"],
 ];
+
+/** The methods a native platform has: its own paste, and the clipboard alone; the other two are Linux tools. */
+const NATIVE_METHODS = ["clipboard", "copy"];
+
+/** The method a saved preference comes to: a native runtime pastes for every preference but an explicit copy. */
+const effectivePrefer = (prefer) => (NATIVE && prefer !== "copy" ? "clipboard" : prefer);
 
 /** What is known of a delivery -> label; keystrokes and pastes are sent, their receipt is not confirmed. */
 const DELIVERY_LABELS = { committed: t("已提交"), copied: t("已复制"), unconfirmed: t("上屏未确认，请检查目标输入框") };
@@ -545,6 +565,15 @@ function group(iconName, title, actions, ...children) {
       actions && actions.length ? h("div", { class: "head-actions" }, ...actions) : null),
     ...children,
   );
+}
+
+/**
+ * `children` where the Linux typing tools exist, null on the native
+ * platforms, which deliver through their own paste. A settings row built in
+ * here is Linux's alone in the settings index too (scripts/i18n.mjs).
+ */
+function linuxOnly(...children) {
+  return NATIVE ? null : children;
 }
 
 /** Centred placeholder for empty lists and load failures. */
@@ -3339,14 +3368,22 @@ function HotkeyPage() {
     setChildren(applySlot, configApplyDetails(status, saved?.revision, reload));
   }
 
-  /** [inject] method as tiles; the preedit rocker only applies to fcitx5. */
+  /**
+   * [inject] method as tiles; the preedit rocker only applies to fcitx5. A
+   * native runtime has the paste and the copy alone: it pastes for every
+   * saved preference but an explicit copy, which is shown as that paste
+   * without writing anything over the saved preference.
+   */
   function injectCard() {
     const i = draft.inject;
     const preedit = h("div", { hidden: i.prefer !== "fcitx5" }, rocker(i, "preedit", changed, t("输入框内实时预编辑"), { tip: t("识别中的文字以预编辑显示在光标处，说完正式上屏") }));
     const methodTiles = tiles(
-      INJECT_METHODS.map(([value, title, iconName]) => ({ value, icon: iconName, title, tip: value === "fcitx5" ? t("经输入法提交，和打字同一条路，不占用剪贴板") : value === "clipboard" ? t("写入剪贴板后粘贴") : value === "copy" ? t("只放入剪贴板，由你自己粘贴") : t("模拟按键逐字输入") })),
-      i.prefer,
+      INJECT_METHODS.filter(([value]) => !NATIVE || NATIVE_METHODS.includes(value))
+        .map(([value, title, iconName]) => ({ value, icon: iconName, title, tip: value === "fcitx5" ? t("经输入法提交，和打字同一条路，不占用剪贴板") : value === "clipboard" ? t("写入剪贴板后粘贴") : value === "copy" ? t("只放入剪贴板，由你自己粘贴") : t("模拟按键逐字输入") })),
+      effectivePrefer(i.prefer),
       (value) => {
+        // Picking the method already in effect keeps a Linux preference as saved.
+        if (value === effectivePrefer(i.prefer)) return;
         i.prefer = value;
         preedit.hidden = value !== "fcitx5";
         changed();
@@ -3357,17 +3394,19 @@ function HotkeyPage() {
       t("上屏"),
       null,
       methodTiles.el,
-      h("div", { class: "rockers", style: { marginTop: "18px" } }, preedit, rocker(i, "clipboard_fallback", changed, t("失败时回退剪贴板"))),
-      h("details", { class: "fold", style: { marginTop: "18px" } },
-        h("summary", {}, icon("terminal"), t("命令")),
-        h("div", { class: "fold-body grid" },
-          row(t("粘贴工具"), textInput(i, "paste_tool", changed, { mono: true })),
-          row(t("粘贴参数"), textInput(i, "paste_command", changed, { mono: true })),
-          row("wl-copy", textInput(i, "wl_copy_command", changed, { mono: true })),
-          row("wtype", textInput(i, "wtype_command", changed, { mono: true })),
-          row(t("X11 剪贴板"), textInput(i, "x11_clipboard_command", changed, { mono: true, placeholder: "xsel --clipboard --input" })),
-          row(t("粘贴前聚焦"), textInput(i, "focus_command", changed, { mono: true })),
-          row(t("超时"), numberInput(i, "timeout_seconds", changed, { min: 0.5, max: 60, step: 0.5 }), { tip: t("秒") }))),
+      linuxOnly(
+        h("div", { class: "rockers", style: { marginTop: "18px" } }, preedit, rocker(i, "clipboard_fallback", changed, t("失败时回退剪贴板"))),
+        h("details", { class: "fold", style: { marginTop: "18px" } },
+          h("summary", {}, icon("terminal"), t("命令")),
+          h("div", { class: "fold-body grid" },
+            row(t("粘贴工具"), textInput(i, "paste_tool", changed, { mono: true })),
+            row(t("粘贴参数"), textInput(i, "paste_command", changed, { mono: true })),
+            row("wl-copy", textInput(i, "wl_copy_command", changed, { mono: true })),
+            row("wtype", textInput(i, "wtype_command", changed, { mono: true })),
+            row(t("X11 剪贴板"), textInput(i, "x11_clipboard_command", changed, { mono: true, placeholder: "xsel --clipboard --input" })),
+            row(t("粘贴前聚焦"), textInput(i, "focus_command", changed, { mono: true })),
+            row(t("超时"), numberInput(i, "timeout_seconds", changed, { min: 0.5, max: 60, step: 0.5 }), { tip: t("秒") }))),
+      ),
     );
   }
 
@@ -3437,16 +3476,22 @@ function HotkeyPage() {
     return group("mic", t("麦克风"), null, row(t("输入设备"), sourceSelect), inputStatus);
   }
 
-  /** [audio]: media pause and start/stop cues. */
+  /**
+   * [audio]: media pause and start/stop cues, and the recording overlay
+   * where the desktop has one. A native runtime names its window instead;
+   * the probe's own reasons are the Linux tools' diagnostics.
+   */
   function audioCard() {
     const a = draft.audio;
     return group(
       "volume-2",
       t("声音"),
       null,
-      overlaySupport?.available ? row(t("录音浮层"), selectInput(a, "overlay", [
+      overlaySupport?.available ? linuxOnly(row(t("录音浮层"), selectInput(a, "overlay", [
         [null, t("跟随桌面设置")], [true, t("显示")], [false, t("关闭")],
-      ], changed), { tip: t("由桌面已启用的 Eww 浮层显示") }) : overlaySupport?.reason ? note("circle-alert", overlaySupport.reason) : null,
+      ], changed), { tip: t("由桌面已启用的 Eww 浮层显示") }))
+        : NATIVE ? note("info", t("录音状态显示在 Voiceless 窗口中"))
+        : overlaySupport?.reason ? note("circle-alert", overlaySupport.reason) : null,
       h("div", { class: "rockers" },
         rocker(a, "pause_media", changed, t("录音时暂停音乐"), { tip: t("结束后自动恢复播放") }),
         rocker(a, "cues", changed, t("开始与结束提示音"))),
@@ -4456,6 +4501,7 @@ export {
   HotkeyPage,
   LivePage,
   ModesPage,
+  NATIVE,
   NS,
   TextPage,
   api,

@@ -2,8 +2,9 @@
 <!--
   Voiceless console shell. Served by rust/src/console/mod.rs (`index`) with
   the VOICELESS_TOKEN placeholder (double braces, below) replaced by the
-  per-start API token; app.js reads it from the meta tag and sends it on
-  every /api call. Vite emits this shell and its bundled JavaScript and
+  per-start API token and VOICELESS_PLATFORM by the system the serving CLI or
+  daemon runs on; app.js reads both from their meta tags and sends the token
+  on every /api call. Vite emits this shell and its bundled JavaScript and
   CSS. All three are embedded in the binary for offline use. The theme
   and the amount of motion follow the OS unless pinned from the rail.
 -->
@@ -13,6 +14,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Filled by the server on every request; the page is sent Cache-Control: no-store. -->
 <meta name="voiceless-token" content="{{VOICELESS_TOKEN}}">
+<!-- The system the serving CLI or daemon runs on: the typing settings follow that runtime, not the browser's. -->
+<meta name="voiceless-platform" content="{{VOICELESS_PLATFORM}}">
 <meta name="color-scheme" content="dark light">
 <script>
 // Effective theme, motion and language on <html> before first paint: the
