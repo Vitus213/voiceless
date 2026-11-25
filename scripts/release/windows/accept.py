@@ -31,6 +31,9 @@ def main():
                 if reported != f'voiceless {version}':
                     raise ValueError(f'unexpected installed CLI version: {reported}')
                 verify_recognition(cli, speech, env)
+                if kind == 'core':
+                    subprocess.run(['pwsh', '-NoProfile', '-STA', '-File', Path(__file__).with_name('editor.ps1'), cli, speech],
+                                   env=env, check=True, timeout=120)
                 if kind == 'desktop':
                     executable = destination / 'voiceless-desktop.exe'
                     subprocess.run(['pwsh', '-NoProfile', '-File', Path(__file__).with_name('window.ps1'), executable],
