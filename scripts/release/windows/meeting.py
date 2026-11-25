@@ -143,11 +143,6 @@ def run(cli, root, env, speech):
         mic, output = node('microphones', 'VOICELESS_VAC_MIC'), node('system_outputs', 'VOICELESS_VAC_OUTPUT')
         instance = {'runtime_id':api('meetings')['runtime_id']}
         selection = dict(instance, microphone=mic, system=output)
-        with denied_microphone():
-            refusal = api('meetings/start', selection, 409)['error']
-            assert 'denied' in refusal.lower() and mic.lower() in refusal.lower(), refusal
-            assert not api('meetings')['meetings']
-            print('Privacy refusal, HTTP 409, zero meetings:', refusal)
         feed, selected = line_index(1), line_index(2)
         rate1, rate2 = (int(sd.query_devices(i)['default_samplerate']) for i in (feed, selected))
         def capture():
@@ -205,6 +200,12 @@ def run(cli, root, env, speech):
         spoken = ' '.join(re.findall(r'[a-z]+', recorded.lower()))
         assert len(words) >= 5 and any(' '.join(words[i:i+5]) in spoken for i in range(len(words)-4)), (baseline, recorded)
         print('Installed microphone recording recovered the reference speech:', recorded)
+        previous_ids = [m['id'] for m in api('meetings')['meetings']]
+        with denied_microphone():
+            refusal = api('meetings/start', selection, 409)['error']
+            assert 'denied' in refusal.lower() and mic.lower() in refusal.lower(), refusal
+            assert [m['id'] for m in api('meetings')['meetings']] == previous_ids
+            print('Privacy refusal, HTTP 409, zero new meetings:', refusal)
 
 
 def main():
