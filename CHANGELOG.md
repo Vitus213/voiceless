@@ -62,6 +62,10 @@ the day the work landed on `main`; commit hashes refer to
   correctly installed SenseVoice and bilingual Paraformer models load again.
 - Windows reports the selected audio source when WASAPI denies recording
   permission, including when the privacy settings allowed the initial check.
+- On macOS, meetings wait for microphone and system audio permission before
+  starting either track. An unanswered system audio request times out after
+  30 seconds and leaves no meeting on disk. A microphone-only meeting can
+  still record with an already authorized input.
 - If the first-run shortcut times out, the console points to the binding in
   Shortcuts and typing and offers the Try a phrase button. On Windows and
   macOS, the Sound section directs users to the window for recording status.
