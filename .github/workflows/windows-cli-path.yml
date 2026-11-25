@@ -1,0 +1,31 @@
+name: Installed Windows CLI path lookup
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/windows-candidate/cli-path-0.2.0']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  path:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reuse the installers of run 45701405588
+        uses: actions/download-artifact@v4
+        with:
+          name: voiceless-windows-model-device-installers
+          run-id: 45701405588
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/installers
+      - name: Look the installed CLI up by name in a new shell, after the install and after the uninstall
+        env:
+          VOICELESS_TEST_INSTALLERS: ${{ runner.temp }}/installers
+          VOICELESS_TEST_CORE_SHA256: 5e181ce14fc8b6eabf7d261c1d128b73c08961d701f8fb56cd00bca3368b800a
+        run: ./scripts/release/windows/cli-path.ps1
