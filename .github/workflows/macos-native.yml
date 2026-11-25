@@ -1,0 +1,52 @@
+name: Apple Silicon native candidates
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+      - name: Install the release Rust toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          echo 'RUSTUP_TOOLCHAIN=1.99.1' >> "$GITHUB_ENV"
+      - name: Import the Developer ID Application certificate
+        if: github.ref_type == 'tag'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      - name: Configure notarization for the tagged candidate
+        if: github.ref_type == 'tag'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: xcrun notarytool store-credentials voiceless-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD"
+      - name: Build and sign installable CLI and desktop candidates
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          flags=()
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then flags+=(--sign); fi
+          python3 scripts/release/macos/package.py "$RUNNER_TEMP/candidates" ${flags[@]+"${flags[@]}"}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-macos-arm64-candidates
+          path: ${{ runner.temp }}/candidates/*.dmg
+          if-no-files-found: error
+          compression-level: 0

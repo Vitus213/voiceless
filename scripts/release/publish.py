@@ -128,8 +128,15 @@ def publish(candidates, tag):
     version = tag[1:]
     version_number(version)
     packages = {name: candidates / f"{name}-{version}.tgz" for name in (*PLATFORMS, "voiceless")}
+    # The core archives keep the names a standalone updater of 0.1.3 selects by,
+    # exactly, among the assets of the stable release; the desktop packages are
+    # published beside them. Neither reaches npm.
     archives = [candidates / f"voiceless-{tag}-linux-{arch}-gnu.tar.gz" for arch in ARCHITECTURES]
-    for archive in [*archives, *packages.values()]:
+    desktop = [candidates / f"voiceless-desktop-{tag}-linux-{arch}-gnu.deb" for arch in ARCHITECTURES]
+    assets = [*archives, *desktop]
+    if len({asset.name for asset in assets}) != len(assets):
+        raise ValueError("release assets must have distinct names")
+    for archive in [*assets, *packages.values()]:
         if not archive.is_file():
             raise ValueError(f"missing release candidate {archive.name}")
     for name, path in packages.items():
@@ -143,7 +150,7 @@ def publish(candidates, tag):
     pending = [(name, path) for name, path in packages.items()
                if not npm_ready(name, version, path, npm_registry(name))]
     sums = candidates / "SHA256SUMS"
-    hashes = {path: digest(path, "sha256").hexdigest() for path in archives}
+    hashes = {path: digest(path, "sha256").hexdigest() for path in assets}
     sums.write_text("".join(f"{value}  {path.name}\n" for path, value in hashes.items()), encoding="ascii")
     hashes[sums] = digest(sums, "sha256").hexdigest()
     finish_github = prepare_github(tag, {path: f"sha256:{value}" for path, value in hashes.items()})
