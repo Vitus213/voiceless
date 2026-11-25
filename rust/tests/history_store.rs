@@ -220,17 +220,20 @@ fn insert_with_app_keeps_the_target_application() {
 
 #[test]
 fn schema_is_version_four_with_the_order_index_and_private_permissions() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = tempdir().expect("temporary root");
     let path = root.path().join("history.sqlite3");
     HistoryStore::open(path.clone()).expect("open store");
 
-    let mode = std::fs::metadata(&path)
-        .expect("metadata")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600, "history file must be 0600");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "history file must be 0600");
+    }
     assert_eq!(user_version(&path), 4);
 
     let index: i64 = Connection::open(&path)

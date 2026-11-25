@@ -32,8 +32,8 @@ jobs:
         run: cargo test --locked --manifest-path rust/Cargo.toml --lib desktop::native::contract::windows
       - name: Exercise Windows doctor and console audio selection
         run: cargo test --locked --manifest-path rust/Cargo.toml --test desktop_contract windows
-      - name: Exercise the model store, whose members keep the catalog's spelling
-        run: cargo test --locked --manifest-path rust/Cargo.toml --test model_manager
+      - name: Exercise model paths, history migration and concurrent first opens
+        run: cargo test --locked --manifest-path rust/Cargo.toml --test model_manager --test history_store
       - name: Install both packages, transcribe offline and reopen the desktop window
         run: python -B scripts/release/windows/accept.py "$env:RUNNER_TEMP/candidates"
       - name: Keep the two MSVC installer candidates
