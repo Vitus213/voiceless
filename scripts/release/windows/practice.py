@@ -657,9 +657,10 @@ def run(candidates, root, env, evidence):
 
             # The hotkey: recorded with the page's key widget, saved, then applied.
             page.get_by_role('link', name=UI['shortcuts']).first.click()
-            commands = page.get_by_text(either('快捷键的 CLI 命令', 'CLI commands for shortcuts'))
+            commands = page.locator('details > summary').filter(has_text=re.compile('快捷键的 CLI 命令|CLI commands for shortcuts'))
             overlay = page.get_by_text('On this platform, the Voiceless window shows the recording status.', exact=True)
-            commands.wait_for(state='visible')
+            commands.click()
+            page.get_by_text('voiceless ctl toggle', exact=True).wait_for(state='visible')
             overlay.wait_for(state='visible')
             record('shortcut-help', commands=commands.text_content(), recording_status=overlay.text_content())
             button(page, UI['record_toggle']).click()
