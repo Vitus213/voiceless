@@ -33,7 +33,7 @@ from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-BRANCH = 'ci/windows-candidate/practice-0.2.0'
+BRANCH = 'ci/windows-candidate/setup-feedback-0.2.0'
 CDP_PORT = 9333
 MODEL, VAD = 'sense-voice-int8', 'silero-vad'
 # test_wavs/en.wav inside the pinned model archive.
@@ -69,7 +69,7 @@ UI = dict(
 )
 READY = re.compile(r'识别就绪|Recognition ready')
 ARMED = re.compile(r'现在按下快捷键|Press the shortcut now')
-NO_KEY = re.compile(r'没有收到快捷键|The shortcut was not pressed')
+NO_KEY = re.compile(r'等待快捷键超时。.*开始试说|Timed out waiting for the shortcut\. .*Try a phrase')
 SWITCH = re.compile(r'3 秒内切换|Switch to the field')
 ACTIVE = re.compile(r'ScrollLock\s+(?:已生效|active)')
 METHOD = re.compile(r'剪贴板|Clipboard')
@@ -470,9 +470,7 @@ class Speech:
 
 
 def transcribe(cli, wav, env):
-    """`voiceless transcribe` with the installed SenseVoice model. The 0.2.0 CLI ignores
-    `--config` and reads XDG_CONFIG_HOME/voiceless/config.toml, so `env` is that of a
-    configuration naming the model directory."""
+    """Use the installed SenseVoice model chosen in the scratch batch configuration."""
     out = subprocess.check_output([str(cli), 'transcribe', str(wav), '--backend', 'local', '--json'], env=env, timeout=150)
     return json.loads(out)['text']
 
@@ -644,7 +642,6 @@ def run(candidates, root, env, evidence):
             clip, model = next(data.rglob('test_wavs/en.wav'), None), next(data.rglob('model.int8.onnx'), None)
             check(clip and model, 'The installed model is incomplete', data=str(data))
             speech = Speech(clip)
-            # The 0.2.0 CLI reads its configuration from XDG_CONFIG_HOME, never from `--config`.
             batch = dict(env, XDG_CONFIG_HOME=str(root / 'batch-config'))
             (root / 'batch-config' / 'voiceless').mkdir(parents=True)
             (root / 'batch-config' / 'voiceless' / 'config.toml').write_text(
@@ -660,6 +657,11 @@ def run(candidates, root, env, evidence):
 
             # The hotkey: recorded with the page's key widget, saved, then applied.
             page.get_by_role('link', name=UI['shortcuts']).first.click()
+            commands = page.get_by_text(either('快捷键的 CLI 命令', 'CLI commands for shortcuts'))
+            overlay = page.get_by_text('On this platform, the Voiceless window shows the recording status.', exact=True)
+            commands.wait_for(state='visible')
+            overlay.wait_for(state='visible')
+            record('shortcut-help', commands=commands.text_content(), recording_status=overlay.text_content())
             button(page, UI['record_toggle']).click()
             page.keyboard.press(KEY_CODE)
             button(page, UI['save']).click()
