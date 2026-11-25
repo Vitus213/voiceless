@@ -28,6 +28,7 @@ import urllib.request
 import wave
 
 import sounddevice as sd
+from playwright.sync_api import TimeoutError as PwTimeout
 from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
@@ -660,8 +661,13 @@ def run(candidates, root, env, evidence):
             button(page, UI['record_toggle']).click()
             page.keyboard.press(KEY_CODE)
             button(page, UI['save']).click()
-            button(page, UI['apply']).wait_for(state='visible')
-            button(page, UI['apply']).click()
+            # The page asks whether to apply the saved settings now; the apply slot offers the same.
+            apply_now = page.get_by_role('dialog').get_by_role('button', name=UI['apply_dialog'])
+            try:
+                apply_now.wait_for(state='visible', timeout=10000)
+                apply_now.click()
+            except PwTimeout:
+                button(page, UI['apply']).click()
 
             def bound(status):
                 return [b for b in status['hotkey']['bindings'] if b['field'] == 'toggle_key' and b['chord'] == KEY and b['keyboards'] > 0]
