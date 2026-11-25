@@ -82,60 +82,42 @@ pub(crate) fn audio_label(uid: &str, output: bool) -> Option<String> {
     take_string(unsafe { vl_audio_label(uid.as_ptr(), output) })
 }
 
-/// How long the system's dialog may wait for its answer, as the microphone's does.
-const ANSWER: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Whether a tap is being created, which is where the system asks for its
-/// consent and then waits for the dialog's answer.
+/// Core Audio may wait for system audio consent while creating the tap or
+/// starting its aggregate input stream. Only one worker may wait on that dialog.
 static ASKING: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
 static ANSWERED: parking_lot::Condvar = parking_lot::Condvar::new();
 
 /// A dialog nobody answered in time.
-fn unanswered() -> std::io::Error {
+pub(crate) fn unanswered() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
         "The system audio permission request was not answered within 30 seconds",
     )
 }
 
-/// Create the selected output's tap under the consent deadline. Core Audio can
-/// wait indefinitely for the dialog. Its worker owns no stream or capture lock,
-/// so a late answer can only dispose of the tap. Serialize tap creation across
-/// retries while that worker is still waiting.
-pub(crate) fn open_meeting_tap(output: &cpal::DeviceId) -> std::io::Result<MeetingTap> {
-    use std::sync::mpsc::{self, RecvTimeoutError};
-    let deadline = std::time::Instant::now() + ANSWER;
-    let mut asking = ASKING.lock();
-    if ANSWERED
-        .wait_while_until(&mut asking, |busy| *busy, deadline)
-        .timed_out()
-    {
-        return Err(unanswered());
+pub(crate) struct SystemAudioStart {
+    pub(crate) deadline: std::time::Instant,
+}
+
+impl SystemAudioStart {
+    pub(crate) fn acquire() -> std::io::Result<Self> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut asking = ASKING.lock();
+        if ANSWERED
+            .wait_while_until(&mut asking, |busy| *busy, deadline)
+            .timed_out()
+        {
+            return Err(unanswered());
+        }
+        *asking = true;
+        Ok(Self { deadline })
     }
-    *asking = true;
-    drop(asking);
-    let (made, late) = mpsc::sync_channel(1);
-    let output = output.clone();
-    let opened = std::thread::Builder::new()
-        .name("voiceless-meeting-consent".to_owned())
-        .spawn(move || {
-            let tap = MeetingTap::open(&output);
-            // Sending to a caller that already timed out drops the tap here.
-            let _ = made.send(tap);
-            *ASKING.lock() = false;
-            ANSWERED.notify_all();
-        });
-    if let Err(error) = opened {
+}
+
+impl Drop for SystemAudioStart {
+    fn drop(&mut self) {
         *ASKING.lock() = false;
         ANSWERED.notify_all();
-        return Err(std::io::Error::other(error));
-    }
-    match late.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
-        Ok(made) => made,
-        Err(RecvTimeoutError::Timeout) => Err(unanswered()),
-        Err(RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
-            "the system audio permission request could not be made",
-        )),
     }
 }
 
@@ -147,9 +129,8 @@ pub(crate) struct MeetingTap {
 }
 
 impl MeetingTap {
-    /// Where macOS asks its consent to record system audio: the creation
-    /// waits until the dialog is answered, and is `PermissionDenied` when
-    /// it was refused.
+    /// Create the tap and private aggregate for the selected output. Its
+    /// stream must also start before the meeting can record either source.
     pub fn open(output: &cpal::DeviceId) -> std::io::Result<Self> {
         extern "C" {
             fn vl_meeting_tap(
