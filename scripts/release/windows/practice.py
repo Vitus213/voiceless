@@ -58,6 +58,7 @@ UI = dict(
     model=either('本地模型', 'Local model'),
     get_models=either('准备模型', 'Get the models'),
     apply=either('应用设置', 'Apply settings'),
+    apply_dialog=either('应用', 'Apply'),
     start=either('开始试说', 'Try a phrase'),
     arm=either('用快捷键试说', 'Try with the shortcut'),
     finish=either('完成试说', 'Finish the practice'),
@@ -398,9 +399,10 @@ class Editor:
 def focus(editor):
     """Bring `editor` to the front as a user's Alt+Tab would: a tap on Alt lets this process
     set the foreground window. The caret then sits at the end of the editor's text."""
-    tap(VK_MENU, SCAN_MENU)
-    user32.SetForegroundWindow(editor.form)
-    time.sleep(0.3)
+    if foreground() != editor.form:
+        tap(VK_MENU, SCAN_MENU)
+        user32.SetForegroundWindow(editor.form)
+        time.sleep(0.3)
     state = editor.command('state')
     if not (state['foreground'] and state['focused']):
         state = editor.command('activate')
