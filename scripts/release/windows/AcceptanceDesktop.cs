@@ -25,6 +25,10 @@ public static class AcceptanceDesktop {
   public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")]
   public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  [DllImport("user32.dll")]
+  public static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll")]
+  static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
 
   /// <summary>The visible top-level window titled "Voiceless" that the process
   /// owns, or zero.</summary>
@@ -52,6 +56,15 @@ public static class AcceptanceDesktop {
     uint owner;
     GetWindowThreadProcessId(GetForegroundWindow(), out owner);
     return owner;
+  }
+
+  /// <summary>Alt pressed and released lets this process hand the foreground
+  /// to the window, as happens when a person gives a window its attention.</summary>
+  public static void BringForward(IntPtr window) {
+    // keybd_event: VK_MENU 0x12, then the same key with KEYEVENTF_KEYUP 0x0002.
+    keybd_event(0x12, 0, 0, UIntPtr.Zero);
+    keybd_event(0x12, 0, 2, UIntPtr.Zero);
+    SetForegroundWindow(window);
   }
 
   public static bool RequestClose(IntPtr window) {

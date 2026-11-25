@@ -90,6 +90,7 @@ function Wait-OwnFocus($Form, $Field, [string]$Failure) {
     }
     foreach ($attempt in 1..6) {
         if ([AcceptanceDesktop]::GetForegroundWindow() -eq $Form.Handle -and $Field.Focused) { return }
+        [AcceptanceDesktop]::BringForward($Form.Handle)
         [AcceptanceDesktop]::Click($Form.Handle)
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 700
