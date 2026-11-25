@@ -1,9 +1,9 @@
-name: Installed Windows x64 desktop verification
+name: Installed Windows meeting acceptance
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-candidate/installed-0.2.0']
+    branches: ['ci/windows-candidate/meeting-0.2.0']
 
 permissions:
   contents: read
@@ -50,5 +50,9 @@ jobs:
             $file = Join-Path $candidates "voiceless-$kind-v0.2.0-windows-x64.exe"
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash -ne $expected[$kind]) { throw "Wrong $kind installer" }
           }
-      - name: Install both packages, transcribe offline and reopen the desktop window
-        run: python -B scripts/release/windows/accept.py "$env:RUNNER_TEMP/candidates"
+      - name: Set up two independent WASAPI endpoint pairs on the disposable guest
+        run: ./scripts/release/windows/lines.ps1
+      - name: Install the audio signal generator
+        run: python -m pip install sounddevice==0.5.3
+      - name: Check the installed CLI through real WASAPI capture, loopback and a denied input
+        run: python -u -B scripts/release/windows/meeting.py "$env:RUNNER_TEMP/candidates"
