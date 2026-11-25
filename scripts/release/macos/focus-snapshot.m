@@ -15,7 +15,7 @@ static NSDictionary *snapshot(void) {
     @autoreleasepool {
         NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
         NSMutableDictionary *log = [@{@"front": front.bundleIdentifier ?: @"", @"trusted": @(AXIsProcessTrusted())} mutableCopy];
-        if (![front.bundleIdentifier isEqualToString:@"com.apple.TextEdit"]) return log;
+        if (!AXIsProcessTrusted() || ![front.bundleIdentifier isEqualToString:@"com.apple.TextEdit"]) return log;
         AXUIElementRef system = AXUIElementCreateSystemWide();
         id app = readAX(system, kAXFocusedApplicationAttribute, log, @"app_error");
         id systemField = readAX(system, kAXFocusedUIElementAttribute, log, @"system_field_error");
@@ -23,21 +23,21 @@ static NSDictionary *snapshot(void) {
             log[@"system_role"] = readAX((__bridge AXUIElementRef)systemField, kAXRoleAttribute, log, @"system_role_error");
         }
         if (app && CFGetTypeID((__bridge CFTypeRef)app) == AXUIElementGetTypeID()) {
-            AXUIElementRef process = (__bridge AXUIElementRef)app;
             pid_t pid = 0;
-            AXUIElementGetPid(process, &pid);
+            AXUIElementGetPid((__bridge AXUIElementRef)app, &pid);
             log[@"matches_front_process"] = @(pid == front.processIdentifier);
-            if (pid == front.processIdentifier) {
-                id window = readAX(process, kAXFocusedWindowAttribute, log, @"window_error");
-                id field = readAX(process, kAXFocusedUIElementAttribute, log, @"app_field_error");
-                if (window && CFGetTypeID((__bridge CFTypeRef)window) == AXUIElementGetTypeID()) {
-                    log[@"title"] = readAX((__bridge AXUIElementRef)window, kAXTitleAttribute, log, @"title_error");
-                }
-                if (field && CFGetTypeID((__bridge CFTypeRef)field) == AXUIElementGetTypeID()) {
-                    log[@"app_role"] = readAX((__bridge AXUIElementRef)field, kAXRoleAttribute, log, @"app_role_error");
-                }
-            }
         }
+        AXUIElementRef process = AXUIElementCreateApplication(front.processIdentifier);
+        log[@"frontmost"] = readAX(process, kAXFrontmostAttribute, log, @"frontmost_error");
+        id window = readAX(process, kAXFocusedWindowAttribute, log, @"window_error");
+        id field = readAX(process, kAXFocusedUIElementAttribute, log, @"app_field_error");
+        if (window && CFGetTypeID((__bridge CFTypeRef)window) == AXUIElementGetTypeID()) {
+            log[@"title"] = readAX((__bridge AXUIElementRef)window, kAXTitleAttribute, log, @"title_error");
+        }
+        if (field && CFGetTypeID((__bridge CFTypeRef)field) == AXUIElementGetTypeID()) {
+            log[@"app_role"] = readAX((__bridge AXUIElementRef)field, kAXRoleAttribute, log, @"app_role_error");
+        }
+        CFRelease(process);
         CFRelease(system);
         log[@"bridge_confirmed_field"] = @(vl_focus(NULL, NULL) != 0);
         return log;
