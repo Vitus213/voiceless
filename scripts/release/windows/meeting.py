@@ -189,15 +189,18 @@ def run(cli, root, env, speech):
             assert wav.getsampwidth() == 2 and wav.getnchannels() == 1
             pcm, _ = audioop.ratecv(wav.readframes(wav.getnframes()), 2, 1, wav.getframerate(), rate1, None)
         clip_seconds = len(pcm) / (2*rate1)
-        signal = audioop.tostereo(pcm, 2, 1, 1) + bytes(4*rate1)
-        capture_config = root / 'record.toml'
+        signal = bytes(4*rate1) + audioop.tostereo(pcm, 2, 1, 1) + bytes(4*rate1*6)
+        record_env = dict(env, XDG_CONFIG_HOME=str(root / 'cli-config'))
+        capture_config = Path(record_env['XDG_CONFIG_HOME']) / 'voiceless/config.toml'
+        capture_config.parent.mkdir(parents=True)
         capture_config.write_text(config.read_text() + f'source={json.dumps(mic)}\n', encoding='utf-8')
-        baseline = json.loads(subprocess.check_output([cli,'--config',capture_config,'transcribe',speech,'--backend','local','--json'], env=env, timeout=75))['text']
+        print('Selected and default microphones:', mic, api('meetings/sources')['default_microphone'])
+        baseline = json.loads(subprocess.check_output([cli, 'transcribe', speech, '--backend', 'local', '--json'], env=record_env, timeout=75))['text']
         # Re-open PortAudio after the Windows endpoint was removed and registered again.
         sd._terminate(); sd._initialize()
         with render(line_index(1), rate1, signal):
-            command = [cli,'--config',capture_config,'record','--seconds',str(clip_seconds + 4),'--backend','local','--no-inject','--json']
-            recorded = json.loads(subprocess.check_output(command, env=env, timeout=90))['text']
+            command = [cli, 'record', '--seconds', str(clip_seconds + 3), '--backend', 'local', '--no-inject', '--json']
+            recorded = json.loads(subprocess.check_output(command, env=record_env, timeout=90))['text']
         words = re.findall(r'[a-z]+', baseline.lower())
         spoken = ' '.join(re.findall(r'[a-z]+', recorded.lower()))
         assert len(words) >= 5 and any(' '.join(words[i:i+5]) in spoken for i in range(len(words)-4)), (baseline, recorded)
