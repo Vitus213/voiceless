@@ -3,11 +3,10 @@ name: Installed Windows meeting consent
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-candidate/meeting-consent-0.2.0']
+    branches: ['ci/windows-candidate/prepared-streams-0.2.0']
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   installers:
@@ -16,7 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5e2d622d6c41c9281fac92476c433603772fe08e
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -33,13 +31,21 @@ jobs:
             audioEndpoints = @($endpoints | ForEach-Object Name)
             graphics = @($graphics | ForEach-Object Name)
           } | ConvertTo-Json -Depth 3
-      - name: Use the original meeting-consent installers
-        uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v6
         with:
-          github-token: ${{ github.token }}
-          run-id: 45698558308
-          name: voiceless-windows-x64-candidates
-          path: ${{ runner.temp }}/candidates
+          node-version: '22.23.1'
+          package-manager-cache: false
+      - name: Build the native installer candidates
+        run: |
+          rustup default 1.99.1-x86_64-pc-windows-msvc
+          python -B scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-prepared-stream-installers
+          path: ${{ runner.temp }}/candidates/voiceless-*-v*-windows-x64.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
       - name: Set up two independent WASAPI endpoint pairs on the disposable guest
         run: ./scripts/release/windows/lines.ps1
       - name: Install the audio signal generator

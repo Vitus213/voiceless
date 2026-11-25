@@ -148,11 +148,12 @@ def run(cli, root, env, speech):
     with installed_daemon(cli, config, env, root / 'daemon.log') as (daemon, api):
         devices = api('meetings/sources')
         print('Voiceless input and output labels:', {kind:[d['label'] for d in devices[kind]] for kind in ('microphones','system_outputs')})
-        def node(kind, number):
-            matches = [d['node'] for d in devices[kind] if f'Line {number} (' in d['label'] and 'Virtual Audio Cable' in d['label']]
-            assert len(matches) == 1, (kind, number, matches, devices)
+        def node(kind, variable):
+            expected = os.environ[variable].casefold()
+            matches = [d['node'] for d in devices[kind] if d['node'].casefold() == expected]
+            assert len(matches) == 1, (kind, expected, devices)
             return matches[0]
-        mic, output = node('microphones', 1), node('system_outputs', 2)
+        mic, output = node('microphones', 'VOICELESS_VAC_MIC'), node('system_outputs', 'VOICELESS_VAC_OUTPUT')
         instance = {'runtime_id':api('meetings')['runtime_id']}
         selection = dict(instance, microphone=mic, system=output)
         feed, selected = line_index(1), line_index(2)
