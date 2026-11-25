@@ -1,21 +1,19 @@
-name: macOS Apple Silicon candidate acceptance
+name: Installed macOS meeting recovery
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/macos-candidate/**']
+    branches: ['ci/macos-candidate/recovery-0.2.0']
 
 permissions:
   contents: read
-
-env:
-  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  actions: read
 
 jobs:
   candidate:
-    name: Build and accept the macOS Apple Silicon candidate
+    name: Recover committed audio after a restart and a disconnected microphone
     runs-on: macos-15
-    timeout-minutes: 80
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,50 +21,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Record the guest's session, privacy permissions, audio endpoints and signing identities
-        run: bash scripts/release/macos/guest.sh
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45691666337
+          name: voiceless-macos-arm64-candidates
+          path: ${{ runner.temp }}/candidates
       - name: Install the audio signal generator
         run: python3 -m pip install sounddevice==0.5.3
       - name: Set up two test-owned loopback endpoints on the disposable guest
         run: bash scripts/release/macos/lines.sh
-      - name: Compile and try the test's own helpers
-        run: bash scripts/release/macos/smoke.sh
-      # A commit whose message carries "[no build]" stops here: the helpers
-      # are checked without spending a build.
-      - uses: actions/setup-node@v6
-        if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
-        with:
-          node-version: '22.23.1'
-          package-manager-cache: false
-      - name: Select the release Rust toolchain
-        if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
-        run: rustup default 1.99.1-aarch64-apple-darwin
-      - name: Build the two Apple Silicon images
-        if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
-        run: python3 -B scripts/release/macos/package.py "$RUNNER_TEMP/candidates"
-      - name: Keep the two images
-        if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[no build]') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: voiceless-macos-arm64-candidates
-          path: ${{ runner.temp }}/candidates/voiceless-*-v*-macos-arm64.dmg
-          if-no-files-found: warn
-          compression-level: 0
-          retention-days: 14
-      - name: Build the contract and meeting tests
-        if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
-        run: cargo test --release --locked --manifest-path rust/Cargo.toml --test desktop_contract --test capture_workflows --no-run
-      - name: Run the native acceptance
-        if: ${{ !contains(github.event.head_commit.message, '[no build]') }}
+      - name: Install the CLI and exercise recovery on the preauthorized test microphone
         run: |
-          library=$(ls "$CARGO_TARGET_DIR"/release/build/voiceless-*/out/libvoiceless_macos.a | head -n 1)
-          python3 -B scripts/release/macos/acceptance.py --candidates "$RUNNER_TEMP/candidates" \
-            --evidence "$RUNNER_TEMP/evidence" --library "$library"
+          set -eu
+          root=$(mktemp -d "$RUNNER_TEMP/voiceless-recovery.XXXXXXXX")
+          mkdir -p "$root/volume" "$root/home"
+          hdiutil attach -nobrowse -noautoopen -readonly -mountpoint "$root/volume" "$RUNNER_TEMP/candidates/voiceless-cli-v0.2.0-macos-arm64.dmg"
+          trap 'hdiutil detach "$root/volume"' EXIT
+          HOME="$root/home" "$root/volume/install-cli.command"
+          python3 -u -B scripts/release/macos/microphone-recovery.py "$root" "$RUNNER_TEMP/evidence"
       - name: Keep the evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: voiceless-macos-arm64-acceptance
+          name: voiceless-macos-microphone-recovery
           path: ${{ runner.temp }}/evidence
           if-no-files-found: warn
           retention-days: 14
