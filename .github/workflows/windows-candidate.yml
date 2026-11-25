@@ -1,9 +1,9 @@
-name: Installed Windows WASAPI permission diagnosis
+name: Installed Windows selected microphone and configuration
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-candidate/wasapi-fix-0.2.0']
+    branches: ['ci/windows-candidate/selected-input-0.2.0']
 
 permissions:
   contents: read
@@ -51,7 +51,5 @@ jobs:
         run: ./scripts/release/windows/lines.ps1
       - name: Install the audio signal generator
         run: python -m pip install sounddevice==0.5.3
-      - name: Check the Windows registry denial and the WASAPI HRESULT through the installed CLI
-        env:
-          VOICELESS_TEST_WASAPI_DENIAL: '1'
+      - name: Record from the explicitly configured input after its OS endpoint reconnects
         run: python -u -B scripts/release/windows/meeting.py "$env:RUNNER_TEMP/candidates"
