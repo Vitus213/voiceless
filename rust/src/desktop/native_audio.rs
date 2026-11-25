@@ -93,15 +93,29 @@ pub struct RawCapture {
 impl RawCapture {
     pub fn start(target: Option<DeviceId>) -> io::Result<Self> {
         let lease = crate::runtime::lock_capture()?;
-        Self::open(target, false, lease)
+        Self::open(
+            target,
+            false,
+            lease,
+            #[cfg(target_os = "macos")]
+            None,
+        )
     }
 
-    /// Keep a handle to the existing lease until the audio thread releases the endpoint.
+    /// The capture thread holds the lease and, on macOS, the permitted output's
+    /// tap until it has stopped the stream.
     pub(crate) fn open(
         target: Option<DeviceId>,
         system: bool,
         lease: std::fs::File,
+        #[cfg(target_os = "macos")] tap: Option<crate::desktop::native::MeetingTap>,
     ) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        if system && tap.is_none() {
+            return Err(io::Error::other(
+                "a system recording needs the tap of its output",
+            ));
+        }
         let (stop, commands) = control::channel();
         let (started, ready) = control::sync_channel(1);
         let (finished, done) = oneshot::channel();
@@ -111,20 +125,6 @@ impl RawCapture {
             .name("voiceless-input".to_owned())
             .spawn(move || {
                 let _lease = lease;
-                #[cfg(target_os = "macos")]
-                let tap = if system {
-                    match crate::desktop::native::MeetingTap::open(
-                        target.as_ref().expect("selected output"),
-                    ) {
-                        Ok(tap) => Some(tap),
-                        Err(error) => {
-                            let _ = started.send(Err(error));
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
                 #[cfg(target_os = "macos")]
                 let tapped_device = tap.as_ref().map(|tap| tap.device());
                 #[cfg(windows)]
