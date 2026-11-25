@@ -478,11 +478,21 @@ def cable_report(speech, evidence):
     """What the recording end of line 1 delivers while the clip plays into it."""
     source = line_index(1, 'input')
     rate = int(sd.query_devices(source)['default_samplerate'])
-    captured = sd.rec(int((speech.seconds + 2) * rate), samplerate=rate, channels=1, dtype='int16', device=source)
-    with speech_on(1, speech, pause=1.5):
-        pass
-    captured.wait()
-    pcm, _ = audioop.ratecv(captured[:, 0].tobytes(), 2, 1, rate, 16000, None)
+    captured = bytearray()
+
+    def collect(data, frames, timing, status):
+        captured.extend(bytes(data))
+
+    stream = sd.RawInputStream(device=source, channels=1, samplerate=rate, dtype='int16', callback=collect)
+    stream.start()
+    try:
+        time.sleep(0.5)
+        with speech_on(1, speech, pause=1.5):
+            pass
+    finally:
+        stream.stop()
+        stream.close()
+    pcm, _ = audioop.ratecv(bytes(captured), 2, 1, rate, 16000, None)
     path = evidence / 'cable-line-1.wav'
     with wave.open(str(path), 'wb') as wav:
         wav.setnchannels(1)
@@ -639,6 +649,7 @@ def run(candidates, root, env, evidence):
             record('wasapi', devices=[d['name'] for d in sd.query_devices()
                                       if sd.query_hostapis(d['hostapi'])['name'] == 'Windows WASAPI'])
             baseline = transcribe(cli, speech.path, batch)
+            record('baseline', text=baseline)
             path, levels = cable_report(speech, evidence)
             through = transcribe(cli, path, batch)
             record('speech', clip=str(speech.path), seconds=round(speech.seconds, 3), baseline=baseline,
