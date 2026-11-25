@@ -110,9 +110,10 @@ class Evidence:
             json.dumps({'checks': self.checks, 'notes': self.notes}, indent=2, ensure_ascii=False) + '\n')
 
 
-def quiet(*action):
+def quiet(action, *args, **options):
+    """The action's result, or its error as text: for an attempt that may legitimately fail."""
     try:
-        return action[0]()
+        return action(*args, **options)
     except Exception as error:
         return f'{type(error).__name__}: {error}'
 
@@ -133,7 +134,7 @@ class Guest:
     def build(self, target, sources, objects=(), libraries=(), frameworks=('AppKit', 'ApplicationServices'), header=None):
         """Compile a Swift helper of the test for this guest."""
         module = self.temp / 'module-cache'
-        module.mkdir(exist_ok=True)
+        module.mkdir(parents=True, exist_ok=True)
         command = ['xcrun', 'swiftc', '-module-cache-path', str(module), *map(str, sources), *map(str, objects), '-o', str(target)]
         if header is not None:
             command += ['-import-objc-header', str(header)]
@@ -336,7 +337,10 @@ def validate_tracks(meeting):
     refuse(set(tracks) == {'microphone', 'system'}, f'unexpected tracks: {sorted(tracks)}')
     report = {}
     for kind, track in tracks.items():
-        with wave.open(track['path'], 'rb') as wav:
+        path = Path(track['path'])
+        if not path.is_absolute():
+            path = Path(meeting.get('data_location') or '') / path
+        with wave.open(str(path), 'rb') as wav:
             refuse((wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (16000, 1, 2),
                    f'{kind} track is {wav.getframerate()} Hz, {wav.getnchannels()} channels, {wav.getsampwidth()} bytes')
             samples = array.array('h', wav.readframes(wav.getnframes()))
@@ -401,6 +405,7 @@ class Editor:
 
     def __init__(self, executable, directory):
         self.directory, self.identifier = directory, 0
+        directory.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen([str(executable), 'serve', str(directory)], stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL, start_new_session=True)
 
@@ -436,7 +441,7 @@ def private_roots(root, home=None):
     """Private XDG roots; HOME is replaced too when a private home is given."""
     env = dict(os.environ)
     for key in ('DATA', 'CACHE', 'CONFIG', 'STATE', 'RUNTIME'):
-        (root / key).mkdir(mode=0o700)
+        (root / key).mkdir(mode=0o700, parents=True)
         env['XDG_' + key + ('_DIR' if key == 'RUNTIME' else '_HOME')] = str(root / key)
     if home is not None:
         env['HOME'] = str(home)
@@ -459,9 +464,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='voiceless-acceptance-') as directory:
         root = Path(directory)
         guest = Guest(here, evidence)
-        consent = Consent(guest, root)
+        consent = Consent(guest, evidence.directory)  # its screenshots of the dialogs stay with the evidence
         try:
-            accept(guest, repository, arguments, evidence, root, consent)
+            accept(guest, here, repository, arguments, evidence, root, consent)
         except Exception as error:  # outside a check: still recorded, still an exit status
             evidence.checks.append({'name': 'the acceptance ran to its end', 'required': True, 'passed': False,
                                     'error': f'{type(error).__name__}: {error}'[:2000], 'seconds': 0})
@@ -476,7 +481,7 @@ def main():
     sys.exit(1 if failed else 0)
 
 
-def accept(guest, repository, arguments, evidence, root, consent):
+def accept(guest, here, repository, arguments, evidence, root, consent):
     version = json.loads((repository / 'desktop/tauri.conf.json').read_text())['version']
     microphone, output = f'coreaudio:{MICROPHONE}', f'coreaudio:{OUTPUT}'
     test_env = private_roots(root / 'tests')
@@ -520,9 +525,10 @@ def accept(guest, repository, arguments, evidence, root, consent):
         name = 'selected_fixture_tracks_drain_and_release_the_meeting_lease'
         before = len(consent.dialogs())
         with tones():
-            # A first refusal can be a consent prompt answered while the test ran: one more attempt then.
+            # The system output is tapped for the first time here: an attempt refused while a
+            # consent prompt was answered gets one more.
             first = quiet(meeting, name, fixture())
-            verdict = meeting(name, fixture()) if isinstance(first, str) and len(consent.dialogs()) > before else first
+            verdict = meeting(name, fixture()) if isinstance(first, str) else first
         refuse(not isinstance(verdict, str), f'{verdict}')
         return {'first_attempt': 'passed' if not isinstance(first, str) else first, **verdict,
                 'dialogs': consent.dialogs()[before:]}
@@ -532,11 +538,14 @@ def accept(guest, repository, arguments, evidence, root, consent):
         before = len(consent.dialogs())
         consent.set('deny')
         reset = guest.reset_microphone()
-        verdict = contract('macos_denied_microphone_reports_privacy_settings', True, timeout=150)
-        return {'reset': reset, 'verdict': verdict,
-                'meeting': meeting('denied_fixture_microphone_identifies_source_and_rolls_back_start',
-                                   {'VOICELESS_TEST_MEETING_MIC': microphone}),
-                'dialogs': consent.dialogs()[before:], 'decisions': quiet(guest.decisions)}
+        verdict = quiet(contract, 'macos_denied_microphone_reports_privacy_settings', True, timeout=150)
+        refused = quiet(meeting, 'denied_fixture_microphone_identifies_source_and_rolls_back_start',
+                        {'VOICELESS_TEST_MEETING_MIC': microphone})
+        row = {'reset': reset, 'verdict': verdict, 'meeting': refused,
+               'dialogs': consent.dialogs()[before:], 'decisions': quiet(guest.decisions)}
+        refuse(not (isinstance(verdict, str) or isinstance(refused, str)),
+               json.dumps(row, ensure_ascii=False, default=str)[:1800])
+        return row
     evidence.check('microphone refused through the system dialog', True, library_refused)
 
     def library_granted():
@@ -690,13 +699,13 @@ def accept(guest, repository, arguments, evidence, root, consent):
         evidence.check('installed daemon: microphone granted through the system dialog', True, granted_daemon)
 
         def dual_track():
-            # The system output is tapped the first time here: a consent prompt answered while the
-            # call waited can refuse that first attempt, so it gets one more.
-            before = len(consent.dialogs())
+            # The system output is tapped for the first time here: an attempt refused while a
+            # consent prompt was answered gets one more.
             with tones():
-                first = quiet(recording, selection)
-                path = recording(selection) if isinstance(first, str) and len(consent.dialogs()) > before else first
-                refuse(not isinstance(path, str), f'{path}')
+                try:
+                    path = recording(selection)
+                except Refused:
+                    path = recording(selection)
                 daemon.api(path + '/stop', instance)
             return settled(path, 'completed')
         evidence.check('installed daemon: dual-track meeting of both loopback lines', True, dual_track)
@@ -822,3 +831,7 @@ def accept(guest, repository, arguments, evidence, root, consent):
         evidence.check('installed desktop: window, status item and one resident desktop', False, shell)
     finally:
         daemon.stop()
+
+
+if __name__ == "__main__":
+    main()
