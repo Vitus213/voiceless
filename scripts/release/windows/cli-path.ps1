@@ -44,10 +44,9 @@ function Get-Integrity {
 }
 
 function Invoke-Inno([string]$Program, [string]$Switches, [string]$Log) {
-    $start = [System.Diagnostics.ProcessStartInfo]::new($Program, "$Switches /LOG=`"$Log`"")
-    $start.UseShellExecute = $false
-    $process = [System.Diagnostics.Process]::Start($start)
-    if (-not $process.WaitForExit(240000)) { $process.Kill(); throw "$Program did not exit" }
+    # The uninstaller can continue in a temporary copy after its launcher exits.
+    # On Windows, Start-Process -Wait also waits for descendants of the launcher.
+    $process = Start-Process -FilePath $Program -ArgumentList "$Switches /LOG=`"$Log`"" -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         Get-Content -Tail 15 -LiteralPath $Log -ErrorAction SilentlyContinue
         throw "$Program exited with $($process.ExitCode)"
