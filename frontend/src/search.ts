@@ -3,10 +3,10 @@
 // scripts/i18n.mjs keeps) that ends with the keyboard on the row's control.
 import INDEX from './settings-index.json';
 import { chooseLocale, locale, t } from './i18n';
-import { emptyState, h, openDialog, setChildren, storage, tiles } from './console.js';
+import { NATIVE, emptyState, h, openDialog, setChildren, storage, tiles } from './console.js';
 
-/** One settings row of the index: where it is and how it is named. */
-export type Setting = { page: string; title: string; section: string | null; label: string; tip?: string };
+/** One settings row of the index: where it is and how it is named; a `linux` row exists on Linux alone. */
+export type Setting = { page: string; title: string; section: string | null; label: string; tip?: string; linux?: boolean };
 
 /** Theme pins of the rail's theme button: "" follows the system. */
 const THEMES = [
@@ -35,16 +35,21 @@ function fit(word: string, text: string, name: string): number {
   return text === name ? 4 : position === 0 ? 3 : 1;
 }
 
-/** The settings whose label, help or section has every word of `query`, in either language; the best first. */
+/**
+ * The settings whose label, help or section has every word of `query`, in
+ * either language; the best first. The Linux tools' rows are left out where
+ * the runtime is native.
+ */
 export function findSettings(query: string): Setting[] {
   const words = [...new Set(fold(query).trim().split(' ').filter(Boolean))];
   if (!words.length) return [];
-  return INDEX.map((setting) => {
-    const score = words.reduce((total, word) => total
-      * Math.max(fit(word, setting.label, setting.label), fit(word, t(setting.label), setting.label),
-        fit(word, setting.section ?? '', ''), fit(word, setting.tip ?? '', setting.tip ?? '')), 1);
-    return { setting, score };
-  })
+  return INDEX.filter((setting) => !setting.linux || !NATIVE)
+    .map((setting) => {
+      const score = words.reduce((total, word) => total
+        * Math.max(fit(word, setting.label, setting.label), fit(word, t(setting.label), setting.label),
+          fit(word, setting.section ?? '', ''), fit(word, setting.tip ?? '', setting.tip ?? '')), 1);
+      return { setting, score };
+    })
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 12)

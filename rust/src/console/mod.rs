@@ -73,6 +73,12 @@ const INDEX: &str = include_str!(concat!(env!("VOICELESS_CONSOLE_DIST"), "/index
 const APP_JS: &str = include_str!(concat!(env!("VOICELESS_CONSOLE_DIST"), "/app.js"));
 const STYLE_CSS: &str = include_str!(concat!(env!("VOICELESS_CONSOLE_DIST"), "/style.css"));
 
+/// The system this binary runs on, as `std::env::consts::OS` names it
+/// (`linux`, `macos`, `windows`). It is the runtime that delivers the text,
+/// so the page offers its typing controls, not those of whatever system the
+/// browser runs on.
+const PLATFORM: &str = std::env::consts::OS;
+
 /// Everything the handlers share; one instance per server behind an `Arc`
 /// in axum's state.
 pub struct ConsoleState {
@@ -550,12 +556,15 @@ fn same_origin(headers: &HeaderMap, port: u16) -> bool {
 
 /// `GET /` and `GET /index.html`: the bundled console shell
 /// with the token substituted for the `VOICELESS_TOKEN` placeholder in
-/// `<meta name="voiceless-token">`. Sent with
-/// `Cache-Control: no-store`, so the token never lands in a disk cache, and
-/// `Referrer-Policy: no-referrer`, so no request made from the console
-/// reveals where it came from. Always 200.
+/// `<meta name="voiceless-token">`, and [`PLATFORM`] for the
+/// `VOICELESS_PLATFORM` placeholder in `<meta name="voiceless-platform">`.
+/// Sent with `Cache-Control: no-store`, so the token never lands in a disk
+/// cache, and `Referrer-Policy: no-referrer`, so no request made from the
+/// console reveals where it came from. Always 200.
 async fn index(State(state): State<Arc<ConsoleState>>) -> Response {
-    let page = INDEX.replace("{{VOICELESS_TOKEN}}", &state.token);
+    let page = INDEX
+        .replace("{{VOICELESS_TOKEN}}", &state.token)
+        .replace("{{VOICELESS_PLATFORM}}", PLATFORM);
     (
         [
             (header::CACHE_CONTROL, "no-store"),

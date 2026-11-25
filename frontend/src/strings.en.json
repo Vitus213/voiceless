@@ -489,6 +489,7 @@
     "录音浮层": "Recording overlay",
     "跟随桌面设置": "Follow the desktop setting",
     "由桌面已启用的 Eww 浮层显示": "Shown by the Eww overlay the desktop has enabled",
+    "录音状态显示在 Voiceless 窗口中": "The Voiceless window shows the recording status.",
     "录音时暂停音乐": "Pause music while recording",
     "结束后自动恢复播放": "Resumes playback when done",
     "开始与结束提示音": "Start and end cues",

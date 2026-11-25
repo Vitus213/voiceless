@@ -4,7 +4,8 @@
 //   src/strings.en.json      every string and template shape handed to t()
 //                            in src/, each with its English
 //   src/settings-index.json  every settings row: its label, help, page and
-//                            section, for the settings search
+//                            section, for the settings search; a row built
+//                            inside linuxOnly(...) is Linux's alone (`linux`)
 //
 //   node scripts/i18n.mjs --check   fail on a string without English, a stale
 //                                    entry, a moved setting or Chinese outside
@@ -112,7 +113,8 @@ for (const name of files) {
       };
       collect(node.arguments[0]);
     }
-    // A settings row with a plain label: row(label, control, { tip }).
+    // A settings row with a plain label: row(label, control, { tip }). One
+    // built inside linuxOnly(...) exists on Linux alone: `linux: true`.
     if (ts.isCallExpression(node) && rowLike.has(node.expression.getText(parsed)) && literalOf(node.arguments[0]) !== null) {
       const label = literalOf(node.arguments[0]);
       const options = node.arguments[2];
@@ -120,15 +122,23 @@ for (const name of files) {
         ? options.properties.find((property) => property.name?.getText(parsed) === 'tip')?.initializer
         : undefined;
       let section = null;
+      let linux = false;
       for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
-        if (ts.isCallExpression(ancestor) && ancestor.expression.getText(parsed) === 'group') section = literalOf(ancestor.arguments[1]);
+        if (!ts.isCallExpression(ancestor)) continue;
+        const callee = ancestor.expression.getText(parsed);
+        if (callee === 'group') section = literalOf(ancestor.arguments[1]);
+        if (callee === 'linuxOnly') linux = true;
       }
       // The page factory is the nearest enclosing function that mounts a route.
       for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
         if (!ts.isFunctionDeclaration(ancestor) || !ancestor.name) continue;
         const route = routes[ancestor.name.text];
         if (!route) continue;
-        settings.push({ page: route.page, title: route.title, section, label, ...(literalOf(tip) ? { tip: literalOf(tip) } : {}) });
+        settings.push({
+          page: route.page, title: route.title, section, label,
+          ...(literalOf(tip) ? { tip: literalOf(tip) } : {}),
+          ...(linux ? { linux: true } : {}),
+        });
         break;
       }
     }

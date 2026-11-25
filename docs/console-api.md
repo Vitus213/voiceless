@@ -5,6 +5,10 @@ The console is served by `voiceless daemon` (and, without live control, by
 single embedded app (`rust/assets/console/`); everything below is JSON over
 HTTP unless noted.
 
+The served page identifies the runtime's operating system in the
+`voiceless-platform` meta tag (`linux`, `macos` or `windows`). The settings
+page uses it to show the available text delivery methods and filter search results.
+
 ## Security
 
 - Every request must carry `Host: 127.0.0.1:<port>`, `localhost:<port>` or
