@@ -15,6 +15,13 @@ test.use({ viewport: { width: 390, height: 844 } });
 test('navigation preserves existing links, device choices and keyboard focus', async ({ page, consoleUrl }) => {
   const errors: Error[] = [];
   page.on('pageerror', (error) => errors.push(error));
+  // The picker offers a device only where the catalog lists it for the selected model, so this is
+  // the catalog of a build with both GPU engines, whatever the build under test has.
+  await page.route('**/api/models', async (route) => {
+    const response = await route.fetch();
+    const catalog: { kind: string; devices: string[] }[] = await response.json();
+    await route.fulfill({ json: catalog.map((model) => model.kind === 'gguf' ? { ...model, devices: ['cpu', 'cuda', 'vulkan', 'auto'] } : model) });
+  });
   await page.goto(`${consoleUrl}#live`);
   const nav = page.getByRole('navigation', { name: '控制台' });
   const session = page.getByRole('region', { name: '语音输入' });
