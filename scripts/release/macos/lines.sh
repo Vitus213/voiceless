@@ -35,8 +35,19 @@ for line in '2ch 3e0f8102ed27e3528f0c186927837f9f0d843a26580c2ea7507d7c8ef019ead
 done
 
 # The HAL loads its plug-ins when coreaudiod starts.
-sudo launchctl kickstart -k system/com.apple.audio.coreaudiod
-"$RUNNER_TEMP/audio" wait BlackHole2ch_UID present 40
-"$RUNNER_TEMP/audio" wait BlackHole16ch_UID present 40
+echo "== devices as the installers left them"
 "$RUNNER_TEMP/audio" list
+sudo launchctl kickstart -k system/com.apple.audio.coreaudiod || echo "restarting coreaudiod exited $?"
+status=0
+"$RUNNER_TEMP/audio" wait BlackHole2ch_UID present 40 || status=$?
+"$RUNNER_TEMP/audio" wait BlackHole16ch_UID present 20 || status=$?
+echo "== devices after coreaudiod restarted"
+"$RUNNER_TEMP/audio" list
+if [ "$status" != 0 ]; then
+  echo "The loopback endpoints did not appear (exit $status)"
+  ls -la /Library/Audio/Plug-Ins/HAL/ "/Library/Audio/Plug-Ins/HAL/"*/Contents/MacOS/
+  pgrep -l coreaudiod || echo "coreaudiod is not running"
+  system_profiler SPAudioDataType 2>/dev/null | grep -E '^ {8}[^ ]|Transport|BlackHole' | head -30
+  exit "$status"
+fi
 echo "VOICELESS_LOOPBACK=$work" >> "$GITHUB_ENV"
