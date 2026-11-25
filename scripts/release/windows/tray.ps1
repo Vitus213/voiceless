@@ -255,7 +255,7 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Window)
             $shellIcon = Find-ShellIcon
             # While an icon is hidden, the shell reports the button that reveals it, or nothing.
             $behind = [bool]($shellIcon -and (Test-Covers $cover $shellIcon.Rect))
-            Say "attempt $attempt: shell icon $(if ($shellIcon) { "id=$($shellIcon.Id) at $(Say-Rect $shellIcon.Rect)" } else { 'none' }); chevron $(Say-ElementRect $cover); behind it: $behind"
+            Say "attempt ${attempt}: shell icon $(if ($shellIcon) { "id=$($shellIcon.Id) at $(Say-Rect $shellIcon.Rect)" } else { 'none' }); chevron $(Say-ElementRect $cover); behind it: $behind"
             $placed = $null
             if ($shellIcon -and !$behind) {
                 $placed = @{ Icon = $shellIcon; Hidden = $false }
