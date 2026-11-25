@@ -207,14 +207,20 @@ try {
         account = $identity.account
         sid = $identity.sid
         profile = $identity.profile
+        localAppData = $identity.localAppData
+        temp = $identity.temp
         administrator = $identity.administrator
         integrity = Format-Level $identity.integrity
         desktop = $identity.desktop
         groups = @($identity.groups)
+        processPath = $identity.processPath
     }
     if ($identity.integrity -ne 0x2000) { throw "Windows runs the standard user at $(Format-Level $identity.integrity), not at medium integrity" }
     if ($identity.administrator) { throw "Windows treats $name as an administrator" }
     if ($identity.desktop -ne 'ok') { throw "The standard user cannot show a window on the interactive desktop: $($identity.desktop)" }
+    if ($identity.profile -eq $env:USERPROFILE -or $identity.localAppData -ne (Join-Path $identity.profile 'AppData\Local')) {
+        throw "The standard user does not run with the profile of their own account: profile '$($identity.profile)', LOCALAPPDATA '$($identity.localAppData)'"
+    }
     Write-Output "Standard user $($identity.account) runs at $(Format-Level $identity.integrity); the harness runs at $(Format-Level (Get-Level $PID))"
 
     # Per-user installation without administrative rights.

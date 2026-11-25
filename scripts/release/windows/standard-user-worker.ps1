@@ -16,11 +16,77 @@ param(
     [string]$Run = '1'
 )
 $ErrorActionPreference = 'Stop'
+Add-Type -Path (Join-Path $PSScriptRoot 'ProcessToken.cs')
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace VoicelessWorker {
+  // The profile directory of the account a token belongs to.
+  public static class Profile {
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool GetUserProfileDirectoryW(IntPtr token, IntPtr buffer, ref uint size);
+
+    public static string Directory(IntPtr token) {
+      uint size = 0;
+      GetUserProfileDirectoryW(token, IntPtr.Zero, ref size);
+      IntPtr buffer = Marshal.AllocHGlobal((IntPtr)(size * 2 + 2));
+      try {
+        if (!GetUserProfileDirectoryW(token, buffer, ref size)) {
+          throw new Win32Exception(Marshal.GetLastWin32Error(), "GetUserProfileDirectoryW");
+        }
+        return Marshal.PtrToStringUni(buffer);
+      } finally {
+        Marshal.FreeHGlobal(buffer);
+      }
+    }
+  }
+}
+'@
+
+# The secondary logon service starts this script with the environment of the
+# harness that asked for it. A console this user opens has the environment of
+# their own account; it is rebuilt here the way a logon builds it.
+function Enter-OwnEnvironment {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $domain, $user = $identity.Name.Split('\')
+    $directory = [VoicelessWorker.Profile]::Directory($identity.Token)
+    $root = [IO.Path]::GetPathRoot($directory)
+    $environment = [ordered]@{
+        USERPROFILE = $directory
+        USERNAME = $user
+        USERDOMAIN = $domain
+        HOMEDRIVE = $root.TrimEnd('\')
+        HOMEPATH = $directory.Substring($root.Length - 1)
+        APPDATA = Join-Path $directory 'AppData\Roaming'
+        LOCALAPPDATA = Join-Path $directory 'AppData\Local'
+        TEMP = Join-Path $directory 'AppData\Local\Temp'
+        TMP = Join-Path $directory 'AppData\Local\Temp'
+    }
+    $expand = [regex]::new('%([^%]+)%')
+    $resolve = [System.Text.RegularExpressions.MatchEvaluator] { param($match) if ($environment.Contains($match.Groups[1].Value)) { [string]$environment[$match.Groups[1].Value] } else { $match.Value } }
+    $ofDevice, $ofUser = [ordered]@{}, [ordered]@{}
+    $machine = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+    $own = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    try {
+        foreach ($pair in @(@($machine, $ofDevice), @($own, $ofUser))) {
+            foreach ($name in $pair[0].GetValueNames()) {
+                $pair[1][$name] = [string]$pair[0].GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            }
+        }
+    } finally { $machine.Dispose(); $own.Dispose() }
+    foreach ($name in $ofDevice.Keys) { $environment[$name] = $expand.Replace($ofDevice[$name], $resolve) }
+    foreach ($name in $ofUser.Keys) { if ($name -ine 'Path') { $environment[$name] = $expand.Replace($ofUser[$name], $resolve) } }
+    $environment['Path'] = @(@($ofDevice['Path'], $ofUser['Path']) | ForEach-Object { if ($_) { $expand.Replace($_, $resolve) } }) -join ';'
+    foreach ($name in @($environment.Keys)) { [Environment]::SetEnvironmentVariable($name, [string]$environment[$name]) }
+    foreach ($place in $env:TEMP, $env:LOCALAPPDATA, $env:APPDATA) { $null = New-Item -ItemType Directory -Path $place -Force }
+}
+Enter-OwnEnvironment
 $env:XDG_CONFIG_HOME = Join-Path $Root 'config'
 $env:XDG_DATA_HOME = Join-Path $Root 'data'
 $env:XDG_CACHE_HOME = Join-Path $Root 'cache'
 $log = Join-Path $Evidence "worker-$Step-$Run.log"
-Add-Type -Path (Join-Path $PSScriptRoot 'ProcessToken.cs')
 
 function Note([string]$Text) {
     Add-Content -LiteralPath $log -Value ('{0:HH:mm:ss.fff} {1}' -f [DateTime]::Now, $Text) -Encoding utf8
@@ -132,6 +198,9 @@ try {
                 administrator = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
                 integrity = [ProcessToken]::Integrity([uint32]$PID)
                 profile = $env:USERPROFILE
+                localAppData = $env:LOCALAPPDATA
+                temp = $env:TEMP
+                processPath = $env:Path
                 desktop = $desktop
                 groups = @(& whoami.exe /groups /fo csv /nh | Where-Object { $_ })
                 path = $lookup.path
