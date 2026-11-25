@@ -1,8 +1,8 @@
 //! `voiceless transcribe` and `voiceless record` subcommands: the one-shot
 //! batch path over `batch.rs`, dispatched from `main.rs`.
 //!
-//! Both commands load the default config (`AppConfig` from the XDG config
-//! dir; a bad config fails before any file is read or audio captured),
+//! Both commands load `--config` or the default user config before capture or
+//! reading a WAV. They use the same settings for recording and transcription,
 //! take `--backend` or else `[asr] batch_backend`, run the blocking
 //! transcription on `spawn_blocking` and print or inject the text.
 //! Unlike `voiceless stream` the result skips `[text]` cleanup, modes and
@@ -18,15 +18,17 @@
 //! `{"type":"finalized","injection":{...}}` (the `InjectionResult`).
 //! Without `--json` and without injection the bare text is printed.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::batch::{self, BatchBackend};
-use crate::config::{load_default_config, AppConfig};
+use crate::config::AppConfig;
 use crate::coordinator::TextInjector;
 use crate::stream::ConfiguredInjector;
 
 /// `voiceless transcribe <wav> [--backend] [--inject] [--json]`.
 pub struct TranscribeArgs {
+    /// Explicit configuration file, if supplied on the command line.
+    pub config_path: Option<PathBuf>,
     /// The 16 kHz mono PCM16 WAV to transcribe.
     pub wav: PathBuf,
     /// Overrides `[asr] batch_backend` (`cloud` | `local` | `sensevoice`).
@@ -37,8 +39,11 @@ pub struct TranscribeArgs {
     pub json: bool,
 }
 
-fn load_selection(override_name: Option<&str>) -> Result<(AppConfig, BatchBackend), String> {
-    let config = load_default_config().map_err(|error| error.to_string())?;
+fn load_selection(
+    config_path: Option<&Path>,
+    override_name: Option<&str>,
+) -> Result<(AppConfig, BatchBackend), String> {
+    let config = AppConfig::load_optional(config_path).map_err(|error| error.to_string())?;
     let backend = BatchBackend::parse(override_name.unwrap_or(&config.asr.batch_backend))?;
     Ok((config, backend))
 }
@@ -48,7 +53,8 @@ fn load_selection(override_name: Option<&str>) -> Result<(AppConfig, BatchBacken
 /// and stderr output, and with `inject` the configured injector (child
 /// processes or the Fcitx5 bridge).
 pub async fn transcribe(args: TranscribeArgs) -> i32 {
-    let (config, backend) = match load_selection(args.backend.as_deref()) {
+    let selection = load_selection(args.config_path.as_deref(), args.backend.as_deref());
+    let (config, backend) = match selection {
         Ok(selection) => selection,
         Err(error) => {
             eprintln!("Voiceless: {error}");
@@ -122,6 +128,8 @@ async fn transcribe_wav(
 
 /// `voiceless record --seconds N [--backend] [--no-inject] [--json]`.
 pub struct RecordArgs {
+    /// Explicit configuration file, if supplied on the command line.
+    pub config_path: Option<PathBuf>,
     /// Requested recording length; passed to `batch::record_seconds`
     /// (see its doc about how it is used).
     pub seconds: f64,
@@ -133,10 +141,11 @@ pub struct RecordArgs {
     pub json: bool,
 }
 
-/// Run `voiceless record`: validate the selected backend before opening
-/// `pw-record`, then transcribe the scratch WAV with the same config.
+/// Validate the backend before opening the selected microphone. Use the same
+/// settings to transcribe the completed recording.
 pub async fn record(args: RecordArgs) -> i32 {
-    let (config, backend) = match load_selection(args.backend.as_deref()) {
+    let selection = load_selection(args.config_path.as_deref(), args.backend.as_deref());
+    let (config, backend) = match selection {
         Ok(selection) => selection,
         Err(error) => {
             eprintln!("Voiceless: {error}");
@@ -144,15 +153,14 @@ pub async fn record(args: RecordArgs) -> i32 {
         }
     };
     let injector = (!args.no_inject).then(|| ConfiguredInjector::new(config.inject.clone()));
-    let wav_path = batch::temp_wav_path();
-    // `pw-record` is waited on synchronously; keep that off the runtime.
-    match tokio::task::spawn_blocking({
-        let wav_path = wav_path.clone();
-        move || batch::record_seconds(args.seconds, &wav_path)
+    let recording = tokio::task::spawn_blocking(move || {
+        let path = batch::temp_wav_path();
+        batch::record_seconds(args.seconds, &path, config.audio.source.as_deref())?;
+        Ok::<_, batch::BatchError>((path, config))
     })
-    .await
-    {
-        Ok(Ok(())) => {}
+    .await;
+    let (wav_path, config) = match recording {
+        Ok(Ok(recording)) => recording,
         Ok(Err(error)) => {
             eprintln!("Voiceless: {error}");
             return 1;
@@ -161,7 +169,7 @@ pub async fn record(args: RecordArgs) -> i32 {
             eprintln!("Voiceless: {error}");
             return 1;
         }
-    }
+    };
     let code = transcribe_wav(wav_path.clone(), config, backend, injector, args.json).await;
     let _ = std::fs::remove_file(&wav_path);
     code
