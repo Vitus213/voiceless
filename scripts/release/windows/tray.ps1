@@ -70,6 +70,9 @@ public static RECT? IconRect(IntPtr tray, uint id) {
 '@
     }
     function Say([string]$Text) { Write-Host "tray: $Text" }
+    function Say-ElementRect($Rect) {
+        if ($Rect.IsEmpty) { 'empty' } else { '({0},{1} {2}x{3})' -f [int]$Rect.Left, [int]$Rect.Top, [int]$Rect.Width, [int]$Rect.Height }
+    }
     function Say-Rect($Rect) {
         if ($null -eq $Rect) { 'none' } else { '({0},{1})-({2},{3})' -f $Rect.Left, $Rect.Top, $Rect.Right, $Rect.Bottom }
     }
@@ -92,7 +95,7 @@ public static RECT? IconRect(IntPtr tray, uint id) {
         $path = Join-Path ([IO.Path]::GetTempPath()) 'tray-tree51.ps1'
         try {
             Set-Content -LiteralPath $path -Encoding UTF8 -Value @'
-param([IntPtr]$Window)
+param([long]$Window)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
 function Walk($Node, [int]$Depth) {
@@ -102,22 +105,22 @@ function Walk($Node, [int]$Depth) {
     $child = $walker.GetFirstChild($Node)
     while ($child) { Walk $child ($Depth + 1); $child = $walker.GetNextSibling($child) }
 }
-Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
+Walk ([System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Window)) 0
 '@
             $start = [System.Diagnostics.ProcessStartInfo]::new('powershell.exe')
             $start.UseShellExecute = $false
             $start.CreateNoWindow = $true
             $start.RedirectStandardOutput = $true
             $start.RedirectStandardError = $true
-            foreach ($argument in @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $path, "$Window")) { $start.ArgumentList.Add($argument) }
+            foreach ($argument in @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $path, "$($Window.ToInt64())")) { $start.ArgumentList.Add($argument) }
             $process = [System.Diagnostics.Process]::Start($start)
             $output = $process.StandardOutput.ReadToEndAsync()
             $errors = $process.StandardError.ReadToEndAsync()
-            if (!$process.WaitForExit(20000)) { $process.Kill(); throw 'Windows PowerShell did not answer in 20 s' }
+            if (!$process.WaitForExit(30000)) { $process.Kill(); throw 'Windows PowerShell did not answer in 30 s' }
             $output.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ } | ForEach-Object { Say "5.1: $_" }
             $errors.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ } | ForEach-Object { Say "5.1 error: $_" }
         } catch { Say "5.1 probe failed: $($_.Exception.Message)" }
-        finally { Remove-Path -LiteralPath $path -ErrorAction SilentlyContinue }
+        finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
     }
     function Get-Accessible([IntPtr]$Window) {
         $interfaceId = [guid]'618736e0-3c3d-11cf-810c-00aa00389b71'
@@ -128,7 +131,9 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
     }
     function Get-AccValue($Accessible, [string]$Member, $Child = 0) {
         # A parameterized MSAA property, through PowerShell's COM adapter or else IDispatch.
-        try { return $Accessible.$Member.Invoke($Child) }
+        $property = $Accessible.$Member
+        if ($property -is [System.Management.Automation.PSParameterizedProperty]) { return $property.Get($Child) }
+        try { return $property.Invoke($Child) }
         catch {
             foreach ($flags in 'GetProperty', 'InvokeMethod') {
                 try {
@@ -157,7 +162,7 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
     function Say-AccChildren([IntPtr]$Window, [string]$Label) {
         try {
             $accessible = Get-Accessible $Window
-            Say "$Label MSAA: role=$(Get-AccValue $accessible 'accRole') name=[$(Get-AccValue $accessible 'accName')] children=$($accessible.accChildCount)"
+            Say "$Label MSAA: role=$(Get-AccValue $accessible 'accRole') name=[$(Get-AccValue $accessible 'accName')] children=$($accessible.accChildCount); members: $((Get-Member -InputObject $accessible -MemberType Method, Property, ParameterizedProperty | ForEach-Object { $_.Name + '(' + $_.MemberType + ')' }) -join ' ')"
             foreach ($child in Get-AccChildren $accessible) {
                 Say ('{0} MSAA child {1}: name=[{2}] role={3} rect=({4},{5} {6}x{7})' -f $Label, $child.Index, $child.Name, $child.Role, $child.Location[0], $child.Location[1], $child.Location[2], $child.Location[3])
             }
@@ -180,13 +185,15 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
         $root.FindAll($children, (New-Condition $element::ClassNameProperty '#32768')) |
             Where-Object { $_.Current.ProcessId -in $Owners } | Select-Object -First 1
     }
-    function Wait-For([scriptblock]$Probe, [string]$Failure, [int]$Seconds = 10) {
+    function Wait-For([scriptblock]$Probe, [string]$Failure = '', [int]$Seconds = 10) {
+        # What the probe returns, or nothing when it never does and no failure is given.
         $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
         do {
             if ($found = & $Probe) { return $found }
             Start-Sleep -Milliseconds 150
         } while ([DateTime]::UtcNow -lt $deadline)
-        throw $Failure
+        if ($Failure) { throw $Failure }
+        $null
     }
     function Move-Pointer([int]$X, [int]$Y) {
         $null = [VoicelessTest.Tray]::SetCursorPos($X, $Y)
@@ -203,6 +210,11 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
         $rect = $Target.Current.BoundingRectangle
         if ($rect.IsEmpty) { throw "The '$($Target.Current.Name)' target is not on screen" }
         Click-At ([int]($rect.Left + $rect.Width / 2)) ([int]($rect.Top + $rect.Height / 2)) $Button
+    }
+    function Send-Escape {
+        # keybd_event: VK_ESCAPE 0x1B, then the same key with KEYEVENTF_KEYUP 0x0002.
+        [VoicelessTest.Tray]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
+        [VoicelessTest.Tray]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero)
     }
     function Close-Overflow {
         Move-Pointer ([VoicelessTest.Tray]::GetSystemMetrics(0) / 2) ([VoicelessTest.Tray]::GetSystemMetrics(1) / 2)
@@ -223,6 +235,9 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
     function Test-Inside($Inner, $Outer) {
         $Inner.Left -ge $Outer.Left -and $Inner.Right -le ($Outer.Left + $Outer.Width) -and $Inner.Top -ge $Outer.Top -and $Inner.Bottom -le ($Outer.Top + $Outer.Height)
     }
+    function Test-Covers($Outer, $Inner) {
+        $Inner.Left -lt ($Outer.Left + $Outer.Width) -and $Outer.Left -lt $Inner.Right -and $Inner.Top -lt ($Outer.Top + $Outer.Height) -and $Outer.Top -lt $Inner.Bottom
+    }
 
     $taskbar = Find-Class $root $children 'Shell_TrayWnd'
     if (!$taskbar) { throw "Explorer has no taskbar (Shell_TrayWnd) in this session, so the '$Tooltip' icon cannot be observed" }
@@ -233,41 +248,59 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
     # The taskbar's leftmost button shows and hides the overflow that holds the hidden icons.
     $chevron = $area.FindAll($children, (New-Condition $element::ClassNameProperty 'Button')) |
         Sort-Object { $_.Current.BoundingRectangle.Left } | Select-Object -First 1
-    $location = 'notification area'
+    $cover = if ($chevron) { $chevron.Current.BoundingRectangle } else { [System.Windows.Rect]::Empty }
     try {
-        $shellIcon = Find-ShellIcon
-        # While an icon is hidden, the shell reports the button that reveals it.
-        $behindChevron = $false
-        if ($chevron -and $shellIcon) {
-            $cover = $chevron.Current.BoundingRectangle
-            $behindChevron = $shellIcon.Rect.Left -lt ($cover.Left + $cover.Width) -and $cover.Left -lt $shellIcon.Rect.Right -and $shellIcon.Rect.Top -lt ($cover.Top + $cover.Height) -and $cover.Top -lt $shellIcon.Rect.Bottom
-        }
-        Say "host tray window: $([VoicelessTest.Tray]::Describe($trays[0])); shell icon: $(if ($shellIcon) { "id=$($shellIcon.Id) at $(Say-Rect $shellIcon.Rect)" } else { 'none' }); chevron: $(if ($chevron) { 'yes' } else { 'none' }); behind it: $behindChevron"
-        if (!$shellIcon -or $behindChevron) {
-            if (!$chevron) { throw "The shell has no '$Tooltip' icon and the taskbar has no hidden-icons button" }
-            if (& $hidden) { Invoke-Click $chevron Left }
-            $null = Wait-For { $flyout = & $overflow; $flyout -and !$flyout.Current.IsOffscreen } 'The hidden-icons button did not open the notification overflow'
-            $location = 'notification overflow'
-            $shellIcon = Wait-For {
-                $flyout = & $overflow
-                $found = Find-ShellIcon
-                if ($found -and $flyout -and !$flyout.Current.IsOffscreen -and (Test-Inside $found.Rect $flyout.Current.BoundingRectangle)) { $found }
-            } "The shell has no '$Tooltip' icon in the notification overflow"
-            $flyoutHandle = [IntPtr]((& $overflow).Current.NativeWindowHandle)
-            Say "overflow: $([VoicelessTest.Tray]::Describe($flyoutHandle))"
-            Save-Screenshot '2-overflow'
-            foreach ($window in [VoicelessTest.Tray]::Children($flyoutHandle)) {
-                Say "overflow child $([VoicelessTest.Tray]::Describe($window))"
-                Say-AccChildren $window 'overflow'
+        $menu = $null
+        for ($attempt = 1; $attempt -le 3 -and !$menu; $attempt++) {
+            $shellIcon = Find-ShellIcon
+            # While an icon is hidden, the shell reports the button that reveals it, or nothing.
+            $behind = [bool]($shellIcon -and (Test-Covers $cover $shellIcon.Rect))
+            Say "attempt $attempt: shell icon $(if ($shellIcon) { "id=$($shellIcon.Id) at $(Say-Rect $shellIcon.Rect)" } else { 'none' }); chevron $(Say-ElementRect $cover); behind it: $behind"
+            $placed = $null
+            if ($shellIcon -and !$behind) {
+                $placed = @{ Icon = $shellIcon; Hidden = $false }
+            } else {
+                if (!$chevron) { throw "The shell has no '$Tooltip' icon and the taskbar has no hidden-icons button" }
+                if (& $hidden) { Invoke-Click $chevron Left }
+                $null = Wait-For { $flyout = & $overflow; $flyout -and !$flyout.Current.IsOffscreen } 'The hidden-icons button did not open the notification overflow'
+                $placed = Wait-For {
+                    $found = Find-ShellIcon
+                    if (!$found) { return $null }
+                    $flyout = & $overflow
+                    if ($flyout -and !$flyout.Current.IsOffscreen -and (Test-Inside $found.Rect $flyout.Current.BoundingRectangle)) { return @{ Icon = $found; Hidden = $true } }
+                    if (!(Test-Covers $cover $found.Rect)) { return @{ Icon = $found; Hidden = $false } }
+                    $null
+                } '' 5
+                if (!$placed) { throw "The shell has no '$Tooltip' icon for the host's tray window, so the host registered none" }
+                if (!$placed.Hidden) { Close-Overflow }
             }
-            Read-Tree51 $flyoutHandle
+            $shellIcon = $placed.Icon
+            $location = if ($placed.Hidden) { 'notification overflow' } else { 'notification area' }
+            $iconRect = $shellIcon.Rect
+            $x = [int](($iconRect.Left + $iconRect.Right) / 2)
+            $y = [int](($iconRect.Top + $iconRect.Bottom) / 2)
+            Say "shell icon id=$($shellIcon.Id) at $(Say-Rect $iconRect) in the $location"
+            if ($attempt -eq 1) {
+                Save-Screenshot '2-icon'
+                if ($placed.Hidden) {
+                    $flyoutHandle = [IntPtr]((& $overflow).Current.NativeWindowHandle)
+                    Say "overflow: $([VoicelessTest.Tray]::Describe($flyoutHandle))"
+                    foreach ($window in [VoicelessTest.Tray]::Children($flyoutHandle)) {
+                        Say "overflow child $([VoicelessTest.Tray]::Describe($window))"
+                        Say-AccChildren $window 'overflow'
+                    }
+                    Read-Tree51 $flyoutHandle
+                }
+            }
+            Click-At $x $y Right
+            $menu = Wait-For { Find-Menu $ProcessId } '' 3
+            if (!$menu) {
+                # A menu of another program may have opened on the wrong icon.
+                if (Find-Class $root $children '#32768') { Send-Escape }
+                Close-Overflow
+            }
         }
-        $iconRect = $shellIcon.Rect
-        $x = [int](($iconRect.Left + $iconRect.Right) / 2)
-        $y = [int](($iconRect.Top + $iconRect.Bottom) / 2)
-        Say "shell icon id=$($shellIcon.Id) at $(Say-Rect $iconRect) in the $location"
-        Click-At $x $y Right
-        $menu = Wait-For { Find-Menu $ProcessId } "The '$Tooltip' icon did not open a menu owned by process $ProcessId"
+        if (!$menu) { throw "The '$Tooltip' icon did not open a menu owned by process $ProcessId" }
         $menuHandle = [IntPtr]$menu.Current.NativeWindowHandle
         Say "host menu: $([VoicelessTest.Tray]::Describe($menuHandle))"
         Save-Screenshot '3-menu'
@@ -286,11 +319,7 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle($Window)) 0
         Save-Screenshot '4-after'
         return "Tray icon (shell id $($shellIcon.Id) at $(Say-Rect $iconRect)) observed in the $location; its menu, owned by process $ProcessId, offers [$(($items | ForEach-Object { $_.Name }) -join ', ')]; '$Item' chosen"
     } finally {
-        if (Find-Menu @($ProcessId, $taskbar.Current.ProcessId)) {
-            # keybd_event: VK_ESCAPE 0x1B, then the same key with KEYEVENTF_KEYUP 0x0002.
-            [VoicelessTest.Tray]::keybd_event(0x1B, 0, 0, [UIntPtr]::Zero)
-            [VoicelessTest.Tray]::keybd_event(0x1B, 0, 2, [UIntPtr]::Zero)
-        }
+        if (Find-Menu @($ProcessId, $taskbar.Current.ProcessId)) { Send-Escape }
         Close-Overflow
     }
 }
