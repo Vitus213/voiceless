@@ -458,10 +458,24 @@ def open_editor(document):
 
 
 def save(document):
-    """⌘S in the frontmost TextEdit, through System Events; what the document's file holds afterwards."""
-    subprocess.run(['osascript', '-e', 'tell application "System Events" to tell application process "TextEdit"',
-                    '-e', 'if not frontmost then error "Test document is not in front"',
-                    '-e', 'keystroke "s" using command down', '-e', 'end tell'], check=True, timeout=12)
+    """Ask TextEdit to save the fixture document while its window actually has focus."""
+    script = '''on run argv
+        set wanted to item 1 of argv
+        tell application "System Events" to tell application process "TextEdit"
+            if not frontmost then return "waiting"
+            if not (exists front window) then return "waiting"
+            if name of front window does not contain wanted then return "waiting"
+            keystroke "s" using command down
+            return "saved"
+        end tell
+    end run'''
+    def send():
+        answer = subprocess.check_output(['osascript', '-e', script, document.stem], text=True, timeout=12)
+        if answer.strip() == 'saved':
+            return True
+        open_editor(document)
+        return False
+    wait_for(send, f'TextEdit to receive Save in {document.name}', 15)
     return document.read_bytes()
 
 
