@@ -37,7 +37,7 @@ def line_index(number):
     devices = sd.query_devices()
     matches = [i for i, d in enumerate(devices) if d['max_output_channels'] >= 2
                and sd.query_hostapis(d['hostapi'])['name'] == 'Windows WASAPI'
-               and f'Line {number} (' in d['name'] and 'Virtual Audio Cable' in d['name']]
+               and d['name'] in (f'Line {number}', f'Line {number} (Virtual Audio Cable)')]
     if len(matches) != 1:
         raise RuntimeError(f'Line {number} output is ambiguous: {matches}, {devices}')
     return matches[0]
@@ -135,11 +135,12 @@ def run(cli, root, env, speech):
                 return data
         devices = api('meetings/sources')
         print('Voiceless input and output labels:', {kind:[d['label'] for d in devices[kind]] for kind in ('microphones','system_outputs')})
-        def node(kind, number):
-            matches = [d['node'] for d in devices[kind] if f'Line {number} (' in d['label'] and 'Virtual Audio Cable' in d['label']]
-            assert len(matches) == 1, (kind, number, matches, devices)
+        def node(kind, variable):
+            expected = os.environ[variable].casefold()
+            matches = [d['node'] for d in devices[kind] if d['node'].casefold() == expected]
+            assert len(matches) == 1, (kind, expected, devices)
             return matches[0]
-        mic, output = node('microphones', 1), node('system_outputs', 2)
+        mic, output = node('microphones', 'VOICELESS_VAC_MIC'), node('system_outputs', 'VOICELESS_VAC_OUTPUT')
         instance = {'runtime_id':api('meetings')['runtime_id']}
         selection = dict(instance, microphone=mic, system=output)
         with denied_microphone():

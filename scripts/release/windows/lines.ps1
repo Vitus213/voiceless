@@ -37,3 +37,8 @@ do {
 $lines | Format-Table Status, FriendlyName, InstanceId -AutoSize | Out-Host
 if ($lines.Count -lt 4) { Get-PnpDevice -InstanceId $id | Format-List *; throw "Expected both capture/render pairs, found $($lines.Count) endpoints" }
 "VOICELESS_VAC_DEVICE=$id" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+foreach ($port in @(@{name='MIC'; label='Line 1'; prefix='{0.0.1.'}, @{name='OUTPUT'; label='Line 2'; prefix='{0.0.0.'})) {
+    $ids = @($lines | Where-Object FriendlyName -eq "$($port.label) (Virtual Audio Cable)" | ForEach-Object { ($_.InstanceId -split '\\')[-1] } | Where-Object { $_.StartsWith($port.prefix) })
+    if ($ids.Count -ne 1) { throw "Missing unique $($port.name) endpoint for $($port.label)" }
+    "VOICELESS_VAC_$($port.name)=wasapi:$($ids[0])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+}
