@@ -170,7 +170,7 @@ if (process.argv.includes('--write')) {
   const problems = [
     ...missing.map((entry) => `without English  ${entry}`),
     ...stale,
-    ...(readFileSync(INDEX, 'utf8') === `${nextIndex}\n` ? [] : ['settings-index.json is out of date; run node scripts/i18n.mjs --write']),
+    ...(readFileSync(INDEX, 'utf8').replace(/\r\n/g, '\n') === `${nextIndex}\n` ? [] : ['settings-index.json is out of date; run node scripts/i18n.mjs --write']),
     ...unwrapped.map((entry) => `Chinese outside t()  ${entry}`),
   ];
   if (problems.length) {
