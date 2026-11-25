@@ -34,8 +34,13 @@ func serve(_ directory: URL) -> Never {
     fail("the fixture window was closed")
 }
 
-let arguments = CommandLine.arguments
-guard arguments.count == 3, arguments[1] == "serve" else {
-    fail("usage: editor serve <directory>")
+@main
+struct Fixture {
+    static func main() {
+        let arguments = CommandLine.arguments
+        guard arguments.count == 3, arguments[1] == "serve" else {
+            fail("usage: editor serve <directory>")
+        }
+        serve(URL(fileURLWithPath: arguments[2], isDirectory: true))
+    }
 }
-serve(URL(fileURLWithPath: arguments[2], isDirectory: true))

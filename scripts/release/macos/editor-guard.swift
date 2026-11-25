@@ -64,8 +64,13 @@ func guardCheck(_ text: String) -> Never {
     exit(0)
 }
 
-let arguments = CommandLine.arguments
-guard arguments.count == 3, arguments[1] == "guard" else {
-    fail("usage: editor guard <directory>")
+@main
+struct Guard {
+    static func main() {
+        let arguments = CommandLine.arguments
+        guard arguments.count == 3, arguments[1] == "guard" else {
+            fail("usage: editor guard <directory>")
+        }
+        guardCheck("Voiceless 中文 Ω")
+    }
 }
-guardCheck("Voiceless 中文 Ω")
