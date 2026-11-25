@@ -1,0 +1,21 @@
+name: macOS Apple Silicon candidate acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/macos-candidate/**']
+
+permissions:
+  contents: read
+
+jobs:
+  guest:
+    name: Read the macOS 15 guest
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record the guest's session, privacy permissions, audio endpoints and signing identities
+        run: bash scripts/release/macos/guest.sh
