@@ -193,8 +193,7 @@ pub enum Failure {
     SourceMissing { source: TrackKind, node: String },
     /// The recorder program could not be started for a track.
     NoRecorder { source: TrackKind, reason: String },
-    /// PipeWire reported the stream as not permitted. `remedy` says where
-    /// access is decided on this machine.
+    /// The system refused this source. `remedy` says where access is decided.
     PermissionDenied {
         source: TrackKind,
         node: String,
@@ -243,11 +242,17 @@ impl fmt::Display for Failure {
                 source,
                 node,
                 reason,
-                ..
-            } => write!(
-                f,
-                "the system denied access to the {source} {node:?}: {reason}"
-            ),
+                remedy,
+            } => {
+                write!(
+                    f,
+                    "the system denied access to the {source} {node:?}: {reason}"
+                )?;
+                if !remedy.is_empty() && !reason.contains(remedy.as_str()) {
+                    write!(f, "\n{remedy}")?;
+                }
+                Ok(())
+            }
             Self::StreamUnconnected {
                 source,
                 node,
@@ -628,10 +633,15 @@ mod tests {
             denied.actions(),
             &[Action::GrantAccess, Action::ChooseSource]
         );
-        assert_eq!(
-            denied.to_string(),
-            "the system denied access to the system output \"alsa_output.board\": permission denied"
-        );
+        let message = denied.to_string();
+        for detail in [
+            "system output",
+            "alsa_output.board",
+            "permission denied",
+            "grant access",
+        ] {
+            assert!(message.contains(detail), "{message}");
+        }
         assert_eq!(Failure::ProcessInterrupted.source(), None);
         assert_eq!(Failure::ProcessInterrupted.actions(), &[]);
 

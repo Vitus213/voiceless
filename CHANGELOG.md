@@ -60,8 +60,9 @@ the day the work landed on `main`; commit hashes refer to
   duration from complete PCM frames when the encoder leaves placeholder lengths.
 - On Windows, model verification recognizes nested files in the catalog, so
   correctly installed SenseVoice and bilingual Paraformer models load again.
-- Windows reports the selected audio source when WASAPI denies recording
-  permission, including when the privacy settings allowed the initial check.
+- Windows reports the selected source when WASAPI denies recording. A meeting
+  refused at startup also shows where to enable desktop microphone access in
+  Windows Settings, alongside the original WASAPI error.
 - On macOS, meetings wait for microphone and system audio permission before
   starting either track. An unanswered system audio request times out after
   30 seconds and leaves no meeting on disk. A microphone-only meeting can

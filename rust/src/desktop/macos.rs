@@ -17,6 +17,8 @@ extern "C" {
     fn vl_copy(text: *const u8, length: usize) -> bool;
 }
 
+pub(crate) const MICROPHONE_REMEDY: &str = "Allow microphone access in System Settings > Privacy & Security > Microphone, then reopen Voiceless";
+
 pub(crate) fn microphone_permission() -> Result<(), String> {
     microphone(false)
 }
@@ -31,7 +33,7 @@ fn microphone(request: bool) -> Result<(), String> {
         3 => Ok(()),
         0 => Err("Microphone access has not been requested; start a recording to allow access".into()),
         1 => Err("Microphone access is restricted by system policy".into()),
-        _ => Err("Allow microphone access in System Settings > Privacy & Security > Microphone, then reopen Voiceless".into()),
+        _ => Err(MICROPHONE_REMEDY.into()),
     }
 }
 
