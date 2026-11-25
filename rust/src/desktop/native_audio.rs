@@ -217,6 +217,19 @@ impl Drop for RawCapture {
 
 type Capture = (cpal::Stream, Arc<Mutex<Encoder>>, String);
 
+fn backend_open_error(error: cpal::BackendSpecificError) -> io::Error {
+    // CPAL 0.17 keeps WASAPI's HRESULT only in the formatted backend error.
+    // Its localized message varies, but E_ACCESSDENIED is stable.
+    #[cfg(windows)]
+    if error.description == "0x80070005"
+        || error.description.ends_with("(0x80070005)")
+        || error.description.ends_with("(os error -2147024891)")
+    {
+        return io::Error::new(io::ErrorKind::PermissionDenied, error);
+    }
+    io::Error::other(error)
+}
+
 fn open_stream(
     target: Option<DeviceId>,
     tapped_device: Option<Device>,
@@ -241,7 +254,10 @@ fn open_stream(
     } else {
         device.default_input_config()
     }
-    .map_err(io::Error::other)?;
+    .map_err(|error| match error {
+        cpal::DefaultStreamConfigError::BackendSpecific { err } => backend_open_error(err),
+        other => io::Error::other(other),
+    })?;
     let config = supported.config();
     let encoder = Arc::new(Mutex::new(Encoder::new(
         config.channels,
@@ -261,7 +277,10 @@ fn open_stream(
             ))
         }
     }
-    .map_err(io::Error::other)?;
+    .map_err(|error| match error {
+        cpal::BuildStreamError::BackendSpecific { err } => backend_open_error(err),
+        other => io::Error::other(other),
+    })?;
     let id = device.id().map_err(io::Error::other)?.to_string();
     stream.play().map_err(io::Error::other)?;
     Ok((stream, encoder, id))
