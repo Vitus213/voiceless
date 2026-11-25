@@ -42,15 +42,6 @@ public static class AcceptanceDesktop {
     return IntPtr.Zero;
   }
 
-  /// <summary>Whether the process owns the session's taskbar.</summary>
-  public static bool OwnsTaskbar(uint processId) {
-    IntPtr taskbar = FindWindowExW(IntPtr.Zero, IntPtr.Zero, "Shell_TrayWnd", null);
-    if (taskbar == IntPtr.Zero) return false;
-    uint owner;
-    GetWindowThreadProcessId(taskbar, out owner);
-    return owner == processId;
-  }
-
   /// <summary>The process of the window in front, or zero.</summary>
   public static uint ForegroundOwner() {
     uint owner;

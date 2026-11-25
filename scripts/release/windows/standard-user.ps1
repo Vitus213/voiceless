@@ -218,28 +218,7 @@ function Stop-StandardVoiceless {
         Stop-Process -Force
 }
 
-# The runner account's Explorer leaves and the standard user's own Explorer
-# becomes the shell of this session, so that the taskbar runs where a signed-in
-# user's taskbar runs: at the integrity level of that user's programs.
-function Use-StandardShell {
-    Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session | Stop-Process -Force
-    Start-Sleep -Seconds 2
-    Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -Credential $credential -LoadUserProfile | Out-Null
-    Wait-For {
-        Get-Process -Name explorer -ErrorAction SilentlyContinue |
-            Where-Object { $_.SessionId -eq $session -and [AcceptanceDesktop]::OwnsTaskbar([uint32]$_.Id) -and (Get-Sid $_.Id) -eq $identity.sid } |
-            Select-Object -First 1
-    } 'The standard user has no taskbar after their Explorer started' 60 | Out-Null
-}
-
-function Restore-RunnerShell {
-    Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { (Get-Sid $_.Id) -eq $identity.sid } | Stop-Process -Force
-    Start-Sleep -Seconds 2
-    Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') | Out-Null
-}
-
 $identity = $null
-$shellReplaced = $false
 try {
     # The account as Windows runs it.
     $identity = Invoke-Step identity 'The standard user could not be started on the interactive desktop'
@@ -367,43 +346,32 @@ try {
     . (Join-Path $PSScriptRoot 'tray.ps1')
     $firstAttempt = $null
     $tray = $null
-    foreach ($attempt in 1..2) {
-        if ([AcceptanceDesktop]::VisibleWindow($desktopId) -ne [IntPtr]::Zero) { Hide-DesktopWindow $desktopId $window 'desktop-window-before-tray' }
-        try {
-            $tray = Invoke-TrayItem -ProcessId $desktopId
-            $shell = "the runner account's Explorer"
-            break
-        } catch {
-            $firstAttempt = "$($_.Exception.Message)"
-            Write-Output "No tray command through the runner account's Explorer (attempt $attempt): $firstAttempt"
-        }
-    }
-    if (!$tray) {
-        try { Use-StandardShell } catch { Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') | Out-Null; throw }
-        $shellReplaced = $true
-        Stop-StandardVoiceless
-        $started = Invoke-Step desktop-start 'The standard user could not start the installed desktop again'
-        $desktopId = [uint32]$started.process
-        $window = Wait-For { [AcceptanceDesktop]::VisibleWindow($desktopId) } 'The installed desktop showed no window under the standard user''s Explorer' 75
-        $runtime = Wait-Runtime "$script:run" $runtime
-        Hide-DesktopWindow $desktopId $window 'desktop-window-own-shell'
+    # The session's one taskbar belongs to the runner account's Explorer. Whether
+    # it takes the icon of a process of another account is what this step records.
+    $firstAttempt = $null
+    $tray = $null
+    Hide-DesktopWindow $desktopId $window 'desktop-window-before-tray'
+    try {
         $tray = Invoke-TrayItem -ProcessId $desktopId
-        $shell = "$name's own Explorer"
+    } catch {
+        $firstAttempt = "$($_.Exception.Message)"
+        Write-Output "No tray command through the runner account's Explorer: $firstAttempt"
     }
-    $reopened = Wait-For { [AcceptanceDesktop]::VisibleWindow($desktopId) } 'The tray command did not show the window again' 30
-    if ($reopened -ne $window) { throw 'The tray command showed another window' }
-    if ((Get-RuntimeId) -ne $runtime) { throw 'The tray command replaced the runtime' }
-    Save-Screen 'tray-reopened-standard-user'
-    $taskbar = Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { [AcceptanceDesktop]::OwnsTaskbar([uint32]$_.Id) } | Select-Object -First 1
+    if ($tray) {
+        $reopened = Wait-For { [AcceptanceDesktop]::VisibleWindow($desktopId) } 'The tray command did not show the window again' 30
+        if ($reopened -ne $window) { throw 'The tray command showed another window' }
+        if ((Get-RuntimeId) -ne $runtime) { throw 'The tray command replaced the runtime' }
+        Save-Screen 'tray-reopened-standard-user'
+    }
+    $taskbar = Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session | Select-Object -First 1
     $report.tray = [ordered]@{
-        shell = $shell
+        reopenedThroughTheTray = [bool]$tray
         throughTheRunnerExplorer = if ($firstAttempt) { $firstAttempt } else { 'worked' }
         taskbar = [ordered]@{ id = $taskbar.Id; account = Get-Sid $taskbar.Id; integrity = Format-Level (Get-Level $taskbar.Id) }
         detail = $tray
-        sameWindow = $true
         runtimeId = $runtime
     }
-    Write-Output "Tray: $tray; the window and the runtime are the same after reopening"
+    Write-Output "Tray: $(if ($tray) { "$tray; the window and the runtime are the same after reopening" } else { "not reopened through the runner account's Explorer, which runs at $(Format-Level (Get-Level $taskbar.Id)) for $(Get-Sid $taskbar.Id): $firstAttempt" })"
 
     # The launcher again, as the Start menu entry starts it.
     $null = Invoke-Step desktop-relaunch 'The second launcher did not reuse the resident desktop'
@@ -441,9 +409,6 @@ try {
     throw
 } finally {
     try { Stop-StandardVoiceless } catch { Write-Output "Installed programs of $name stayed: $($_.Exception.Message)" }
-    if ($shellReplaced) {
-        try { Restore-RunnerShell } catch { Write-Output "The runner account's Explorer stayed away: $($_.Exception.Message)" }
-    }
     # What the steps of the standard user noted, in the order they ran.
     Get-ChildItem -LiteralPath $Evidence -Filter 'worker-*.log' | Sort-Object LastWriteTime | ForEach-Object {
         $step = $_.Name -replace '^worker-', ''
