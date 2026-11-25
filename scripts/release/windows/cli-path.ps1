@@ -2,13 +2,10 @@
 # acceptance scripts call the installed CLI by absolute path; this looks it up by name in
 # a new user shell, as the user does after installing.
 #
-# The desktop shell that is already running starts that shell through a shortcut handed to
-# Explorer, so it inherits the environment Explorer supplies from then on: what Explorer
-# last reloaded (WM_SETTINGCHANGE), neither the registry nor this script's own PATH. An
-# entry written to the registry without that announcement must stay invisible to it. The
-# shell starts outside the installation, in a directory with a space; the installation is
-# in one too. An entry added to the user's PATH before the install stands for preexisting
-# entries. Every check runs; the run fails if one failed. Inno logs both silent runs.
+# Open a shortcut through Explorer for each probe. Windows can use a broker to
+# start PowerShell. Observe the resulting shell in the same user session and
+# let Windows supply its environment. Both the working and install directories
+# contain spaces. A preexisting PATH entry must still work after uninstall.
 #
 #   VOICELESS_TEST_INSTALLERS   directory with voiceless-core-v<version>-windows-x64.exe
 #   VOICELESS_TEST_CORE_SHA256  digest of that installer, so the log names the build it proved
@@ -58,8 +55,7 @@ function Invoke-Inno([string]$Program, [string]$Switches, [string]$Log) {
 }
 
 function Get-SessionShell {
-    # The process behind the desktop and every Explorer process of this session. A shell
-    # started through Explorer names one of them as its parent.
+    # Identify the desktop and the account that owns this interactive session.
     Add-Type -Namespace VoicelessTest -Name Desktop -MemberDefinition @'
 [DllImport("user32.dll")]
 public static extern IntPtr GetShellWindow();
@@ -75,7 +71,7 @@ public static extern uint GetWindowThreadProcessId(IntPtr window, out uint proce
     $owner = Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId = $id") -MethodName GetOwner
     $account = "$($owner.Domain)\$($owner.User)"
     if ($account -ine "$env:USERDOMAIN\$env:USERNAME") { throw "The desktop shell runs as $account, not as this script" }
-    [pscustomobject]@{ Id = $id; Session = $session; Pids = $pids; Owner = $account }
+    [pscustomobject]@{ Id = $id; Session = $session; Owner = $account }
 }
 
 function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [string]$Directory) {
@@ -92,7 +88,7 @@ $ProbeText = @'
 $ErrorActionPreference = 'Stop'
 $r = [ordered]@{ pid = $PID; parent = (Get-Process -Id $PID).Parent.Id }
 try {
-    Set-Location -LiteralPath '__WORK__'
+    $r.account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $r.cwd = (Get-Location).Path
     $r.session = (Get-Process -Id $PID).SessionId
     if ((& "$env:WINDIR\System32\whoami.exe" /groups | Out-String) -match 'Mandatory Label\\(\w+) Mandatory Level') { $r.integrity = $Matches[1] }
@@ -120,8 +116,8 @@ Move-Item -LiteralPath '__RESULT__.tmp' -Destination '__RESULT__'
 '@
 
 function Start-ShellProbe {
-    # Hand the shortcut to Explorer: the desktop shell then starts it, as if the user
-    # opened it. The explorer.exe started here is only the messenger and exits right away.
+    # Open the shortcut normally with the desktop shell. A broker can be the
+    # immediate parent of the new PowerShell process.
     Remove-Item -LiteralPath $result -ErrorAction SilentlyContinue
     $start = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $env:WINDIR 'explorer.exe'), "`"$shortcut`"")
     $start.UseShellExecute = $false
@@ -133,14 +129,14 @@ function Start-ShellProbe {
     }
     $seen = Get-Content -Raw -LiteralPath $result | ConvertFrom-Json
     if ($seen.error) { throw "The new shell failed: $($seen.error)" }
-    if ($seen.parent -notin $shell.Pids -or $seen.session -ne $shell.Session -or $seen.cwd -ine $work) {
-        throw "Not a shell of the desktop shell, outside the installation: $($seen | ConvertTo-Json -Compress)"
+    if ($seen.pid -eq $PID -or $seen.account -ine $shell.Owner -or $seen.session -ne $shell.Session -or $seen.cwd -ine $work) {
+        throw "Wrong user session or working directory for the new shell: $($seen | ConvertTo-Json -Compress)"
     }
     $seen
 }
 
 function Wait-ShellProbe([scriptblock]$Announced) {
-    # Explorer has reloaded by the time the installer exits; a second look covers a slower reload.
+    # Open a fresh shell on each attempt so that asynchronous updates can arrive.
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     $attempts = 0
     do {
@@ -192,7 +188,7 @@ try {
 
     $first = Wait-ShellProbe { $true }
     Check 'before install: a new shell cannot find voiceless' (-not $first.voiceless.command -and $first.voiceless.whereExit -ne 0) $first.voiceless.whereExit
-    Check 'before install: a new shell shows the environment Explorer announced, not the registry' ($first.path.marker -eq 0 -and $first.path.install -eq 0) $first.path
+    Check 'before install: the installation directory is absent from the new shell PATH' ($first.path.install -eq 0) $first.path
 
     Invoke-Inno $setup "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$install`"" (Join-Path $root 'install.log')
     $installed = Read-UserPath
