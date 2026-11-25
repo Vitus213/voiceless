@@ -164,9 +164,11 @@ def run(cli, root, env, speech):
                 return view if view['state'] == 'completed' and all(t['job_id'] for t in view['tracks']) else None
             validate_tracks(wait_for(finalized, 'WAV files and background jobs'))
             interrupted_path = capture()
-        device_id = os.environ['VOICELESS_VAC_DEVICE']
-        subprocess.run(['pnputil', '/disable-device', device_id], check=True, timeout=30)
+        endpoint_instance = 'SWD\\MMDEVAPI\\' + mic.split(':', 1)[1]
+        subprocess.run(['pnputil', '/disable-device', endpoint_instance], check=True, timeout=30)
         try:
+            wait_for(lambda: all(d['node'] != mic for d in api('meetings/sources')['microphones']),
+                     'the selected capture endpoint to disappear')
             def interrupted():
                 view = api(interrupted_path)
                 return view if view['state'] == 'interrupted' else None
@@ -181,7 +183,7 @@ def run(cli, root, env, speech):
                 return view if view['state'] == 'recovered' and all(t['job_id'] for t in view['tracks']) else None
             validate_tracks(wait_for(recovered, 'interrupted tracks to recover'))
         finally:
-            subprocess.run(['pnputil', '/enable-device', device_id], check=True, timeout=30)
+            subprocess.run(['pnputil', '/enable-device', endpoint_instance], check=True, timeout=30)
         wait_for(lambda: any(d['node'] == mic for d in api('meetings/sources')['microphones']), 'reconnected microphone')
         with wave.open(str(speech), 'rb') as wav:
             assert wav.getsampwidth() == 2 and wav.getnchannels() == 1
