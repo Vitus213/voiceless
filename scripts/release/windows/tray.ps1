@@ -35,7 +35,58 @@ public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr e
 [DllImport("shell32.dll")]
 private static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER identifier, out RECT iconLocation);
 [DllImport("oleacc.dll")]
-public static extern int AccessibleObjectFromWindow(IntPtr window, uint objectId, ref Guid interfaceId, [MarshalAs(UnmanagedType.IUnknown)] out object accessible);
+private static extern int AccessibleObjectFromWindow(IntPtr window, uint objectId, ref Guid interfaceId, [MarshalAs(UnmanagedType.IUnknown)] out object accessible);
+[DllImport("kernel32.dll", SetLastError = true)]
+private static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+[DllImport("kernel32.dll")]
+private static extern bool CloseHandle(IntPtr handle);
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool GetTokenInformation(IntPtr token, int informationClass, IntPtr information, int length, out int returned);
+[DllImport("advapi32.dll")]
+private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+[DllImport("advapi32.dll")]
+private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+
+// IAccessible, the documented MSAA interface of Win32 menus and toolbars.
+[ComImport, Guid("618736E0-3C3D-11CF-810C-00AA00389B71"), InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
+public interface IDispatchAccessible {
+    [DispId(-5001)] int accChildCount { get; }
+    [DispId(-5003)] string accName(object child);
+    [DispId(-5006)] object accRole(object child);
+    [DispId(-5015)] void accLocation(out int left, out int top, out int width, out int height, object child);
+}
+[ComImport, Guid("618736E0-3C3D-11CF-810C-00AA00389B71"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IVtableAccessible {
+    [PreserveSig] int GetTypeInfoCount(out int count);
+    [PreserveSig] int GetTypeInfo(int info, int lcid, out IntPtr typeInfo);
+    [PreserveSig] int GetIDsOfNames(in Guid iid, IntPtr names, int count, int lcid, IntPtr ids);
+    [PreserveSig] int Invoke(int id, in Guid iid, int lcid, short flags, IntPtr parameters, IntPtr result, IntPtr exceptionInfo, IntPtr argumentError);
+    object accParent { get; }
+    int accChildCount { get; }
+    [return: MarshalAs(UnmanagedType.IDispatch)] object accChild(object child);
+    string accName(object child);
+    string accValue(object child);
+    string accDescription(object child);
+    object accRole(object child);
+    object accState(object child);
+    string accHelp(object child);
+    int accHelpTopic(out string helpFile, object child);
+    string accKeyboardShortcut(object child);
+    object accFocus { get; }
+    object accSelection { get; }
+    string accDefaultAction(object child);
+    void accSelect(int flags, object child);
+    void accLocation(out int left, out int top, out int width, out int height, object child);
+    object accNavigate(int direction, object start);
+    object accHitTest(int left, int top);
+    void accDoDefaultAction(object child);
+}
+public sealed class AccItem {
+    public int Index; public string Name; public int Role; public int Left; public int Top; public int Width; public int Height;
+    public string At { get { return "(" + Left + "," + Top + " " + Width + "x" + Height + ")"; } }
+}
 
 public static IntPtr[] TrayWindows(uint processId) {
     System.Collections.Generic.List<IntPtr> found = new System.Collections.Generic.List<IntPtr>();
@@ -67,14 +118,66 @@ public static RECT? IconRect(IntPtr tray, uint id) {
     RECT rect;
     return Shell_NotifyIconGetRect(ref identifier, out rect) == 0 ? rect : (RECT?)null;
 }
+public static string Integrity(int processId) {
+    // The mandatory integrity level of another process, as UIPI sees it.
+    IntPtr process = OpenProcess(0x1000, false, processId);
+    if (process == IntPtr.Zero) return "unavailable";
+    try {
+        IntPtr token;
+        if (!OpenProcessToken(process, 0x0008, out token)) return "unavailable";
+        try {
+            int size;
+            GetTokenInformation(token, 25, IntPtr.Zero, 0, out size);
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try {
+                if (!GetTokenInformation(token, 25, buffer, size, out size)) return "unavailable";
+                IntPtr sid = Marshal.ReadIntPtr(buffer);
+                int count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                int level = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+                return "0x" + level.ToString("X");
+            } finally { Marshal.FreeHGlobal(buffer); }
+        } finally { CloseHandle(token); }
+    } finally { CloseHandle(process); }
+}
+public static AccItem[] Items(IntPtr window, bool dispatch) {
+    Guid iid = typeof(IDispatchAccessible).GUID;
+    object accessible;
+    int result = AccessibleObjectFromWindow(window, 0xFFFFFFFC, ref iid, out accessible);
+    if (result != 0 || accessible == null) throw new System.ComponentModel.Win32Exception(result, "AccessibleObjectFromWindow failed");
+    AccItem[] items = new AccItem[(dispatch ? ((IDispatchAccessible)accessible).accChildCount : ((IVtableAccessible)accessible).accChildCount)];
+    for (int index = 0; index < items.Length; index++) {
+        AccItem item = new AccItem();
+        item.Index = index + 1;
+        try {
+            object role;
+            if (dispatch) {
+                IDispatchAccessible a = (IDispatchAccessible)accessible;
+                item.Name = a.accName(item.Index) ?? "";
+                role = a.accRole(item.Index);
+                a.accLocation(out item.Left, out item.Top, out item.Width, out item.Height, item.Index);
+            } else {
+                IVtableAccessible a = (IVtableAccessible)accessible;
+                item.Name = a.accName(item.Index) ?? "";
+                role = a.accRole(item.Index);
+                a.accLocation(out item.Left, out item.Top, out item.Width, out item.Height, item.Index);
+            }
+            item.Role = role is int ? (int)role : -1;
+        } catch (System.Runtime.InteropServices.COMException error) {
+            item.Role = -1;
+            item.Name = "<" + error.ErrorCode.ToString("X8") + ">";
+        }
+        items[index] = item;
+    }
+    return items;
+}
 '@
     }
     function Say([string]$Text) { Write-Host "tray: $Text" }
-    function Say-ElementRect($Rect) {
-        if ($Rect.IsEmpty) { 'empty' } else { '({0},{1} {2}x{3})' -f [int]$Rect.Left, [int]$Rect.Top, [int]$Rect.Width, [int]$Rect.Height }
-    }
     function Say-Rect($Rect) {
         if ($null -eq $Rect) { 'none' } else { '({0},{1})-({2},{3})' -f $Rect.Left, $Rect.Top, $Rect.Right, $Rect.Bottom }
+    }
+    function Say-ElementRect($Rect) {
+        if ($Rect.IsEmpty) { 'empty' } else { '({0},{1} {2}x{3})' -f [int]$Rect.Left, [int]$Rect.Top, [int]$Rect.Width, [int]$Rect.Height }
     }
     function Save-Screenshot([string]$Name) {
         try {
@@ -90,85 +193,26 @@ public static RECT? IconRect(IntPtr tray, uint id) {
             Say "screenshot $path"
         } catch { Say "screenshot $Name failed: $($_.Exception.Message)" }
     }
-    function Read-Tree51([IntPtr]$Window) {
-        # Windows PowerShell's .NET Framework client, for comparison with pwsh.
-        $path = Join-Path ([IO.Path]::GetTempPath()) 'tray-tree51.ps1'
-        try {
-            Set-Content -LiteralPath $path -Encoding UTF8 -Value @'
-param([long]$Window)
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
-function Walk($Node, [int]$Depth) {
-    if (!$Node -or $Depth -gt 5) { return }
-    $current = $Node.Current
-    '{0}{1} name=[{2}] class=[{3}] rect={4}' -f (' ' * $Depth), $current.ControlType.ProgrammaticName, $current.Name, $current.ClassName, $current.BoundingRectangle
-    $child = $walker.GetFirstChild($Node)
-    while ($child) { Walk $child ($Depth + 1); $child = $walker.GetNextSibling($child) }
-}
-Walk ([System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Window)) 0
-'@
-            $start = [System.Diagnostics.ProcessStartInfo]::new('powershell.exe')
-            $start.UseShellExecute = $false
-            $start.CreateNoWindow = $true
-            $start.RedirectStandardOutput = $true
-            $start.RedirectStandardError = $true
-            foreach ($argument in @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $path, "$($Window.ToInt64())")) { $start.ArgumentList.Add($argument) }
-            $process = [System.Diagnostics.Process]::Start($start)
-            $output = $process.StandardOutput.ReadToEndAsync()
-            $errors = $process.StandardError.ReadToEndAsync()
-            if (!$process.WaitForExit(30000)) { $process.Kill(); throw 'Windows PowerShell did not answer in 30 s' }
-            $output.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ } | ForEach-Object { Say "5.1: $_" }
-            $errors.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ } | ForEach-Object { Say "5.1 error: $_" }
-        } catch { Say "5.1 probe failed: $($_.Exception.Message)" }
-        finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
-    }
-    function Get-Accessible([IntPtr]$Window) {
-        $interfaceId = [guid]'618736e0-3c3d-11cf-810c-00aa00389b71'
-        $accessible = $null
-        $result = [VoicelessTest.Tray]::AccessibleObjectFromWindow($Window, [uint32]4294967292, [ref]$interfaceId, [ref]$accessible)
-        if ($result -ne 0 -or !$accessible) { throw ('The window 0x{0:X} exposes no MSAA object (hr 0x{1:X8})' -f $Window.ToInt64(), $result) }
-        $accessible
-    }
-    function Get-AccValue($Accessible, [string]$Member, $Child = 0) {
-        # A parameterized MSAA property, through PowerShell's COM adapter or else IDispatch.
-        $property = $Accessible.$Member
-        if ($property -is [System.Management.Automation.PSParameterizedProperty]) { return $property.Get($Child) }
-        try { return $property.Invoke($Child) }
-        catch {
-            foreach ($flags in 'GetProperty', 'InvokeMethod') {
-                try {
-                    return $Accessible.GetType().InvokeMember($Member, [System.Reflection.BindingFlags]$flags, $null, $Accessible, [object[]]@($Child))
-                } catch { }
-            }
-            throw "MSAA $Member is not available: $($_.Exception.Message)"
+    function Get-Items([IntPtr]$Window, [string]$Label) {
+        # MSAA children of a window, through IDispatch or else through the vtable.
+        foreach ($dispatch in $true, $false) {
+            try {
+                $items = [VoicelessTest.Tray]::Items($Window, $dispatch)
+                Say "$Label MSAA by $(if ($dispatch) { 'IDispatch' } else { 'vtable' }): $(($items | ForEach-Object { '#' + $_.Index + ' [' + $_.Name + '] role=' + $_.Role + ' ' + $_.At }) -join '; ')"
+                return $items
+            } catch { Say "$Label MSAA by $(if ($dispatch) { 'IDispatch' } else { 'vtable' }) failed: $($_.Exception.Message)" }
         }
-    }
-    function Get-AccLocation($Accessible, $Child) {
-        $values = [object[]]@(0, 0, 0, 0, $Child)
-        try { $Accessible.accLocation([ref]$values[0], [ref]$values[1], [ref]$values[2], [ref]$values[3], $Child) }
-        catch { $null = $Accessible.GetType().InvokeMember('accLocation', [System.Reflection.BindingFlags]::InvokeMethod, $null, $Accessible, $values) }
-        $values
-    }
-    function Get-AccChildren($Accessible) {
-        for ($child = 1; $child -le $Accessible.accChildCount; $child++) {
-            [pscustomobject]@{
-                Index = $child
-                Name = [string](Get-AccValue $Accessible 'accName' $child)
-                Role = Get-AccValue $Accessible 'accRole' $child
-                Location = Get-AccLocation $Accessible $child
-            }
-        }
-    }
-    function Say-AccChildren([IntPtr]$Window, [string]$Label) {
-        try {
-            $accessible = Get-Accessible $Window
-            Say "$Label MSAA: role=$(Get-AccValue $accessible 'accRole') name=[$(Get-AccValue $accessible 'accName')] children=$($accessible.accChildCount); members: $((Get-Member -InputObject $accessible -MemberType Method, Property, ParameterizedProperty | ForEach-Object { $_.Name + '(' + $_.MemberType + ')' }) -join ' ')"
-            foreach ($child in Get-AccChildren $accessible) {
-                Say ('{0} MSAA child {1}: name=[{2}] role={3} rect=({4},{5} {6}x{7})' -f $Label, $child.Index, $child.Name, $child.Role, $child.Location[0], $child.Location[1], $child.Location[2], $child.Location[3])
-            }
-        } catch { Say "$Label MSAA failed: $($_.Exception.Message)" }
+        $null
     }
 
+    function Show-Windows([IntPtr]$Parent, [int]$Depth, [string]$Label) {
+        # Child windows with their MSAA children, two levels deep.
+        foreach ($window in [VoicelessTest.Tray]::Children($Parent)) {
+            Say (('  ' * $Depth) + "$Label window $([VoicelessTest.Tray]::Describe($window))")
+            $null = Get-Items $window $Label
+            if ($Depth -lt 1) { Show-Windows $window ($Depth + 1) $Label }
+        }
+    }
     $element = [System.Windows.Automation.AutomationElement]
     $children = [System.Windows.Automation.TreeScope]::Children
     $descendants = [System.Windows.Automation.TreeScope]::Descendants
@@ -250,6 +294,11 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Window)
         Sort-Object { $_.Current.BoundingRectangle.Left } | Select-Object -First 1
     $cover = if ($chevron) { $chevron.Current.BoundingRectangle } else { [System.Windows.Rect]::Empty }
     try {
+        Say "integrity: this process $([VoicelessTest.Tray]::Integrity($PID)), Explorer $([VoicelessTest.Tray]::Integrity($taskbar.Current.ProcessId)), host $([VoicelessTest.Tray]::Integrity($ProcessId)); host tray window $([VoicelessTest.Tray]::Describe($trays[0]))"
+        Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue | ForEach-Object {
+            $entry = Get-ItemProperty $_.PSPath
+            if ("$($entry.ExecutableName)$($entry.InitialTooltip)" -match 'voiceless') { Say "NotifyIconSettings $($_.PSChildName): ExecutableName=$($entry.ExecutableName) IsPromoted=$($entry.IsPromoted) ShowInLegend=$($entry.ShowInLegend) InitialTooltip=$($entry.InitialTooltip) UID=$($entry.UID)" }
+        }
         $menu = $null
         for ($attempt = 1; $attempt -le 3 -and !$menu; $attempt++) {
             $shellIcon = Find-ShellIcon
@@ -282,15 +331,8 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Window)
             Say "shell icon id=$($shellIcon.Id) at $(Say-Rect $iconRect) in the $location"
             if ($attempt -eq 1) {
                 Save-Screenshot '2-icon'
-                if ($placed.Hidden) {
-                    $flyoutHandle = [IntPtr]((& $overflow).Current.NativeWindowHandle)
-                    Say "overflow: $([VoicelessTest.Tray]::Describe($flyoutHandle))"
-                    foreach ($window in [VoicelessTest.Tray]::Children($flyoutHandle)) {
-                        Say "overflow child $([VoicelessTest.Tray]::Describe($window))"
-                        Say-AccChildren $window 'overflow'
-                    }
-                    Read-Tree51 $flyoutHandle
-                }
+                Show-Windows ([IntPtr]$area.Current.NativeWindowHandle) 0 'area'
+                if ($placed.Hidden) { Show-Windows ([IntPtr]((& $overflow).Current.NativeWindowHandle)) 0 'overflow' }
             }
             Click-At $x $y Right
             $menu = Wait-For { Find-Menu $ProcessId } '' 3
@@ -302,22 +344,27 @@ Walk ([System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Window)
         }
         if (!$menu) { throw "The '$Tooltip' icon did not open a menu owned by process $ProcessId" }
         $menuHandle = [IntPtr]$menu.Current.NativeWindowHandle
+        $menuRect = $menu.Current.BoundingRectangle
         Say "host menu: $([VoicelessTest.Tray]::Describe($menuHandle))"
         Save-Screenshot '3-menu'
-        Read-Tree51 $menuHandle
-        $accessible = Get-Accessible $menuHandle
-        $items = @(Get-AccChildren $accessible)
-        Say "menu MSAA: role=$(Get-AccValue $accessible 'accRole') children=$($accessible.accChildCount); offers: $(($items | ForEach-Object { $_.Name }) -join ', ')"
+        $items = Get-Items $menuHandle 'menu'
+        $bounds = $null
+        $how = ''
         $command = $items | Where-Object { $_.Name -eq $Item } | Select-Object -First 1
-        if (!$command) { throw "The tray menu has no '$Item'; it offers: $(($items | ForEach-Object { $_.Name }) -join ', ')" }
-        $bounds = $command.Location
-        Say "choosing '$Item' at ($($bounds[0]),$($bounds[1]) $($bounds[2])x$($bounds[3]))"
+        if ($command) {
+            $bounds = @($command.Left, $command.Top, $command.Width, $command.Height)
+            $how = "'$Item' found through MSAA"
+        } else {
+            Say "MSAA did not name '$Item' (items: $($items.Count)); the product lists it first, so the first row of the popup is used"
+            $bounds = @($menuRect.Left, $menuRect.Top, $menuRect.Width, 24)
+            $how = 'first row by position; its items were not readable through MSAA'
+        }
         Click-At ([int]($bounds[0] + $bounds[2] / 2)) ([int]($bounds[1] + $bounds[3] / 2)) Left
         $null = Wait-For { !(Find-Menu $ProcessId) } "The tray menu stayed open after '$Item' was chosen"
         Close-Overflow
         $null = Wait-For $hidden 'The notification overflow stayed open' 5
         Save-Screenshot '4-after'
-        return "Tray icon (shell id $($shellIcon.Id) at $(Say-Rect $iconRect)) observed in the $location; its menu, owned by process $ProcessId, offers [$(($items | ForEach-Object { $_.Name }) -join ', ')]; '$Item' chosen"
+        return "Tray icon (shell id $($shellIcon.Id) at $(Say-Rect $iconRect)) observed in the $location; its menu, owned by process $ProcessId, offers [$(($items | ForEach-Object { $_.Name }) -join ', ')]; '$Item' chosen, $how"
     } finally {
         if (Find-Menu @($ProcessId, $taskbar.Current.ProcessId)) { Send-Escape }
         Close-Overflow
