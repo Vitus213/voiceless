@@ -1,0 +1,37 @@
+name: Installed macOS TextEdit delivery
+
+on:
+  push:
+    branches: ['ci/macos-editor/0.2.0']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  textedit:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45688022647
+          name: voiceless-macos-arm64-candidates
+          path: ${{ runner.temp }}/candidates
+      - name: Install the candidate and read back the text saved by TextEdit
+        run: |
+          set -eu
+          root=$(mktemp -d "$RUNNER_TEMP/voiceless-textedit.XXXXXXXX")
+          mkdir -p "$root/volume" "$root/home"
+          hdiutil attach -nobrowse -readonly -mountpoint "$root/volume" "$RUNNER_TEMP/candidates/voiceless-cli-v0.2.0-macos-arm64.dmg"
+          trap 'hdiutil detach "$root/volume"' EXIT
+          HOME="$root/home" "$root/volume/install-cli.command"
+          xcrun clang -fobjc-arc -fblocks scripts/release/macos/focus-snapshot.m rust/src/desktop/macos/bridge.m \
+            scripts/release/macos/editor.c -framework AppKit -framework ApplicationServices -framework CoreAudio \
+            -framework AVFoundation -o "$root/focus-snapshot"
+          python3 -u -B scripts/release/macos/textedit.py "$root" "$root/home/.local/bin/voiceless"
