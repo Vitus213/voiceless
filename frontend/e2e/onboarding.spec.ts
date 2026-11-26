@@ -11,7 +11,7 @@ const modelStore = process.env.VOICELESS_E2E_MODEL_STORE;
 const reference = 'And so, my fellow Americans: ask not what your country can do for you — ask what you can do for your country.';
 
 type Recorder = 'ok' | 'gone';
-type FirstRun = { url: string; recorder: (mode: Recorder) => Promise<void>; sampleEnded: () => Promise<boolean> };
+type FirstRun = { url: string; root: string; recorder: (mode: Recorder) => Promise<void>; sampleEnded: () => Promise<boolean> };
 
 /** Copy a directory tree as it is: directories, files, and symbolic links as links (a model's `current` pointer is one). */
 async function copyTree(source: string, target: string) {
@@ -43,8 +43,9 @@ const test = base.extend<{ firstRun: FirstRun }>({
           env: { VOICELESS_E2E_PCM: join(fixtures, 'jfk-16k-mono-s16le.pcm'), VOICELESS_E2E_RECORDER: mode },
           prepare: (root) => copyTree(modelStore ?? '', join(root, 'data')),
         },
-        ({ url }) => ({
+        ({ url, root }) => ({
           url,
+          root,
           recorder: (next) => writeFile(mode, next),
           sampleEnded: () => stat(`${mode}.ended`).then(() => true, (error: NodeJS.ErrnoException) => {
             if (error.code === 'ENOENT') return false;
@@ -126,6 +127,35 @@ test.describe('onboarding', () => {
       transcript: { is_final: true, authoritative_text: result },
     });
     expect(errors).toEqual([]);
+  });
+
+  test('onboarding names the failed model and retries only its download', async ({ page, firstRun }) => {
+    const cache = join(firstRun.root, 'cache', 'voiceless');
+    const downloads = join(cache, 'model-downloads');
+    await mkdir(cache, { recursive: true });
+    // A file at the cache directory prevents the real installer from starting a download.
+    await writeFile(downloads, '', { flag: 'wx' });
+    const requested: string[] = [];
+    page.on('request', (request) => {
+      const route = new URL(request.url()).pathname;
+      if (request.method() === 'POST' && route.endsWith('/install')) requested.push(route);
+    });
+    await page.goto(`${firstRun.url}#setup`);
+    const input = page.getByLabel('输入设备');
+    const model = page.getByLabel('本地模型');
+    await input.selectOption({ label: 'Test Microphone' });
+    await expect(model).not.toHaveValue('');
+    const selected = await model.inputValue();
+    await page.getByRole('button', { name: '准备模型' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Silero VAD 下载失败' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '开始试说' })).toBeDisabled();
+
+    await rm(downloads);
+    await page.getByRole('button', { name: '重试下载' }).click();
+    await expect(page.getByText('点击“应用设置”后生效', { exact: true })).toBeVisible({ timeout: 90_000 });
+    await expect(input.locator('option:checked')).toHaveText('Test Microphone');
+    await expect(model).toHaveValue(selected);
+    expect(requested).toEqual(['/api/models/silero-vad/install', '/api/models/silero-vad/install']);
   });
 
   test('onboarding names the step a lost microphone broke, and retrying repeats only that step', async ({ page, firstRun }) => {

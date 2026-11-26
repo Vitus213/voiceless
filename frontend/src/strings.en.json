@@ -689,6 +689,7 @@
     "识别就绪": "Recognition ready",
     "请检查识别设置": "Check the recognition settings",
     "设置快捷键": "Set a shortcut",
+    "重试下载": "Retry download",
     "现在按下快捷键，下一次录音会进入试说": "Press the shortcut now; the next recording is a practice",
     "重新检查麦克风": "Check the microphone again",
     "等待快捷键超时。请检查“快捷键与上屏”中的绑定，或点“开始试说”。": "Timed out waiting for the shortcut. Check the binding in Shortcuts and typing, or select Try a phrase.",

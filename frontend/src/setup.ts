@@ -1,5 +1,5 @@
 import { t } from './i18n';
-import { api, app, btn, deliveryText, fetchStatus, group, h, humanError, live, note, pageHead, row, setChildren } from './console.js';
+import { api, app, btn, deliveryText, fetchStatus, group, h, humanError, icon, live, note, pageHead, row, setChildren } from './console.js';
 
 type Microphone = { id: string; label: string };
 type AudioDevices = { microphones: Microphone[]; system_default: string | null; effective: string | null; error?: string };
@@ -163,9 +163,10 @@ export function SetupPage() {
     const modelMessage = pending ? t('等待设置生效')
       : applyState?.state === 'failed' && !applied ? applyState.error
       : downloading ? `${downloading.name} · ${t(downloading.progress == null ? '校验中' : Math.round(downloading.progress * 100) + '%')}`
-      : failed?.error || (missing ? t('需要下载模型')
-        : dirty || !applied ? t('点击“应用设置”后生效')
-        : status?.engine?.error || (backendReady ? t('识别就绪') : t('请检查识别设置')));
+      : failed?.error ? t(`${failed.name} 下载失败：${failed.error}`)
+      : missing ? t('需要下载模型')
+      : dirty || !applied ? t('点击“应用设置”后生效')
+      : status?.engine?.error || (backendReady ? t('识别就绪') : t('请检查识别设置'));
     if (modelStatus.textContent !== modelMessage) setChildren(modelStatus, note('cpu', modelMessage, failed ? 'err' : ''));
     if (shownShortcut !== shortcut) {
       shownShortcut = shortcut;
@@ -174,6 +175,8 @@ export function SetupPage() {
     }
     setChildren(actionStatus, actionError ? note('circle-alert', actionError, 'err') : null);
     model.disabled = recognition.value !== 'local-offline';
+    const installText = failed ? t('重试下载') : t('准备模型');
+    if (install.textContent !== installText) install.replaceChildren(icon(failed ? 'refresh-cw' : 'download'), installText);
     install.hidden = recognition.value !== 'local-offline' || !missing;
     install.disabled = busy || Boolean(downloading) || !candidate();
     apply.disabled = !daemon || busy || pending || missing || !micReady || (!dirty && applied);
