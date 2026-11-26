@@ -141,7 +141,7 @@ Apollo 上的 x86-64 独立包从公开 `0.1.3` 升级后，保留了旧配置�
 
 | 平台 | 安装 CLI | 安装桌面应用 |
 | --- | --- | --- |
-| Windows x64 | 运行 `core` 安装包。它将 `voiceless` 加入当前用户的 `PATH`，新开终端即可使用。 | 安装 Microsoft Edge WebView2 Evergreen Runtime，再运行 `desktop` 安装包。从开始菜单打开 Voiceless。 |
+| Windows x64 | 运行 `core` 安装包，新开终端即可通过用户 `PATH` 运行 `voiceless`。无需另装 Visual C++ Redistributable。 | 安装 Microsoft Edge WebView2 Evergreen Runtime，再运行 `desktop` 安装包。从开始菜单打开 Voiceless。 |
 | Apple Silicon | 从 CLI DMG 运行 `install-cli.command`，命令入口为 `~/.local/bin/voiceless`。 | 将桌面 DMG 中的 `Voiceless.app` 拖入「应用程序」。随包的 ONNX Runtime 要求 macOS 15.5 或更新版本。 |
 
 这两种平台的候选包均已使用随包的 Sherpa-ONNX 运行库在 CPU 上完成离线转写。 [Windows 安装定义](../desktop/packaging/windows.iss) · [macOS 安装脚本](../scripts/release/macos/install-cli.command)
@@ -230,11 +230,15 @@ Windows 安装包只由候选工作流在 GitHub 托管的 `windows-2022` 客机
 
 Windows 原生实测都在 GitHub 托管的 Windows Server 2022 Datacenter（10.0.20348）客机上完成。登录会话里有 `explorer.exe`，开始时没有音频端点，显卡只有 `Microsoft Hyper-V Video`，会话以高完整性（`0x3000`）运行。麦克风和系统回环来自厂商的 Virtual Audio Cable 4.71 评估驱动，两条虚拟线缆各有播放和录制端点。驱动只用于测试。测试通过声音控制面板使用的 Core Audio 端点可见性接口模拟麦克风断开。早期授权用例在客机的 `ConsentStore` 中设置允许和拒绝，后续补测了系统按原有设置拒绝录音的情况。 [客机环境](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [端点搭建](../scripts/release/windows/lines.ps1) · [端点开关](../scripts/release/windows/endpoint.ps1) · [完整性级别](https://github.com/Vitus213/voiceless/actions/runs/45682965073)
 
-首次试说的页面由测试经 WebView2 的远程调试端口操作，安装后的桌面程序和守护进程没有改动。语音是模型包附带的参考英文句，由测试播放进虚拟线缆。「测试上屏」后页面显示 `Delivery unconfirmed. Check the target field`，经控制台 API 开始的一次听写把定稿追加到有焦点的编辑框，交付状态同为 `unconfirmed`。托盘菜单经 MSAA 读出「打开窗口」「暂停听写」「重贴上次结果」「登录时启动」和「退出」，实测只调用了「打开窗口」。缺少 WebView2 时安装器的拒绝提示、代码签名和 SmartScreen 提示仍待实测。 [操作记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [试说脚本](https://github.com/Vitus213/voiceless/blob/e64d97c0c16b0eb6901c22cdf25f1b890af70049/scripts/release/windows/practice.py) · [托盘菜单](https://github.com/Vitus213/voiceless/actions/runs/45685694184) · [安装验收脚本](../scripts/release/windows/accept.py)
+首次试说的页面由测试经 WebView2 的远程调试端口操作，安装后的桌面程序和守护进程没有改动。语音是模型包附带的参考英文句，由测试播放进虚拟线缆。「测试上屏」后页面显示 `Delivery unconfirmed. Check the target field`，经控制台 API 开始的一次听写把定稿追加到有焦点的编辑框，交付状态同为 `unconfirmed`。托盘菜单经 MSAA 读出「打开窗口」「暂停听写」「重贴上次结果」「登录时启动」和「退出」，实测只调用了「打开窗口」。代码签名和 SmartScreen 提示仍待实测。 [操作记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [试说脚本](https://github.com/Vitus213/voiceless/blob/e64d97c0c16b0eb6901c22cdf25f1b890af70049/scripts/release/windows/practice.py) · [托盘菜单](https://github.com/Vitus213/voiceless/actions/runs/45685694184) · [安装验收脚本](../scripts/release/windows/accept.py)
 
 在 Windows Server 2022 上，安装 CLI 后通过 Explorer 打开新的 PowerShell。在安装目录之外，`where.exe voiceless` 和 `Get-Command voiceless` 都只找到安装的程序，按名称运行 `voiceless --version` 输出 `voiceless 0.2.0`。卸载结束后，新终端找不到该命令。这轮用户 `PATH` 原值不以分号结尾，卸载后值和类型恢复，原有目录中的命令仍能运行。安装目录和工作目录均含空格，16 项检查全部通过。 [安装与卸载记录](https://github.com/Vitus213/voiceless/actions/runs/45708657354)
 
 新建标准账户的 `PATH` 以 `%USERPROFILE%\AppData\Local\Microsoft\WindowsApps;` 结尾。早期 CLI 安装包卸载后丢失了最后的分号。用 `90fde25` 修复重新构建后，安装期间保留了末尾分号，新终端可以按名称运行 CLI。卸载后，`PATH` 与安装前逐字相同，类型仍为 `REG_EXPAND_SZ`，新终端已找不到 CLI。 [原始失败](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997136) · [修复后的实测](https://github.com/Vitus213/voiceless/actions/runs/45745562089/job/139660622258) · [两份受测安装包](https://github.com/Vitus213/voiceless/actions/runs/45743904617/artifacts/15083406038)
+
+在没有 WebView2 的 Windows Server Core 2022 容器中，桌面安装器以退出码 7 拒绝安装，日志提示先安装 Microsoft Edge WebView2 Evergreen Runtime。目标目录没有留下可执行文件，当前账户也没有新增卸载项。 [安装记录](https://github.com/Vitus213/voiceless/actions/runs/45746709811)
+
+同一环境的旧核心包安装成功，但运行 `voiceless --version` 时返回 `0xC0000135`。只补入 `VCRUNTIME140.dll` 后，原程序就能启动并列出 7 个模型。`1a0c697` 将 MSVC 运行库静态链接到发布程序。重新构建的核心包在断网容器中报告 `voiceless 0.2.0`，列出 7 个模型，`voiceless web` 返回 HTTP 200，随后卸载成功。在带 WebView2 的 Windows 桌面，两份安装包都完成了 SenseVoice 离线转写，CLI 向编辑器送达 83 个字符，桌面窗口从托盘重开。 [单个 DLL 对照实验](https://github.com/Vitus213/voiceless/actions/runs/45747272309) · [修复后的安装实测](https://github.com/Vitus213/voiceless/actions/runs/45747948970) · [两份安装包](https://github.com/Vitus213/voiceless/actions/runs/45747948970/artifacts/15084691333)
 
 快捷键在 Windows 上验证到了注册这一步。守护进程的低级键盘钩子按设计忽略带 `LLKHF_INJECTED` 标志的事件，软件发送的按键不算用户按键。验收用 `SendInput` 发出 ScrollLock，测试自己的钩子看到的事件都带该标志，守护进程保持 `idle`，页面提示检查绑定或点击「开始试说」。同一组合再次调用 `RegisterHotKey` 返回 1409，同键加其他修饰键和另一个键都成功，说明 Windows 已把该组合登记给 Voiceless。上屏只发送一次 Ctrl+V，并且只发给听写开始时记录、仍是前台且完整性不高于本进程的窗口，交付因此报告为未确认。键盘移除只在状态机单测中验证，安装版没有收到过真实的设备移除通知。 [按键与注册记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [钩子与上屏实现](../rust/src/desktop/windows.rs) · [键盘移除单测](../rust/src/desktop/windows/contract.rs)
 

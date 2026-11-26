@@ -64,6 +64,8 @@ the day the work landed on `main`; commit hashes refer to
   refused at startup also shows where to enable desktop microphone access in
   Windows Settings, alongside the original WASAPI error.
 - Uninstalling the Windows CLI preserves the user's trailing PATH separator.
+- Windows release executables link the MSVC runtime statically, so the CLI
+  starts on systems without the Visual C++ Redistributable.
 - On macOS, meetings wait for microphone and system audio permission before
   starting either track. An unanswered system audio request times out after
   30 seconds and leaves no meeting on disk. A microphone-only meeting can
