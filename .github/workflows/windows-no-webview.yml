@@ -1,0 +1,44 @@
+name: Core and desktop installers without WebView2
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/windows-candidate/core-without-webview-0.2.0']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  server-core:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45743904617
+          name: voiceless-windows-user-path-candidates
+          path: ${{ runner.temp }}/candidates
+      - name: Install the exact candidates in a stock Windows container
+        shell: pwsh
+        run: |
+          $candidates = Join-Path $env:RUNNER_TEMP 'candidates'
+          $expected = @{
+            core = '0464751c3c9a69df4c8640daccc9cd0fa74c724e81e6cc37450d298ad26244d2'
+            desktop = '44b43d8a4ae8398ec46277ffdbfc3fd058df86369a1133c5df9b5b90b01ae187'
+          }
+          foreach ($kind in $expected.Keys) {
+            $sum = (Get-FileHash (Join-Path $candidates "voiceless-$kind-v0.2.0-windows-x64.exe")).Hash
+            if ($sum -ine $expected[$kind]) { throw "Unexpected $kind installer SHA256 $sum" }
+          }
+          Copy-Item scripts/release/windows/without-webview.ps1 $candidates
+          @'
+          FROM mcr.microsoft.com/windows/servercore:ltsc2022
+          COPY . C:/proof/
+          USER ContainerUser
+          '@ | docker build --tag voiceless-dependency-check --file - $candidates
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 --format '{{.Id}} {{.OsVersion}}'
+          docker run --rm --network none voiceless-dependency-check powershell.exe -NoProfile -NonInteractive -File C:/proof/without-webview.ps1
+          exit $LASTEXITCODE
