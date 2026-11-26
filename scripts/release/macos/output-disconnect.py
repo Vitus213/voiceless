@@ -4,6 +4,8 @@ import importlib
 import subprocess
 import uuid
 
+import sounddevice as sd
+
 import consent
 from acceptance import MICROPHONE, OUTPUT, Output, Outputs, refuse, sine, tones, wait_for
 
@@ -13,10 +15,19 @@ OUTPUT_NAME = 'Voiceless acceptance output'
 
 
 @contextmanager
-def removable(guest, uid):
+def removable(guest, daemon, uid):
+    def listed():
+        return any(d['node'] == 'coreaudio:' + uid for d in daemon.api('meetings/sources')[1]['system_outputs'])
+
     process = subprocess.Popen([guest.audio, 'temporary-output', OUTPUT, uid], stdin=subprocess.PIPE)
     try:
-        guest.wait_device(uid, 'present', 15)
+        def visible():
+            refuse(process.poll() is None, 'the temporary device process exited before its output appeared')
+            return listed()
+        wait_for(visible, 'the installed daemon to list the new output', timeout=30)
+        # PortAudio caches its device indices. Refresh before either signal stream is open.
+        sd._terminate()
+        sd._initialize()
         yield
     finally:
         process.stdin.close()
@@ -26,7 +37,9 @@ def removable(guest, uid):
             if process.poll() is None:
                 process.kill()
                 process.wait()
-        guest.wait_device(uid, 'absent', 15)
+        wait_for(lambda: not listed(), 'the selected output to leave the installed device list', timeout=30)
+        sd._terminate()
+        sd._initialize()
 
 
 def signals():
@@ -68,7 +81,7 @@ def verify(daemon, evidence, guest, _fixture):
     selection = dict(instance, microphone=microphone, system=output)
     initial_server = coreaudiod()
 
-    with removable(guest, uid), signals():
+    with removable(guest, daemon, uid), signals():
         path, active = start(daemon, selection)
         before = sizes(active)
         evidence.note('selected sources recording before removal', {'scope': active['scope'], 'bytes': before})
@@ -120,7 +133,7 @@ def verify(daemon, evidence, guest, _fixture):
     evidence.check('The original microphone still records 330 Hz while the selected output is absent', True, mic_alone)
 
     def reconnected():
-        with removable(guest, uid), signals():
+        with removable(guest, daemon, uid), signals():
             path = allowed.recording(daemon, selection)
             view = requests.settled(daemon, instance, path)
         refuse(coreaudiod() == initial_server and daemon.api('meetings')[1]['runtime_id'] == instance['runtime_id'],

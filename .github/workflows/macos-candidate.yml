@@ -41,19 +41,19 @@ jobs:
         run: |
           rustup default 1.99.1-aarch64-apple-darwin
           python3 -B scripts/release/macos/package.py "$RUNNER_TEMP/candidates"
-      - name: Reuse the images built with the dual-track readiness fix
+      - name: Reuse the images built with the isolated output fix
         if: ${{ contains(github.event.head_commit.message, '[no build]') }}
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 45707155253
-          name: voiceless-macos-arm64-unanswered-candidates
+          run-id: 45753211325
+          name: voiceless-macos-arm64-allowed-candidates
           path: ${{ runner.temp }}/candidates
-      - name: The reused CLI image is the one the unanswered run tested
+      - name: Verify the repaired CLI image by its digest
         if: ${{ contains(github.event.head_commit.message, '[no build]') }}
         run: |
           cd "$RUNNER_TEMP/candidates"
-          echo "e9e8019d1707a155d0537f29ef39f9bad0375bbfd8a0e1b8171a82fce90fe157  voiceless-cli-v0.2.0-macos-arm64.dmg" | shasum -a 256 -c -
+          echo "3f34e008bcde6c73cc87a28c9e11963e9a3b140a0eeda3b938b88795e72c7834  voiceless-cli-v0.2.0-macos-arm64.dmg" | shasum -a 256 -c -
       - name: Keep the two images
         if: ${{ !cancelled() && !contains(github.event.head_commit.message, '[no build]') }}
         uses: actions/upload-artifact@v4
