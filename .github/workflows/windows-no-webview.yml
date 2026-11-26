@@ -23,6 +23,13 @@ jobs:
       - name: Install the exact candidates in a stock Windows container
         shell: pwsh
         run: |
+          $service = Get-Service docker
+          Write-Host "Docker service $($service.Status), startup $($service.StartType)"
+          if ($service.StartType -eq 'Disabled') { Set-Service docker -StartupType Manual }
+          if ($service.Status -ne 'Running') { Start-Service docker }
+          $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+          docker info --format '{{.OSType}} {{.ServerVersion}}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $candidates = Join-Path $env:RUNNER_TEMP 'candidates'
           $expected = @{
             core = '0464751c3c9a69df4c8640daccc9cd0fa74c724e81e6cc37450d298ad26244d2'
