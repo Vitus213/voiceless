@@ -59,8 +59,10 @@ begin
   Dir := ExpandConstant('{app}');
   RegQueryStringValue(HKCU, 'Environment', 'Path', Value);
   if Pos(';' + Lowercase(Dir) + ';', ';' + Lowercase(Value) + ';') = 0 then begin
-    if (Value <> '') and (Copy(Value, Length(Value), 1) <> ';') then Value := Value + ';';
-    if not RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Value + Dir) then RaiseException('Cannot add CLI to user PATH');
+    if Value = '' then Value := Dir
+    else if Value[Length(Value)] = ';' then Value := Value + Dir + ';'
+    else Value := Value + ';' + Dir;
+    if not RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Value) then RaiseException('Cannot add CLI to user PATH');
     RegWriteStringValue(HKCU, 'Software\Voiceless\Installer', 'CliPath', Dir);
   end;
 end;

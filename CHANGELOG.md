@@ -63,6 +63,7 @@ the day the work landed on `main`; commit hashes refer to
 - Windows reports the selected source when WASAPI denies recording. A meeting
   refused at startup also shows where to enable desktop microphone access in
   Windows Settings, alongside the original WASAPI error.
+- Uninstalling the Windows CLI preserves the user's trailing PATH separator.
 - On macOS, meetings wait for microphone and system audio permission before
   starting either track. An unanswered system audio request times out after
   30 seconds and leaves no meeting on disk. A microphone-only meeting can
