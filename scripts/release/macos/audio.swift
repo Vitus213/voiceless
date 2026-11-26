@@ -86,22 +86,24 @@ case "default-input":
     let status = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, UInt32(MemoryLayout<AudioObjectID>.size), &value)
     guard status == noErr else { fail("setting the default input device failed (OSStatus \(status) \(code(status)))") }
     emit(["default_input": describe(chosen)])
-case "temporary-input":
+case "temporary-input", "temporary-output":
+    let output = arguments[1] == "temporary-output"
+    let scope = output ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput
     guard arguments.count == 4, let source = devices().first(where: { text($0, kAudioDevicePropertyDeviceUID) == arguments[2] }),
-          streams(source, kAudioObjectPropertyScopeInput) > 0 else { fail("temporary-input needs an existing input UID and a new UID") }
+          streams(source, scope) > 0 else { fail("\(arguments[1]) needs a source UID with that capability and a new UID") }
     let properties: [String: Any] = [
         kAudioAggregateDeviceUIDKey: arguments[3],
-        kAudioAggregateDeviceNameKey: "Voiceless acceptance microphone",
+        kAudioAggregateDeviceNameKey: output ? "Voiceless acceptance output" : "Voiceless acceptance microphone",
         kAudioAggregateDeviceIsPrivateKey: false,
         kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: arguments[2]]],
     ]
     var device = AudioObjectID(kAudioObjectUnknown)
     let created = AudioHardwareCreateAggregateDevice(properties as CFDictionary, &device)
-    guard created == noErr else { fail("creating aggregate input failed: \(created)") }
-    // EOF disconnects just this aggregate. Its underlying input and the audio server stay up.
+    guard created == noErr else { fail("creating aggregate device failed: \(created)") }
+    // EOF disconnects just this aggregate. Its underlying device and the audio server stay up.
     _ = readLine()
     let destroyed = AudioHardwareDestroyAggregateDevice(device)
-    guard destroyed == noErr else { fail("removing aggregate input failed: \(destroyed)") }
+    guard destroyed == noErr else { fail("removing aggregate device failed: \(destroyed)") }
 case "wait":
     guard arguments.count == 5, arguments[3] == "present" || arguments[3] == "absent", let limit = Double(arguments[4]) else {
         fail("usage: audio wait <device UID> <present|absent> <seconds>")

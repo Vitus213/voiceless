@@ -393,7 +393,7 @@ def baseline(fixture, speech):
         env=fixture['env'], text=True, timeout=180))['text']
 
 
-def main():
+def main(verify=verify):
     root, directory = (Path(argument).resolve() for argument in sys.argv[1:3])
     evidence = Evidence(directory)
     daemon, guest = None, None

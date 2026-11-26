@@ -1,9 +1,9 @@
-name: Installed macOS system-audio dialog answered at the dialog
+name: Installed macOS isolated output disconnect
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/macos-candidate/consent-0.2.0']
+    branches: ['ci/macos-candidate/single-output-loss-0.2.0']
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ env:
 
 jobs:
   candidate:
-    name: Answer the system's system-audio dialog for the installed CLI, record both lines, lose the output and recover
+    name: Lose only the selected system output during a dual-track recording
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -63,7 +63,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
-      - name: Install the CLI and answer the system's dialog for its dual-track meetings
+      - name: Remove the selected output and recover both recorded tracks
         run: |
           set -eu
           root=$(mktemp -d "$RUNNER_TEMP/voiceless-allowed.XXXXXXXX")
@@ -73,12 +73,12 @@ jobs:
           hdiutil attach -nobrowse -noautoopen -readonly -mountpoint "$root/volume" "$image"
           trap 'hdiutil detach "$root/volume"' EXIT
           HOME="$root/home" "$root/volume/install-cli.command"
-          python3 -u -B scripts/release/macos/system-audio-allowed.py "$root" "$RUNNER_TEMP/evidence"
+          python3 -u -B scripts/release/macos/output-disconnect.py "$root" "$RUNNER_TEMP/evidence"
       - name: Keep the evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: voiceless-macos-system-audio-allowed
+          name: voiceless-macos-output-disconnect
           path: ${{ runner.temp }}/evidence
           if-no-files-found: warn
           retention-days: 14
