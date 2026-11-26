@@ -6,6 +6,7 @@ import Foundation
 // properties only: nothing here opens a stream, so no consent dialog can appear.
 //   audio list
 //   audio default-input <device UID>
+//   audio temporary-input|temporary-output <source UID> <new UID> (hold until stdin closes)
 //   audio wait <device UID> <present|absent> <seconds>
 
 func address(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
@@ -95,13 +96,19 @@ case "temporary-input", "temporary-output":
         kAudioAggregateDeviceUIDKey: arguments[3],
         kAudioAggregateDeviceNameKey: output ? "Voiceless acceptance output" : "Voiceless acceptance microphone",
         kAudioAggregateDeviceIsPrivateKey: false,
+        kAudioAggregateDeviceMainSubDeviceKey: arguments[2],
         kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: arguments[2]]],
     ]
     var device = AudioObjectID(kAudioObjectUnknown)
     let created = AudioHardwareCreateAggregateDevice(properties as CFDictionary, &device)
     guard created == noErr else { fail("creating aggregate device failed: \(created)") }
-    // EOF disconnects just this aggregate. Its underlying device and the audio server stay up.
-    _ = readLine()
+    emit(["created": describe(device), "requested_uid": arguments[3], "subdevice": arguments[2]])
+    // HAL delivers device notifications on the main run loop. Wait for the owner's EOF off that thread.
+    DispatchQueue.global().async {
+        _ = readLine()
+        DispatchQueue.main.async { CFRunLoopStop(CFRunLoopGetMain()) }
+    }
+    CFRunLoopRun()
     let destroyed = AudioHardwareDestroyAggregateDevice(device)
     guard destroyed == noErr else { fail("removing aggregate device failed: \(destroyed)") }
 case "wait":
@@ -114,7 +121,7 @@ case "wait":
     while true {
         found = devices().contains { text($0, kAudioDevicePropertyDeviceUID) == arguments[2] }
         if found == wanted || Date() >= deadline { break }
-        Thread.sleep(forTimeInterval: 0.25)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.25))
     }
     emit(["uid": arguments[2], "wanted": arguments[3], "found": found])
     if found != wanted { exit(2) }

@@ -7,7 +7,7 @@ import uuid
 import sounddevice as sd
 
 import consent
-from acceptance import MICROPHONE, OUTPUT, Output, Outputs, refuse, sine, tones, wait_for
+from acceptance import MICROPHONE, OUTPUT, Output, Outputs, Refused, refuse, sine, tones, wait_for
 
 allowed = importlib.import_module('system-audio-allowed')
 requests = importlib.import_module('system-audio-consent')
@@ -24,7 +24,14 @@ def removable(guest, daemon, uid):
         def visible():
             refuse(process.poll() is None, 'the temporary device process exited before its output appeared')
             return listed()
-        wait_for(visible, 'the installed daemon to list the new output', timeout=30)
+        try:
+            wait_for(visible, 'the installed daemon to list the new output', timeout=30)
+        except Refused:
+            guest.evidence.note('Device lists while waiting for the aggregate', {
+                'uid': uid, 'process_status': process.poll(), 'hal': guest.devices(),
+                'meeting_sources': daemon.api('meetings/sources')[1],
+            })
+            raise
         # PortAudio caches its device indices. Refresh before either signal stream is open.
         sd._terminate()
         sd._initialize()
