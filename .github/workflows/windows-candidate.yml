@@ -63,9 +63,10 @@ jobs:
       - name: Check WASAPI device discovery and refusal of a missing meeting input
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked --manifest-path rust/Cargo.toml --test capture_workflows native_meeting::catalog_resolves_host_ids_and_rejects_a_missing_selection_before_recording -- --exact
+      - name: Install and identify disposable WASAPI endpoints
+        run: ./scripts/release/windows/lines.ps1
       - name: Exercise microphone, loopback, device loss and consent on disposable WASAPI endpoints
         run: |
-          ./scripts/release/windows/lines.ps1
           python -m pip install sounddevice==0.5.3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -u -B scripts/release/windows/meeting.py "$env:RUNNER_TEMP/candidates"
