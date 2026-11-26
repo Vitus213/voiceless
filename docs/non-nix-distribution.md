@@ -234,6 +234,8 @@ Windows 原生实测都在 GitHub 托管的 Windows Server 2022 Datacenter（10.
 
 在 Windows Server 2022 上，安装 CLI 后通过 Explorer 打开新的 PowerShell。在安装目录之外，`where.exe voiceless` 和 `Get-Command voiceless` 都只找到安装的程序，按名称运行 `voiceless --version` 输出 `voiceless 0.2.0`。卸载结束后，新终端找不到该命令。这轮用户 `PATH` 原值不以分号结尾，卸载后值和类型恢复，原有目录中的命令仍能运行。安装目录和工作目录均含空格，16 项检查全部通过。 [安装与卸载记录](https://github.com/Vitus213/voiceless/actions/runs/45708657354)
 
+新建标准账户的 `PATH` 以 `%USERPROFILE%\AppData\Local\Microsoft\WindowsApps;` 结尾。早期 CLI 安装包卸载后丢失了最后的分号。用 `90fde25` 修复重新构建后，安装期间保留了末尾分号，新终端可以按名称运行 CLI。卸载后，`PATH` 与安装前逐字相同，类型仍为 `REG_EXPAND_SZ`，新终端已找不到 CLI。 [原始失败](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997136) · [修复后的实测](https://github.com/Vitus213/voiceless/actions/runs/45745562089/job/139660622258) · [两份受测安装包](https://github.com/Vitus213/voiceless/actions/runs/45743904617/artifacts/15083406038)
+
 快捷键在 Windows 上验证到了注册这一步。守护进程的低级键盘钩子按设计忽略带 `LLKHF_INJECTED` 标志的事件，软件发送的按键不算用户按键。验收用 `SendInput` 发出 ScrollLock，测试自己的钩子看到的事件都带该标志，守护进程保持 `idle`，页面提示检查绑定或点击「开始试说」。同一组合再次调用 `RegisterHotKey` 返回 1409，同键加其他修饰键和另一个键都成功，说明 Windows 已把该组合登记给 Voiceless。上屏只发送一次 Ctrl+V，并且只发给听写开始时记录、仍是前台且完整性不高于本进程的窗口，交付因此报告为未确认。键盘移除只在状态机单测中验证，安装版没有收到过真实的设备移除通知。 [按键与注册记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [钩子与上屏实现](../rust/src/desktop/windows.rs) · [键盘移除单测](../rust/src/desktop/windows/contract.rs)
 
 在标准账户（中等完整性 `0x2000`）下，两份安装包可安装和卸载。CLI 向同级编辑框粘贴了 83 个字符并恢复剪贴板，面对高完整性窗口时拒绝交付，编辑框及剪贴板内容保持原样。重复启动桌面入口可重开窗口。同一会话的任务栏属于另一个账户，标准账户自己的托盘重开仍待验证。 [标准账户实测](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997136)
