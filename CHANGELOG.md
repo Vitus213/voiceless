@@ -70,6 +70,8 @@ the day the work landed on `main`; commit hashes refer to
   starting either track. An unanswered system audio request times out after
   30 seconds and leaves no meeting on disk. A microphone-only meeting can
   still record with an already authorized input.
+- First-run setup names the model whose download failed and offers a retry.
+  The selected microphone, recognition mode and installed models stay in place.
 - If the first-run shortcut times out, the console points to the binding in
   Shortcuts and typing and offers the Try a phrase button. On Windows and
   macOS, the Sound section directs users to the window for recording status.
