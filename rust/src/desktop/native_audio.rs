@@ -133,6 +133,26 @@ impl PreparedCapture {
                 }
                 capture.encoder.lock().recording = true;
                 // The owner drops the sole sender to stop the device.
+                #[cfg(target_os = "macos")]
+                if let Some(tap) = &capture.tap {
+                    // Core Audio can keep the private aggregate streaming silence after
+                    // the selected output vanishes. Check that output even on a normal stop.
+                    loop {
+                        let stop = commands.recv_timeout(Duration::from_secs(1));
+                        if !tap.output_alive() {
+                            errors.send_replace(Some(
+                                "the selected system output disconnected".into(),
+                            ));
+                            break;
+                        }
+                        if !matches!(stop, Err(control::RecvTimeoutError::Timeout)) {
+                            break;
+                        }
+                    }
+                } else {
+                    let _ = commands.recv();
+                }
+                #[cfg(windows)]
                 let _ = commands.recv();
                 drop(capture.stream);
                 #[cfg(target_os = "macos")]
