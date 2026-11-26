@@ -56,21 +56,13 @@ jobs:
             audioEndpoints = @($endpoints | ForEach-Object Name)
             graphics = @($graphics | ForEach-Object Name)
           } | ConvertTo-Json -Depth 3
-      - uses: actions/setup-node@v6
+      - name: Reuse the corrected installers for the standard-user check
+        uses: actions/download-artifact@v4
         with:
-          node-version: '22.23.1'
-          package-manager-cache: false
-      - name: Build both corrected installers
-        run: |
-          rustup default 1.99.1-x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
-      - uses: actions/upload-artifact@v4
-        with:
+          github-token: ${{ github.token }}
+          run-id: 45743904617
           name: voiceless-windows-user-path-candidates
-          path: ${{ runner.temp }}/candidates/voiceless-*.exe
-          if-no-files-found: error
-          compression-level: 0
+          path: ${{ runner.temp }}/candidates
       - name: Install as a standard user and check its paste, tray and integrity refusals
         run: python -u -B scripts/release/windows/standard-user.py --candidates "$env:RUNNER_TEMP/candidates" --evidence "$env:RUNNER_TEMP/standard-user-evidence"
       - name: Keep the standard-user evidence

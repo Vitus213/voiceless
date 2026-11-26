@@ -386,7 +386,9 @@ try {
     if ($ctl.exit -ne 0 -or $ctl.runtimeId -ne $runtime) { throw "voiceless ctl status answered '$($ctl.status)' for runtime $($ctl.runtimeId), expected $runtime" }
     if (@($ctl.resolved).Count -ne 1 -or !$ctl.resolved[0].StartsWith((Split-Path $install.cli), [StringComparison]::OrdinalIgnoreCase)) { throw "A new console of the standard user finds voiceless at $($ctl.resolved -join ', ')" }
     $cliDirectory = Split-Path $install.cli
-    $installedPath = if ($identity.path) { ([string]$identity.path).TrimEnd(';') + ';' + $cliDirectory } else { $cliDirectory }
+    $installedPath = if (!$identity.path) { $cliDirectory }
+        elseif ($identity.path.EndsWith(';')) { "$($identity.path)$cliDirectory;" }
+        else { "$($identity.path);$cliDirectory" }
     if ($ctl.pathKind -ne 'ExpandString' -or [string]$ctl.path -cne $installedPath) { throw "The user's PATH is $($ctl.pathKind): '$($ctl.path)'; before the installation it was '$($identity.path)' ($($identity.pathKind))" }
     $report.lookup = [ordered]@{ status = $ctl.status; resolved = @($ctl.resolved); where = @($ctl.where); path = $ctl.path; pathKind = $ctl.pathKind }
     Write-Output "A new console of $($identity.account) finds voiceless at $($ctl.resolved -join ', ') and reaches the runtime"
