@@ -59,7 +59,7 @@
 
 ## 8. 会议和带语音的屏幕反馈
 
-- [ ] 8.1 `[Requirement: 独立的会议采集和恢复]` `[Scenario: 选择会议输入并完成录制]` `[Scenario: 授权拒绝、来源失效或进程中断]` 用合成双轨与进程重启测试来源选择、录音状态和恢复。接入可用的麦克风和系统回环，结束后交给后台队列。运行新增用例 `cargo test --manifest-path rust/Cargo.toml --test capture_workflows meeting_capture`，在发布矩阵中实测成功与权限拒绝。
+- [x] 8.1 `[Requirement: 独立的会议采集和恢复]` `[Scenario: 选择会议输入并完成录制]` `[Scenario: 授权拒绝、来源失效或进程中断]` 用合成双轨与进程重启测试来源选择、录音状态和恢复。接入可用的麦克风和系统回环，结束后交给后台队列。运行新增用例 `cargo test --manifest-path rust/Cargo.toml --test capture_workflows meeting_capture`，在发布矩阵中实测成功与权限拒绝。 [Linux x86-64 与 ARM64](../../../docs/non-nix-distribution.md#linux-会议双轨断线恢复与权限) · [macOS 安装版](https://github.com/Vitus213/voiceless/actions/runs/45716162420) · [Windows 安装版](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997392)
 - [x] 8.2 `[Requirement: 可校对的会议整理]` `[Scenario: 校对会议并选择整理方式]` 用多说话人音频验证带时间段的查看和人工订正。加入本地说话人区分、摘要策略与可校对的要点和导出。运行 `cargo test --manifest-path rust/Cargo.toml --test capture_workflows meeting_review` 与 `bun run --cwd frontend test:e2e --grep meeting-review`，分别核对离线和显式授权的远程输出。
 - [x] 8.3 `[Requirement: 带语音的屏幕标注]` `[Scenario: 录制并复核带语音的屏幕反馈]` `[Scenario: 平台不支持屏幕采集或用户取消]` 测试授权、采集区域、批注、转写预览和取消后零发送。实现从系统捕获来源到保存、复制和明确送出的完整交互。运行 `cargo test --manifest-path rust/Cargo.toml --test capture_workflows annotation` 与 `bun run --cwd frontend test:e2e --grep annotation`，在支持的系统验证实际被录制范围和输出内容。
 

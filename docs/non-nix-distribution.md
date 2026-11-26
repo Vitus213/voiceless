@@ -176,11 +176,13 @@ GitHub 托管的 Apple Silicon 客机运行 macOS 15.8.2。镜像中的 SIP 已�
 
 使用已授权虚拟麦克风录制 330 Hz 测试音时，终止守护进程再重启，会议显示可恢复或丢弃。显式恢复后，262144 字节已提交 PCM 全部保留并进入转写队列。移除所选虚拟麦克风也会中断采集，恢复得到 270336 字节，缺少该设备时再次开始返回 409。 [安装版恢复记录](https://github.com/Vitus213/voiceless/actions/runs/45695626355)
 
-安装带有 `106b45a` 修复的 CLI 后，保持系统音频授权弹窗无人应答。首次双轨请求和重试都在 30.2 秒后返回 HTTP 409，指出所选系统输出仍需授权。两次请求期间，会议目录均无变化，屏幕上只有一个授权弹窗。两次请求之间，已获授权的虚拟麦克风完成了单轨录音并生成转写任务。这轮保留了系统弹窗，首次点「允许」后的双轨录音仍待用此版本验证。 [安装版运行记录](https://github.com/Vitus213/voiceless/actions/runs/45707155253) · [验收证据](https://github.com/Vitus213/voiceless/actions/runs/45707155253/artifacts/15066347603)
+安装带有 `106b45a` 修复的 CLI 后，保持系统音频授权弹窗无人应答。首次双轨请求和重试都在 30.2 秒后返回 HTTP 409，指出所选系统输出仍需授权。两次请求期间，会议目录均无变化，屏幕上只有一个授权弹窗。两次请求之间，已获授权的虚拟麦克风完成了单轨录音并生成转写任务。 [安装版运行记录](https://github.com/Vitus213/voiceless/actions/runs/45707155253) · [验收证据](https://github.com/Vitus213/voiceless/actions/runs/45707155253/artifacts/15066347603)
+
+在另一台托管 Mac 上复用同一份 CLI DMG（SHA-256 `e9e8019d1707a155d0537f29ef39f9bad0375bbfd8a0e1b8171a82fce90fe157`）。测试通过 System Events 点击系统弹窗的「允许」，原请求随即开始录音。两条 WAV 各含 133803 个采样，分别录到授权后的 330 Hz 麦克风和 880 Hz 系统音。移除测试输出驱动并重启 Core Audio 时，两台虚拟设备同时离线，会议记录麦克风中断。显式恢复后两个文件分别保有 157696 和 157867 个采样。重新接入后双轨录音、参考语音转写均成功。 [10 项安装版检查及录音结果](https://github.com/Vitus213/voiceless/actions/runs/45716162420/artifacts/15069413747)
 
 使用运行 `45694716105` 生成的桌面 DMG，向 TextEdit 文稿 A 粘贴 `Voiceless 中文 Ω` 后，保存的 19 个 UTF-8 字节与预期一致，剪贴板恢复了原来的测试文本。另一轮在 A 开始听写，切到文稿 B 再停录，应用报告 `not-delivered` 并保留定稿。保存并关闭两份文稿后，文件与听写前逐字节相同，剪贴板也保留了测试文本。 [桌面安装版实测](https://github.com/Vitus213/voiceless/actions/runs/45710341438) · [文稿摘要与交付状态](https://github.com/Vitus213/voiceless/actions/runs/45710341438/artifacts/15067591385)
 
-两台 Mac 使用的 Voiceless 产物均为 ad-hoc 签名。Developer ID 签名与公证、实体麦克风试说、实体按键触发，以及系统输出移除后的双轨恢复仍待验收。 [签名与公证入口](../scripts/release/macos/package.py)
+两台 Mac 使用的 Voiceless 产物均为 ad-hoc 签名。Developer ID 签名与公证、实体麦克风试说、实体按键触发及单独拔掉输出设备仍待实测。 [签名与公证入口](../scripts/release/macos/package.py)
 
 Windows x64 的两份 Inno Setup 安装包在 Linux 上用 MinGW 构建，并在 Wine 11.0 中安装和卸载。安装后的 CLI 校验了带子目录的 SenseVoice 模型，离线队列把上面的流式 WAV 转写为「你好世界欢迎使用语音输入」。双轨分别采到 330 Hz 麦克风和 880 Hz 系统音频，拒绝麦克风时返回 409。核心安装包 SHA-256 为 `6111e7453edd7cc530fde145d4a076a84387483664e05dc42bbf9b62b2a2be40`，桌面安装包为 `14d6fa46375137418b029975e5b82e89251a986ffa9ae0bd108fce074997bb29`。
 
@@ -206,7 +208,11 @@ Windows Server 2022 上使用 MSVC 构建并安装了 CLI 和桌面候选包。�
 
 会议授权修复后的 Windows 安装包也通过了双轨、权限与中断恢复验收。测试按 WASAPI 端点 ID 选择设备，麦克风与系统输出分别录得 330 Hz、880 Hz，拒绝麦克风时返回 409 且会议数保持不变。进程中断前两轨各提交了 262144 字节，重启后等待显式恢复，恢复的两份 WAV 各有 131072 个采样并各生成一个转写任务。 [运行记录](https://github.com/Vitus213/voiceless/actions/runs/45700798152) · [同批安装包](https://github.com/Vitus213/voiceless/actions/runs/45698558308/artifacts/15061804292)
 
-包含 `106b45a` 的 Windows 核心安装包 SHA-256 为 `d4e06be3c6620ffe284d2f4021e281c1c36982a25ebe3aed3d47adef903fbd14`。使用客机原有的隐私设置时，WASAPI 首次打开麦克风返回 `0x80070005`，随后 Windows 保留了拒绝决定。两次双轨请求都返回 HTTP 409 并指出所选麦克风，会议列表和会议目录始终为空。该客机上的双轨录制停在授权这一步。 [原生录制尝试与安装包](https://github.com/Vitus213/voiceless/actions/runs/45707934020) · [同包权限拒绝与重试](https://github.com/Vitus213/voiceless/actions/runs/45710444582)
+包含 `106b45a` 的 Windows 核心安装包 SHA-256 为 `d4e06be3c6620ffe284d2f4021e281c1c36982a25ebe3aed3d47adef903fbd14`。客机默认设置下，WASAPI 首次打开麦克风返回 `0x80070005`，随后 Windows 保留了拒绝决定。两次双轨请求均返回 HTTP 409，并指出所选麦克风，会议列表和目录始终为空。 [原生安装包](https://github.com/Vitus213/voiceless/actions/runs/45707934020) · [同包权限拒绝与重试](https://github.com/Vitus213/voiceless/actions/runs/45710444582)
+
+同一份安装包在 Windows Server 2022 客机上通过设置页开启麦克风访问后，麦克风轨和系统轨各录得 132640 个采样，分别为 330 Hz 和 880 Hz。禁用所选端点后，两轨均可恢复。另一次终止守护进程后，重启并显式恢复得到两份各含 131072 个采样的 WAV，各生成一个转写任务。关闭设置页开关后，录音再次返回 409。 [原生会议作业](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997392) · [系统开关与录音证据](https://github.com/Vitus213/voiceless/actions/runs/45723972884/artifacts/15073726861)
+
+加入 `527ca67` 的核心包首次收到 WASAPI `0x80070005` 时，同时显示设备 ID 和 Windows 麦克风隐私设置的位置。Windows 记住拒绝决定后，重试显示同一设置指引一次，两次均未创建会议或音轨。 [安装版验收](https://github.com/Vitus213/voiceless/actions/runs/45712544305) · [受测安装包](https://github.com/Vitus213/voiceless/actions/runs/45712544305/artifacts/15069615629)
 
 在 Wine 11.0 中安装同一份 MSVC 核心包，用独立的 PulseAudio 服务提供合成信号。正常停止后，麦克风 WAV 保存了 133760 个采样，主频为 330 Hz。系统 WAV 保存了 133280 个采样，主频为 880 Hz。录制另一场会议时终止该 Wine 实例，重启后会议显示可恢复或丢弃。显式恢复后，每轨保留 131072 个采样和各自的频率，并各自生成转写任务。 [受测 MSVC 安装包](https://github.com/Vitus213/voiceless/actions/runs/45707934020/artifacts/15067410293)
 
@@ -226,8 +232,10 @@ Windows 原生实测都在 GitHub 托管的 Windows Server 2022 Datacenter（10.
 
 首次试说的页面由测试经 WebView2 的远程调试端口操作，安装后的桌面程序和守护进程没有改动。语音是模型包附带的参考英文句，由测试播放进虚拟线缆。「测试上屏」后页面显示 `Delivery unconfirmed. Check the target field`，经控制台 API 开始的一次听写把定稿追加到有焦点的编辑框，交付状态同为 `unconfirmed`。托盘菜单经 MSAA 读出「打开窗口」「暂停听写」「重贴上次结果」「登录时启动」和「退出」，实测只调用了「打开窗口」。缺少 WebView2 时安装器的拒绝提示、代码签名和 SmartScreen 提示仍待实测。 [操作记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [试说脚本](https://github.com/Vitus213/voiceless/blob/e64d97c0c16b0eb6901c22cdf25f1b890af70049/scripts/release/windows/practice.py) · [托盘菜单](https://github.com/Vitus213/voiceless/actions/runs/45685694184) · [安装验收脚本](../scripts/release/windows/accept.py)
 
-在 Windows Server 2022 上，安装 CLI 后通过 Explorer 打开新的 PowerShell。在安装目录之外，`where.exe voiceless` 和 `Get-Command voiceless` 都只找到安装的程序，按名称运行 `voiceless --version` 输出 `voiceless 0.2.0`。卸载结束后，新终端找不到该命令，用户 `PATH` 的值和类型恢复到安装前，原有目录中的命令仍能运行。安装目录和工作目录均含空格，16 项检查全部通过。 [安装与卸载记录](https://github.com/Vitus213/voiceless/actions/runs/45708657354)
+在 Windows Server 2022 上，安装 CLI 后通过 Explorer 打开新的 PowerShell。在安装目录之外，`where.exe voiceless` 和 `Get-Command voiceless` 都只找到安装的程序，按名称运行 `voiceless --version` 输出 `voiceless 0.2.0`。卸载结束后，新终端找不到该命令。这轮用户 `PATH` 原值不以分号结尾，卸载后值和类型恢复，原有目录中的命令仍能运行。安装目录和工作目录均含空格，16 项检查全部通过。 [安装与卸载记录](https://github.com/Vitus213/voiceless/actions/runs/45708657354)
 
 快捷键在 Windows 上验证到了注册这一步。守护进程的低级键盘钩子按设计忽略带 `LLKHF_INJECTED` 标志的事件，软件发送的按键不算用户按键。验收用 `SendInput` 发出 ScrollLock，测试自己的钩子看到的事件都带该标志，守护进程保持 `idle`，页面提示检查绑定或点击「开始试说」。同一组合再次调用 `RegisterHotKey` 返回 1409，同键加其他修饰键和另一个键都成功，说明 Windows 已把该组合登记给 Voiceless。上屏只发送一次 Ctrl+V，并且只发给听写开始时记录、仍是前台且完整性不高于本进程的窗口，交付因此报告为未确认。键盘移除只在状态机单测中验证，安装版没有收到过真实的设备移除通知。 [按键与注册记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [钩子与上屏实现](../rust/src/desktop/windows.rs) · [键盘移除单测](../rust/src/desktop/windows/contract.rs)
 
-托管客机没有麦克风端点，显卡是虚拟显示适配器，软件按键又被忽略。以下各项需要有人在一台 Windows 实机上操作：按实体键开始、停止和取消听写，用实体麦克风试说，键盘或 USB 麦克风拔出后的恢复，向更高完整性窗口上屏被拒，中完整性会话下的托盘与粘贴。受测系统只有 Windows Server 2022，Windows 10 和 11 客户版没有实测。GPU 识别还需要先产出带 GGUF 引擎的 Windows 构建，并有带 GPU 的机器。这些结果取得之前不计入 Windows 的通过范围。
+在标准账户（中等完整性 `0x2000`）下，两份安装包可安装和卸载。CLI 向同级编辑框粘贴了 83 个字符并恢复剪贴板，面对高完整性窗口时拒绝交付，编辑框及剪贴板内容保持原样。重复启动桌面入口可重开窗口。同一会话的任务栏属于另一个账户，标准账户自己的托盘重开仍待验证。 [标准账户实测](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997136)
+
+实体按键的开始、停止与取消，实体麦克风试说，以及键盘或 USB 麦克风拔出后的恢复仍待实机验证。安装及听写验收使用 Windows Server 2022，Windows 10 和 11 x64 客户版待测。当前 Windows 安装包仅提供 CPU 识别。
