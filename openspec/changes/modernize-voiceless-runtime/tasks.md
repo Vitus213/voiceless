@@ -58,6 +58,7 @@
 
 - [ ] 7.1 `[Requirement: 平台交付与运行依赖可验证]` `[Scenario: Linux 桌面或跨平台安装]` `[Requirement: 按平台能力提供麦克风和浮层]` `[Scenario: 切换或断开默认麦克风]` `[Scenario: 合成器不支持浮层或系统功能]` 在 Apple Silicon macOS 上以设备断开、拒绝权限及首次试说做测试。完成 CoreAudio、快捷键、辅助功能授权、菜单栏与上屏适配，签名并对可安装产物验证。运行 `cargo test --manifest-path rust/Cargo.toml --test desktop_contract macos`，从发布候选安装后在原生应用中验收实际麦克风和交付。
   已在托管 Apple Silicon 上用 CoreAudio 聚合设备验证默认输入切换、所选输入单独断开和显式恢复。个人 M1 仍待解锁后用实体麦克风和快捷键试说，Developer ID 签名与公证缺少可用身份。[安装版输入切换验收](https://github.com/Vitus213/voiceless/actions/runs/45751209895)
+  托管 Mac 的修复包也通过了单个系统输出断开与重接验收。显式恢复后，两条 WAV 的测试音与所选来源对应，均已进入本地转写队列。 [安装包验收](https://github.com/Vitus213/voiceless/actions/runs/45755892334)
 - [ ] 7.2 `[Requirement: 平台交付与运行依赖可验证]` `[Scenario: Linux 桌面或跨平台安装]` `[Requirement: 全局听写快捷键与冲突报告]` `[Scenario: 快捷键被占用或未授权]` `[Requirement: 在正确的目标交付结果]` `[Scenario: 焦点改变或交付结果无法确认]` 在 Windows x64 建立权限拒绝、热插拔和焦点变化用例。完成 WASAPI、快捷键和输入适配，产出可安装的桌面和 CLI 包。运行 `cargo test --manifest-path rust/Cargo.toml --test desktop_contract windows`，实际安装验证 CPU 及受支持的 GPU、系统托盘、重开窗口和正确交付。
   已在 Windows 安装版的设置页验证外部快捷键冲突、保留旧绑定和重试。仍待实体键盘与麦克风拔插，以及标准账户在自己任务栏中重开窗口。[快捷键冲突与重试](https://github.com/Vitus213/voiceless/actions/runs/45750351599) · [标准账户验收](https://github.com/Vitus213/voiceless/actions/runs/45745562089)
 

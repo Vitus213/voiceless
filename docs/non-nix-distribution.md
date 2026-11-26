@@ -188,7 +188,9 @@ GitHub 托管的 Apple Silicon 客机运行 macOS 15.8.2。镜像中的 SIP 已�
 
 在托管 Apple Silicon 上从 CLI DMG 安装后，用浏览器打开内嵌控制台。选择「跟随系统默认」时，页面随 CoreAudio 默认输入切换。显式选定测试聚合麦克风后，系统默认再次改变时，Voiceless 继续使用所选设备。单独移除该设备后，设置页保留原选择，标出「未连接」，有效输入为空。选择「跟随系统默认」并应用后，原来的 `AVIODevice 2` 恢复生效。设备切换期间，Voiceless 和 `coreaudiod` 的进程均持续运行。 [安装版实测](https://github.com/Vitus213/voiceless/actions/runs/45751209895) · [失效与恢复截图](https://github.com/Vitus213/voiceless/actions/runs/45751209895/artifacts/15085263675)
 
-两台 Mac 使用的 Voiceless 产物均为 ad-hoc 签名。Developer ID 签名与公证、实体麦克风试说、实体按键触发及单独拔掉输出设备仍待实测。 [签名与公证入口](../scripts/release/macos/package.py)
+在托管 Apple Silicon 上，较早的 `0.2.0` 候选包在所选系统输出消失后仍显示录制中。安装修复后的 CLI DMG（SHA-256 `3f34e008bcde6c73cc87a28c9e11963e9a3b140a0eeda3b938b88795e72c7834`）后，单独移除选中的 Core Audio 聚合输出，会议进入 `interrupted`，失败来源为 `system`。显式恢复后，麦克风 WAV 有 151211 个采样，检出 330 Hz 测试音。系统 WAV 有 148992 个采样，检出 880 Hz 测试音。两份文件均进入本地转写队列。输出缺失时再次开始返回 HTTP 409，麦克风仍能单独录音。接回同一输出后双轨录音恢复，守护进程的 `runtime_id` 和 `coreaudiod` 的 PID 均保持一致。 [旧包复现](https://github.com/Vitus213/voiceless/actions/runs/45752540316) · [修复包验收记录](https://github.com/Vitus213/voiceless/actions/runs/45755892334/artifacts/15088240562)
+
+两台 Mac 使用的 Voiceless 产物均为 ad-hoc 签名。Developer ID 签名与公证、实体麦克风试说、实体按键触发和实体输出设备拔插仍待实测。 [签名与公证入口](../scripts/release/macos/package.py)
 
 Windows x64 的两份 Inno Setup 安装包在 Linux 上用 MinGW 构建，并在 Wine 11.0 中安装和卸载。安装后的 CLI 校验了带子目录的 SenseVoice 模型，离线队列把上面的流式 WAV 转写为「你好世界欢迎使用语音输入」。双轨分别采到 330 Hz 麦克风和 880 Hz 系统音频，拒绝麦克风时返回 409。核心安装包 SHA-256 为 `6111e7453edd7cc530fde145d4a076a84387483664e05dc42bbf9b62b2a2be40`，桌面安装包为 `14d6fa46375137418b029975e5b82e89251a986ffa9ae0bd108fce074997bb29`。
 

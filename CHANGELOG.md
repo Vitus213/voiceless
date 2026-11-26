@@ -70,6 +70,8 @@ the day the work landed on `main`; commit hashes refer to
   starting either track. An unanswered system audio request times out after
   30 seconds and leaves no meeting on disk. A microphone-only meeting can
   still record with an already authorized input.
+- On macOS, disconnecting the selected system output interrupts a dual-track
+  meeting. Recovering the meeting keeps the recorded audio from both tracks.
 - First-run setup names the model whose download failed and offers a retry.
   The selected microphone, recognition mode and installed models stay in place.
 - If the first-run shortcut times out, the console points to the binding in
