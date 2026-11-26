@@ -1,9 +1,9 @@
-name: Installed Windows standard-user desktop
+name: Windows standard-user installer PATH preservation
 
 on:
   workflow_dispatch:
   push:
-    branches: ['ci/windows-candidate/standard-user-desktop-0.2.0']
+    branches: ['ci/windows-candidate/preserve-user-path-0.2.0']
 
 permissions:
   contents: read
@@ -56,19 +56,21 @@ jobs:
             audioEndpoints = @($endpoints | ForEach-Object Name)
             graphics = @($graphics | ForEach-Object Name)
           } | ConvertTo-Json -Depth 3
-      - name: Reuse the exact installers from the dual-track run
-        uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v6
         with:
-          github-token: ${{ github.token }}
-          run-id: 45707934020
-          name: voiceless-windows-prepared-stream-installers
-          path: ${{ runner.temp }}/candidates
-      - name: Confirm the core installer refused under the guest's own settings
+          node-version: '22.23.1'
+          package-manager-cache: false
+      - name: Build both corrected installers
         run: |
-          $core = "$env:RUNNER_TEMP/candidates/voiceless-core-v0.2.0-windows-x64.exe"
-          $hash = (Get-FileHash $core -Algorithm SHA256).Hash
-          if ($hash -ne 'D4E06BE3C6620FFE284D2F4021E281C1C36982A25EBE3AED3D47ADEF903FBD14') { throw "The core installer is $hash, not d4e06be3c6620ffe284d2f4021e281c1c36982a25ebe3aed3d47adef903fbd14" }
-          Get-FileHash "$env:RUNNER_TEMP/candidates/voiceless-*.exe" -Algorithm SHA256 | Format-List Hash, Path
+          rustup default 1.99.1-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-user-path-candidates
+          path: ${{ runner.temp }}/candidates/voiceless-*.exe
+          if-no-files-found: error
+          compression-level: 0
       - name: Install as a standard user and check its paste, tray and integrity refusals
         run: python -u -B scripts/release/windows/standard-user.py --candidates "$env:RUNNER_TEMP/candidates" --evidence "$env:RUNNER_TEMP/standard-user-evidence"
       - name: Keep the standard-user evidence
