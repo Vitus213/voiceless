@@ -25,6 +25,7 @@
 - [x] 3.3 `[Requirement: 模型选择与完整性校验]` `[Scenario: 安装、导入和切换兼容模型]` `[Scenario: 下载中断或模型校验失败]` 扩充模型测试的兼容本地文件、磁盘不足和校验失败用例。打通语言及设备筛选、下载/校验进度、可重试错误与新模型激活。运行 `cargo test --manifest-path rust/Cargo.toml --test model_manager --test console`，确认未验证候选及正在使用模型受到保护。
 - [x] 3.4 `[Requirement: 全局听写快捷键与冲突报告]` `[Scenario: 录制并试用支持的手势]` `[Scenario: 快捷键被占用或未授权]` 以重复按键、长按松手、点按锁定、取消和新键冲突做测试。统一已选手势对同一会话的指令，保留系统绑定与既有 ScrollLock 设置，并接通原文直出和重贴上次结果。运行 `cargo test --manifest-path rust/Cargo.toml --test daemon_shortcuts --test ctl_relay`，在目标桌面验证实际快捷键及原文直出和重贴绑定。
 - [ ] 3.5 `[Requirement: 首次试说验证实际链路]` `[Scenario: 从干净环境完成本地试说]` `[Scenario: 设备、权限或下载失败后重试]` 用空 XDG 配置和预录 PCM 建立首次试说测试。把设备检查、模型准备、快捷键检测和练习框接到实际会话，并继续接纳已有安装。运行 `bun run --cwd frontend test:e2e --grep onboarding`，再以实际麦克风核对一轮失败恢复、无意外上屏及显式测试上屏。
+  Apollo 已验证从失效音源切回 DJI 后能识别，且练习期间目标窗口保持为空。真人试说按此前选择暂缓，待将练习定稿与点击「测试上屏」后的文字逐字核对。 [实体麦克风记录](../../../docs/non-nix-distribution.md#apollo-实体麦克风试说)
 - [x] 3.6 `[Requirement: 统一的导航、状态与可访问操作]` `[Scenario: 通过键盘试说和定位设置]` 用键盘和可访问树测试页面焦点、状态播报及设置搜索。补齐中文和英文、主题选择及减少动画。运行 `bun run --cwd frontend test:e2e --grep accessibility`，在 Orca 中完成一次试说并验收状态播报和弹窗焦点恢复。
 - [x] 3.7 `[Requirement: 在正确的目标交付结果]` `[Scenario: 在编辑器和终端交付]` `[Scenario: 焦点改变或交付结果无法确认]` 测试在识别中切换目标、终端输入、Fcitx5 预编辑及不确定反馈，按原目标能力决定交付或保留结果。运行 `cargo test --manifest-path rust/Cargo.toml --test injection_method --test fcitx5_injection --test wtype_injection` 与 `just bridge-test`，实机确认自动上屏只到预期目标，重贴由用户触发。
 - [x] 3.8 `[Requirement: 独立窗口、托盘和服务生命周期]` `[Scenario: 从桌面启动器重复打开应用]` `[Requirement: 多入口共享听写会话]` `[Scenario: 关闭窗口时仍在听写]` 给首次桌面启动及重复打开建立验收。用独立 Tauri 窗口与托盘连接已有运行时，应用启动器能聚焦原窗口。运行 `cargo test --manifest-path rust/Cargo.toml --test desktop_contract activation`，从应用启动器打开两次，然后关窗口并通过快捷键完成一次听写。
@@ -55,7 +56,9 @@
 ## 7. macOS 和 Windows 运行时及发行
 
 - [ ] 7.1 `[Requirement: 平台交付与运行依赖可验证]` `[Scenario: Linux 桌面或跨平台安装]` `[Requirement: 按平台能力提供麦克风和浮层]` `[Scenario: 切换或断开默认麦克风]` `[Scenario: 合成器不支持浮层或系统功能]` 在 Apple Silicon macOS 上以设备断开、拒绝权限及首次试说做测试。完成 CoreAudio、快捷键、辅助功能授权、菜单栏与上屏适配，签名并对可安装产物验证。运行 `cargo test --manifest-path rust/Cargo.toml --test desktop_contract macos`，从发布候选安装后在原生应用中验收实际麦克风和交付。
+  已在托管 Apple Silicon 上用 CoreAudio 聚合设备验证默认输入切换、所选输入单独断开和显式恢复。个人 M1 仍待解锁后用实体麦克风和快捷键试说，Developer ID 签名与公证缺少可用身份。[安装版输入切换验收](https://github.com/Vitus213/voiceless/actions/runs/45751209895)
 - [ ] 7.2 `[Requirement: 平台交付与运行依赖可验证]` `[Scenario: Linux 桌面或跨平台安装]` `[Requirement: 全局听写快捷键与冲突报告]` `[Scenario: 快捷键被占用或未授权]` `[Requirement: 在正确的目标交付结果]` `[Scenario: 焦点改变或交付结果无法确认]` 在 Windows x64 建立权限拒绝、热插拔和焦点变化用例。完成 WASAPI、快捷键和输入适配，产出可安装的桌面和 CLI 包。运行 `cargo test --manifest-path rust/Cargo.toml --test desktop_contract windows`，实际安装验证 CPU 及受支持的 GPU、系统托盘、重开窗口和正确交付。
+  已在 Windows 安装版的设置页验证外部快捷键冲突、保留旧绑定和重试。仍待实体键盘与麦克风拔插，以及标准账户在自己任务栏中重开窗口。[快捷键冲突与重试](https://github.com/Vitus213/voiceless/actions/runs/45750351599) · [标准账户验收](https://github.com/Vitus213/voiceless/actions/runs/45745562089)
 
 ## 8. 会议和带语音的屏幕反馈
 

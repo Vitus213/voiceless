@@ -129,6 +129,8 @@ Apollo 上的 x86-64 独立包从公开 `0.1.3` 升级后，保留了旧配置�
 
 公开的 ARM64 `.deb` 在 Ubuntu 22.04 客户机中也走通了五个会议场景。麦克风短句的相关系数为 0.989，系统轨主频为 440 Hz，两轨各生成一个转写任务。移除麦克风或输出后，分别在 0.60 秒和 0.48 秒内报告中断，恢复后两条 WAV 均保有各自的信号。已移除的来源在开始前返回 409。让 PipeWire 单独拒绝录音进程时，会议标记麦克风 `permission-denied`，提交 0 字节，录音子进程全部退出。 [受测 ARM64 安装包](https://github.com/Vitus213/voiceless/actions/runs/45668781010/artifacts/15050695493)
 
+### Apollo 实体麦克风试说
+
 首次设置在 Apollo 上测了两支实体麦克风。Lian II 恢复可用后练习窗口仍有焦点，扬声器播放短句与麦克风采样的相关系数为 0.018。使用修正后的 x86-64 包，从失效来源切到 DJI Wireless Mic Rx 后，RTX 3070 上的 Vulkan 识别完成，练习期间隔离终端保持 0 字节。这次定稿没有命中约定短句，真人试说与对应的显式上屏仍待核对。
 
 ### `0.2.0` 桌面候选包验收
@@ -181,6 +183,8 @@ GitHub 托管的 Apple Silicon 客机运行 macOS 15.8.2。镜像中的 SIP 已�
 在另一台托管 Mac 上复用同一份 CLI DMG（SHA-256 `e9e8019d1707a155d0537f29ef39f9bad0375bbfd8a0e1b8171a82fce90fe157`）。测试通过 System Events 点击系统弹窗的「允许」，原请求随即开始录音。两条 WAV 各含 133803 个采样，分别录到授权后的 330 Hz 麦克风和 880 Hz 系统音。移除测试输出驱动并重启 Core Audio 时，两台虚拟设备同时离线，会议记录麦克风中断。显式恢复后两个文件分别保有 157696 和 157867 个采样。重新接入后双轨录音、参考语音转写均成功。 [10 项安装版检查及录音结果](https://github.com/Vitus213/voiceless/actions/runs/45716162420/artifacts/15069413747)
 
 使用运行 `45694716105` 生成的桌面 DMG，向 TextEdit 文稿 A 粘贴 `Voiceless 中文 Ω` 后，保存的 19 个 UTF-8 字节与预期一致，剪贴板恢复了原来的测试文本。另一轮在 A 开始听写，切到文稿 B 再停录，应用报告 `not-delivered` 并保留定稿。保存并关闭两份文稿后，文件与听写前逐字节相同，剪贴板也保留了测试文本。 [桌面安装版实测](https://github.com/Vitus213/voiceless/actions/runs/45710341438) · [文稿摘要与交付状态](https://github.com/Vitus213/voiceless/actions/runs/45710341438/artifacts/15067591385)
+
+在托管 Apple Silicon 上从 CLI DMG 安装后，用浏览器打开内嵌控制台。选择「跟随系统默认」时，页面随 CoreAudio 默认输入切换。显式选定测试聚合麦克风后，系统默认再次改变时，Voiceless 继续使用所选设备。单独移除该设备后，设置页保留原选择，标出「未连接」，有效输入为空。选择「跟随系统默认」并应用后，原来的 `AVIODevice 2` 恢复生效。设备切换期间，Voiceless 和 `coreaudiod` 的进程均持续运行。 [安装版实测](https://github.com/Vitus213/voiceless/actions/runs/45751209895) · [失效与恢复截图](https://github.com/Vitus213/voiceless/actions/runs/45751209895/artifacts/15085263675)
 
 两台 Mac 使用的 Voiceless 产物均为 ad-hoc 签名。Developer ID 签名与公证、实体麦克风试说、实体按键触发及单独拔掉输出设备仍待实测。 [签名与公证入口](../scripts/release/macos/package.py)
 
@@ -241,6 +245,8 @@ Windows 原生实测都在 GitHub 托管的 Windows Server 2022 Datacenter（10.
 同一环境的旧核心包安装成功，但运行 `voiceless --version` 时返回 `0xC0000135`。只补入 `VCRUNTIME140.dll` 后，原程序就能启动并列出 7 个模型。`1a0c697` 将 MSVC 运行库静态链接到发布程序。重新构建的核心包在断网容器中报告 `voiceless 0.2.0`，列出 7 个模型，`voiceless web` 返回 HTTP 200，随后卸载成功。在带 WebView2 的 Windows 桌面，两份安装包都完成了 SenseVoice 离线转写，CLI 向编辑器送达 83 个字符，桌面窗口从托盘重开。 [单个 DLL 对照实验](https://github.com/Vitus213/voiceless/actions/runs/45747272309) · [修复后的安装实测](https://github.com/Vitus213/voiceless/actions/runs/45747948970) · [两份安装包](https://github.com/Vitus213/voiceless/actions/runs/45747948970/artifacts/15084691333)
 
 快捷键在 Windows 上验证到了注册这一步。守护进程的低级键盘钩子按设计忽略带 `LLKHF_INJECTED` 标志的事件，软件发送的按键不算用户按键。验收用 `SendInput` 发出 ScrollLock，测试自己的钩子看到的事件都带该标志，守护进程保持 `idle`，页面提示检查绑定或点击「开始试说」。同一组合再次调用 `RegisterHotKey` 返回 1409，同键加其他修饰键和另一个键都成功，说明 Windows 已把该组合登记给 Voiceless。上屏只发送一次 Ctrl+V，并且只发给听写开始时记录、仍是前台且完整性不高于本进程的窗口，交付因此报告为未确认。键盘移除只在状态机单测中验证，安装版没有收到过真实的设备移除通知。 [按键与注册记录](https://github.com/Vitus213/voiceless/actions/runs/45690514706) · [钩子与上屏实现](../rust/src/desktop/windows.rs) · [键盘移除单测](../rust/src/desktop/windows/contract.rs)
+
+在安装版的快捷键设置中，将「点按切换」从 `Ctrl+Shift+F6` 改为另一个进程已占用的 `Ctrl+Shift+F7`。页面报告 Windows 错误 1409，配置文件保留新选择，运行中的配置和 F6 注册保持原样。释放 F7 后点击「重试应用」，同一守护进程注册了 F7，其他进程可以重新注册 F6。 [原生 Windows 验收](https://github.com/Vitus213/voiceless/actions/runs/45750351599) · [两个页面截图及配置状态](https://github.com/Vitus213/voiceless/actions/runs/45750351599/artifacts/15085183090)
 
 在标准账户（中等完整性 `0x2000`）下，两份安装包可安装和卸载。CLI 向同级编辑框粘贴了 83 个字符并恢复剪贴板，面对高完整性窗口时拒绝交付，编辑框及剪贴板内容保持原样。重复启动桌面入口可重开窗口。同一会话的任务栏属于另一个账户，标准账户自己的托盘重开仍待验证。 [标准账户实测](https://github.com/Vitus213/voiceless/actions/runs/45723972884/job/139588997136)
 
