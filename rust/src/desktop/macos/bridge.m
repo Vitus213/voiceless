@@ -8,19 +8,24 @@
 #import <string.h>
 #import <unistd.h>
 
+static AudioDeviceID device_for_uid(CFStringRef uid) {
+    AudioDeviceID device = kAudioObjectUnknown;
+    UInt32 size = sizeof(device);
+    AudioObjectPropertyAddress property = { kAudioHardwarePropertyTranslateUIDToDevice,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    return AudioObjectGetPropertyData(kAudioObjectSystemObject, &property, sizeof(uid), &uid,
+        &size, &device) == noErr ? device : kAudioObjectUnknown;
+}
+
 char *vl_audio_label(const char *uid, bool output) {
     if (output) { if (@available(macOS 14.2, *)) {} else { return NULL; } }
     @autoreleasepool {
-        NSString *name = [NSString stringWithUTF8String:uid];
-        CFStringRef key = (__bridge CFStringRef)name;
-        AudioDeviceID device = kAudioObjectUnknown;
-        UInt32 size = sizeof(device);
-        AudioObjectPropertyAddress prop = { kAudioHardwarePropertyTranslateUIDToDevice,
-            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &prop, sizeof(key), &key,
-                &size, &device) != noErr || device == kAudioObjectUnknown) return NULL;
-        prop.mSelector = kAudioDevicePropertyStreams;
-        prop.mScope = output ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput;
+        AudioDeviceID device = device_for_uid((__bridge CFStringRef)@(uid));
+        if (device == kAudioObjectUnknown) return NULL;
+        AudioObjectPropertyAddress prop = { kAudioDevicePropertyStreams,
+            output ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput,
+            kAudioObjectPropertyElementMain };
+        UInt32 size = 0;
         if (AudioObjectGetPropertyDataSize(device, &prop, 0, NULL, &size) != noErr ||
                 size < sizeof(AudioStreamID)) return NULL;
         prop.mScope = kAudioObjectPropertyScopeGlobal;
@@ -35,10 +40,13 @@ char *vl_audio_label(const char *uid, bool output) {
 
 // A duplex output must tap playback rather than opening its microphone side.
 OSStatus vl_meeting_tap(const char *output, const char *aggregateUID,
-                        AudioObjectID *tap, AudioObjectID *aggregate) {
+                        AudioObjectID *tap, AudioObjectID *aggregate, AudioDeviceID *source) {
     if (@available(macOS 14.2, *)) { @autoreleasepool {
+        NSString *outputUID = @(output);
+        *source = device_for_uid((__bridge CFStringRef)outputUID);
+        if (*source == kAudioObjectUnknown) return kAudioHardwareBadDeviceError;
         CATapDescription *desc = [[CATapDescription alloc] initWithProcesses:@[]
-            andDeviceUID:@(output) withStream:0];
+            andDeviceUID:outputUID withStream:0];
         desc.exclusive = YES;
         desc.privateTap = YES;
         desc.name = @"Voiceless meeting";
@@ -56,6 +64,13 @@ OSStatus vl_meeting_tap(const char *output, const char *aggregateUID,
         return status;
     } }
     return kAudioHardwareUnsupportedOperationError;
+}
+
+bool vl_audio_device_alive(AudioDeviceID device) {
+    AudioObjectPropertyAddress property = { kAudioDevicePropertyDeviceIsAlive,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 alive = 0, size = sizeof(alive);
+    return AudioObjectGetPropertyData(device, &property, 0, NULL, &size, &alive) == noErr && alive != 0;
 }
 
 void vl_close_meeting_tap(AudioObjectID tap, AudioObjectID aggregate) {

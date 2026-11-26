@@ -128,6 +128,7 @@ impl Drop for SystemAudioStart {
 pub(crate) struct MeetingTap {
     tap: u32,
     aggregate: u32,
+    output: u32,
 }
 
 impl MeetingTap {
@@ -140,6 +141,7 @@ impl MeetingTap {
                 uid: *const c_char,
                 tap: *mut u32,
                 aggregate: *mut u32,
+                source: *mut u32,
             ) -> i32;
         }
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,9 +153,16 @@ impl MeetingTap {
         );
         let output = std::ffi::CString::new(output.1.as_str())?;
         let name = std::ffi::CString::new(uid.as_str())?;
-        let (mut tap, mut aggregate) = (0, 0);
-        let status =
-            unsafe { vl_meeting_tap(output.as_ptr(), name.as_ptr(), &mut tap, &mut aggregate) };
+        let (mut tap, mut aggregate, mut source) = (0, 0, 0);
+        let status = unsafe {
+            vl_meeting_tap(
+                output.as_ptr(),
+                name.as_ptr(),
+                &mut tap,
+                &mut aggregate,
+                &mut source,
+            )
+        };
         if status != 0 {
             let kind = match status {
                 // Core Audio's device permissions error and the system-audio TCC refusal.
@@ -167,7 +176,18 @@ impl MeetingTap {
                 format!("Core Audio system tap setup failed (OSStatus {status:#x})"),
             ));
         }
-        Ok(Self { tap, aggregate })
+        Ok(Self {
+            tap,
+            aggregate,
+            output: source,
+        })
+    }
+
+    pub fn output_alive(&self) -> bool {
+        extern "C" {
+            fn vl_audio_device_alive(device: u32) -> bool;
+        }
+        unsafe { vl_audio_device_alive(self.output) }
     }
 
     pub fn device(&self) -> cpal::Device {
