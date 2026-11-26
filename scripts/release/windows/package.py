@@ -32,10 +32,12 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory) / 'target'
         env = dict(os.environ, CARGO_TARGET_DIR=str(target))
+        # A per-user installation must start without the machine-wide Visual C++ Redistributable.
+        runtime = f'target.{TARGET}.rustflags=["-Ctarget-feature=+crt-static"]'
         payload = target / TARGET / 'release'
         for crate, kind in [('rust', 'core'), ('desktop', 'desktop')]:
             features = ['--features', 'tauri/custom-protocol'] if kind == 'desktop' else []
-            subprocess.run(['cargo', 'build', '--release', '--locked', '--target', TARGET, *features],
+            subprocess.run(['cargo', 'build', '--release', '--locked', '--target', TARGET, '--config', runtime, *features],
                            cwd=ROOT / crate, env=env, check=True)
             for dll in ['onnxruntime.dll', 'sherpa-onnx-c-api.dll']:
                 if not (payload / dll).is_file():

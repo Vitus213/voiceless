@@ -9,39 +9,34 @@ permissions:
 jobs:
   server-core:
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v6
         with:
-          github-token: ${{ github.token }}
-          run-id: 45743904617
-          name: voiceless-windows-user-path-candidates
-          path: ${{ runner.temp }}/candidates
+          node-version: '22.23.1'
+          package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Select the release Rust toolchain
+        run: rustup default 1.99.1-x86_64-pc-windows-msvc
+      - name: Build the two static CRT candidates
+        id: build
+        run: python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-windows-static-crt-candidates
+          path: ${{ runner.temp }}/candidates/voiceless-*-v*-windows-x64.exe
+          if-no-files-found: error
+          compression-level: 0
       - name: Install the exact candidates in a stock Windows container
         shell: pwsh
         run: |
-          $service = Get-Service docker
-          Write-Host "Docker service $($service.Status), startup $($service.StartType)"
-          if ($service.StartType -eq 'Disabled') { Set-Service docker -StartupType Manual }
-          if ($service.Status -ne 'Running') { Start-Service docker }
-          $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
-          docker info --format '{{.OSType}} {{.ServerVersion}}'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $candidates = Join-Path $env:RUNNER_TEMP 'candidates'
-          $expected = @{
-            core = '0464751c3c9a69df4c8640daccc9cd0fa74c724e81e6cc37450d298ad26244d2'
-            desktop = '44b43d8a4ae8398ec46277ffdbfc3fd058df86369a1133c5df9b5b90b01ae187'
-          }
-          foreach ($kind in $expected.Keys) {
-            $sum = (Get-FileHash (Join-Path $candidates "voiceless-$kind-v0.2.0-windows-x64.exe")).Hash
-            if ($sum -ine $expected[$kind]) { throw "Unexpected $kind installer SHA256 $sum" }
-          }
-          Copy-Item scripts/release/windows/without-webview.ps1 $candidates
-          $control = New-Item -ItemType Directory (Join-Path $candidates 'control')
-          Copy-Item "$env:SystemRoot/System32/vcruntime140.dll" $control.FullName
+          Copy-Item scripts/release/windows/clean-install.ps1 $candidates
           @'
           FROM mcr.microsoft.com/windows/servercore:ltsc2022
           COPY . C:/proof/
@@ -49,5 +44,9 @@ jobs:
           '@ | docker build --tag voiceless-dependency-check --file - $candidates
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 --format '{{.Id}} {{.OsVersion}}'
-          docker run --rm --network none voiceless-dependency-check powershell.exe -NoProfile -NonInteractive -File C:/proof/without-webview.ps1
+          $version = (Get-Content desktop/tauri.conf.json -Raw | ConvertFrom-Json).version
+          docker run --rm --network none voiceless-dependency-check powershell.exe -NoProfile -NonInteractive -File C:/proof/clean-install.ps1 $version
           exit $LASTEXITCODE
+      - name: Verify offline CPU recognition and reopen the desktop window on the GUI host
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python -B scripts/release/windows/accept.py "$env:RUNNER_TEMP/candidates"
