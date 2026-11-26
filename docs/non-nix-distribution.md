@@ -131,7 +131,9 @@ Apollo 上的 x86-64 独立包从公开 `0.1.3` 升级后，保留了旧配置�
 
 ### Apollo 实体麦克风试说
 
-首次设置在 Apollo 上测了两支实体麦克风。Lian II 恢复可用后练习窗口仍有焦点，扬声器播放短句与麦克风采样的相关系数为 0.018。使用修正后的 x86-64 包，从失效来源切到 DJI Wireless Mic Rx 后，RTX 3070 上的 Vulkan 识别完成，练习期间隔离终端保持 0 字节。这次定稿没有命中约定短句，真人试说与对应的显式上屏仍待核对。
+早期候选在 Apollo 上测了两支实体麦克风。Lian II 恢复可用后，练习窗口仍有焦点，扬声器播放短句与麦克风采样的相关系数为 0.018。切到 DJI Wireless Mic Rx 后，RTX 3070 完成 Vulkan 识别，隔离终端在练习期间保持 0 字节。
+
+使用 Bun 从公开 npm 安装 `voiceless@0.2.0` 后，首次试说在指定失效麦克风时报告错误。改选 DJI 后，Qwen3-ASR 在 RTX 3070 上通过 Vulkan 生成了 24 个字符的定稿。定稿未匹配约定短句，预览时测试终端仍是 0 字节。用户随后确认已亲自试用，接受此次首次试说验收。显式上屏按用户反馈记录，本轮没有真人定稿与目标窗口逐字比对的自动回执。
 
 ### `0.2.0` 桌面候选包验收
 
@@ -190,6 +192,8 @@ GitHub 托管的 Apple Silicon 客机运行 macOS 15.8.2。镜像中的 SIP 已�
 
 在托管 Apple Silicon 上，较早的 `0.2.0` 候选包在所选系统输出消失后仍显示录制中。安装修复后的 CLI DMG（SHA-256 `3f34e008bcde6c73cc87a28c9e11963e9a3b140a0eeda3b938b88795e72c7834`）后，单独移除选中的 Core Audio 聚合输出，会议进入 `interrupted`，失败来源为 `system`。显式恢复后，麦克风 WAV 有 151211 个采样，检出 330 Hz 测试音。系统 WAV 有 148992 个采样，检出 880 Hz 测试音。两份文件均进入本地转写队列。输出缺失时再次开始返回 HTTP 409，麦克风仍能单独录音。接回同一输出后双轨录音恢复，守护进程的 `runtime_id` 和 `coreaudiod` 的 PID 均保持一致。 [旧包复现](https://github.com/Vitus213/voiceless/actions/runs/45752540316) · [修复包验收记录](https://github.com/Vitus213/voiceless/actions/runs/45755892334/artifacts/15088240562)
 
+`v0.2.0` 对应的提交 `e1dafb27` 生成了两份 Apple Silicon 候选 DMG。在个人 M1（macOS 26.5）上，用 CLI 安装脚本和桌面应用分别安装到隔离目录，卸载磁盘映像后，两份安装均通过 `codesign --verify --strict --deep`。两者都报告 `voiceless 0.2.0`，用本地 SenseVoice 转写同一段公开录音，得到的 83 个字符与 Linux 发布版逐字一致。签名类型均为 ad-hoc。[受测 DMG](https://github.com/Vitus213/voiceless/actions/runs/45800558811/artifacts/15106894409)
+
 两台 Mac 使用的 Voiceless 产物均为 ad-hoc 签名。Developer ID 签名与公证、实体麦克风试说、实体按键触发和实体输出设备拔插仍待实测。 [签名与公证入口](../scripts/release/macos/package.py)
 
 Windows x64 的两份 Inno Setup 安装包在 Linux 上用 MinGW 构建，并在 Wine 11.0 中安装和卸载。安装后的 CLI 校验了带子目录的 SenseVoice 模型，离线队列把上面的流式 WAV 转写为「你好世界欢迎使用语音输入」。双轨分别采到 330 Hz 麦克风和 880 Hz 系统音频，拒绝麦克风时返回 409。核心安装包 SHA-256 为 `6111e7453edd7cc530fde145d4a076a84387483664e05dc42bbf9b62b2a2be40`，桌面安装包为 `14d6fa46375137418b029975e5b82e89251a986ffa9ae0bd108fce074997bb29`。
@@ -223,6 +227,10 @@ Windows Server 2022 上使用 MSVC 构建并安装了 CLI 和桌面候选包。�
 加入 `527ca67` 的核心包首次收到 WASAPI `0x80070005` 时，同时显示设备 ID 和 Windows 麦克风隐私设置的位置。Windows 记住拒绝决定后，重试显示同一设置指引一次，两次均未创建会议或音轨。 [安装版验收](https://github.com/Vitus213/voiceless/actions/runs/45712544305) · [受测安装包](https://github.com/Vitus213/voiceless/actions/runs/45712544305/artifacts/15069615629)
 
 在 Wine 11.0 中安装同一份 MSVC 核心包，用独立的 PulseAudio 服务提供合成信号。正常停止后，麦克风 WAV 保存了 133760 个采样，主频为 330 Hz。系统 WAV 保存了 133280 个采样，主频为 880 Hz。录制另一场会议时终止该 Wine 实例，重启后会议显示可恢复或丢弃。显式恢复后，每轨保留 131072 个采样和各自的频率，并各自生成转写任务。 [受测 MSVC 安装包](https://github.com/Vitus213/voiceless/actions/runs/45707934020/artifacts/15067410293)
+
+Windows Server 2022 安装了 `v0.2.0` 发布提交 `e1dafb27` 构建的两份 MSVC 候选包。两份安装均完成 CPU 离线转写。CLI 将 83 个字符完整写入原生编辑框，桌面版从任务栏通知区域的「打开窗口」重开了原窗口。两个原生编辑窗口间切换焦点的 Unicode 交付测试也通过了。核心安装包 SHA-256 为 `5f5aea09ec3379f54348007c057a21518e253137cc157489d0e80cf9b4302a77`，桌面安装包为 `ea9398b98d8864cf65a90993819e68668e67c2f141c94f3c5833ca58a46e0155`。该作业后续的会议步骤未能读到测试设备 ID。[安装与交付日志](https://github.com/Vitus213/voiceless/actions/runs/45800558357/job/139842368510) · [受测安装包](https://github.com/Vitus213/voiceless/actions/runs/45800558357/artifacts/15108740410)
+
+将 WASAPI 测试设备安装移到前一个 Actions 步骤后，`7cc0ece4` 的 Windows 验收全部通过。两条虚拟线缆分别输入 330 Hz 和 880 Hz，麦克风和系统轨各录得 132640 个采样。禁用麦克风后，显式恢复保留了两轨各自的频率。系统拒绝麦克风访问时返回 HTTP 409，会议数保持不变。另一次终止守护进程再恢复，每轨保留 131072 个采样，分别生成转写任务。[原生验收日志](https://github.com/Vitus213/voiceless/actions/runs/45805826895) · [本次受测安装包](https://github.com/Vitus213/voiceless/actions/runs/45805826895/artifacts/15110627351)
 
 #### Windows x64 安装包的范围与实测边界
 
