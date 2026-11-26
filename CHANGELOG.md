@@ -4,7 +4,14 @@ Releases are tagged `v<major>.<minor>.<patch>`. Entries up to 0.1.0 are grouped 
 the day the work landed on `main`; commit hashes refer to
 <https://github.com/Vitus213/voiceless>.
 
-## Unreleased
+## 0.2.0 - 2026-11-26
+
+This release ships the CLI and its embedded web console through npm for
+Linux x86-64 and ARM64. GitHub Releases also carries standalone archives
+and desktop `.deb` packages for both architectures. The x86-64 build
+supports Vulkan for GGUF models. The ARM64 build uses CPU inference.
+The macOS and Windows installers are release candidates.
+[Platform acceptance results](docs/non-nix-distribution.md)
 
 ### Added
 
