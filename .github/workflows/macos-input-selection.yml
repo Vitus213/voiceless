@@ -1,0 +1,47 @@
+name: Installed macOS microphone selection
+on:
+  push:
+    branches: ['ci/macos-candidate/selected-microphone-loss-0.2.0']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  microphone:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45707155253
+          name: voiceless-macos-arm64-unanswered-candidates
+          path: ${{ runner.temp }}/candidates
+      - name: Install the test browser
+        run: |
+          python3 -m pip install sounddevice==0.5.3 playwright==1.65.2
+          python3 -m playwright install chromium
+      - name: Open installed settings, disconnect only the chosen input and explicitly recover
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/candidates"
+          echo 'e9e8019d1707a155d0537f29ef39f9bad0375bbfd8a0e1b8171a82fce90fe157  voiceless-cli-v0.2.0-macos-arm64.dmg' | shasum -a 256 -c -
+          root=$(mktemp -d "$RUNNER_TEMP/voiceless-input.XXXXXXXX")
+          mkdir -p "$root/volume" "$root/home" "$RUNNER_TEMP/input-evidence"
+          hdiutil attach -nobrowse -noautoopen -readonly -mountpoint "$root/volume" voiceless-cli-v0.2.0-macos-arm64.dmg
+          trap 'hdiutil detach "$root/volume"' EXIT
+          HOME="$root/home" "$root/volume/install-cli.command"
+          python3 -u -B "$GITHUB_WORKSPACE/scripts/release/macos/input-selection.py" "$root" "$RUNNER_TEMP/input-evidence"
+      - name: Keep microphone status and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceless-macos-input-selection-evidence
+          path: ${{ runner.temp }}/input-evidence
+          if-no-files-found: warn
