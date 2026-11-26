@@ -28,6 +28,19 @@ jobs:
       - name: Build core and desktop setup executables
         id: build
         run: python scripts/release/windows/package.py "$env:RUNNER_TEMP/candidates"
+      - name: Install offline without WebView2 or the Visual C++ Redistributable
+        run: |
+          $candidates = Join-Path $env:RUNNER_TEMP 'candidates'
+          Copy-Item scripts/release/windows/clean-install.ps1 $candidates
+          @'
+          FROM mcr.microsoft.com/windows/servercore:ltsc2022
+          COPY . C:/proof/
+          USER ContainerUser
+          '@ | docker build --tag voiceless-clean-install --file - $candidates
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = (Get-Content desktop/tauri.conf.json -Raw | ConvertFrom-Json).version
+          docker run --rm --network none voiceless-clean-install powershell.exe -NoProfile -NonInteractive -File C:/proof/clean-install.ps1 $version
+          exit $LASTEXITCODE
       - name: Exercise shortcut, hotplug, focus and integrity contracts
         run: cargo test --locked --manifest-path rust/Cargo.toml --lib desktop::native::contract::windows
       - name: Exercise Windows doctor and console audio selection
