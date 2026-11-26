@@ -103,7 +103,7 @@ def verify(daemon, evidence, guest, _fixture):
     def interrupted():
         def ended():
             view = daemon.api(path)[1]
-            return view if view['state'] != 'recording' else None
+            return view if view['state'] not in ('recording', 'stopping') else None
         try:
             view = wait_for(ended, 'system track interruption after only the output was removed', timeout=15)
         finally:
