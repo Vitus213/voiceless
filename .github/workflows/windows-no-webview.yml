@@ -40,6 +40,8 @@ jobs:
             if ($sum -ine $expected[$kind]) { throw "Unexpected $kind installer SHA256 $sum" }
           }
           Copy-Item scripts/release/windows/without-webview.ps1 $candidates
+          $control = New-Item -ItemType Directory (Join-Path $candidates 'control')
+          Copy-Item "$env:SystemRoot/System32/vcruntime140.dll" $control.FullName
           @'
           FROM mcr.microsoft.com/windows/servercore:ltsc2022
           COPY . C:/proof/

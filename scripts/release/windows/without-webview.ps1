@@ -41,6 +41,15 @@ if ((Test-Path -LiteralPath "$root\desktop\voiceless-desktop.exe") -or (Test-Pat
 if ((Install-Candidate 'core') -ne 0) { throw 'Core installation failed' }
 $cli = Join-Path $root 'core\voiceless.exe'
 try {
+    foreach ($dll in 'vcruntime140.dll', 'dxgi.dll', 'dbghelp.dll', 'setupapi.dll', 'comctl32.dll', 'bcryptprimitives.dll') {
+        Write-Host "System32 $dll present=$(Test-Path -LiteralPath (Join-Path ([Environment]::SystemDirectory) $dll))"
+    }
+    $baseline = & $cli --version
+    Write-Host "Unmodified CLI exit $LASTEXITCODE $baseline"
+    if ($LASTEXITCODE -ne 0) {
+        Copy-Item -LiteralPath "$Candidates\control\vcruntime140.dll" -Destination (Split-Path $cli)
+        Write-Host 'Control: added only vcruntime140.dll alongside the installed CLI'
+    }
     $version = & $cli --version
     if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath (Join-Path $Candidates ('voiceless-core-v' + ($version -replace '^voiceless ', '') + '-windows-x64.exe')))) {
         throw "Installed CLI version failure ($LASTEXITCODE): $version"
