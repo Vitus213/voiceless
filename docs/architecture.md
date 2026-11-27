@@ -278,6 +278,12 @@ retranscription and replay benchmark require a loaded `local-offline` engine.
   `hold_threshold_ms` stops it (hold-to-talk); releasing earlier keeps
   recording until the next press (tap-to-toggle); any press while
   recording stops.
+  `key` may be a chord (`Ctrl+KEY_F8`), matched with exactly its modifiers
+  and so without the Ctrl mode; the five action-specific shortcuts are
+  chords too. A chord made of modifiers alone (`Ctrl+KEY_RIGHTMETA`, Ctrl
+  with either Win key) has no key to press last: the listener presses it
+  when the modifier that completes it goes down and releases it with the
+  Win key.
 - **Portal.** `GlobalShortcuts` is best effort: when the compositor has no
   portal backend the daemon logs it and relies on compositor bindings that
   call `voiceless ctl`.

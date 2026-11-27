@@ -52,6 +52,9 @@ The macOS and Windows installers are release candidates.
   changes keep the last working settings active.
 
 ### Fixed
+- Shortcuts made of modifiers alone, such as Ctrl+Win, record once one of
+  them is released and work in any press order on Linux. The combined
+  hold-and-tap key accepts a chord.
 - Stopping `pw-record` on PipeWire 1.6 preserves the final transcript and WAV.
   A disconnected recorder still fails the session.
 - On Linux, `voiceless doctor` checks the same PipeWire or GStreamer tools

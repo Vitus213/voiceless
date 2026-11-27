@@ -243,14 +243,14 @@ hotword_threshold = 0.9                # 1.0 = identical syllables; zh/z, n/l, -
 # replace = "$1:$2"
 
 [hotkey]                               # daemon push-to-talk key read from evdev (user must be in the `input` group)
-# key = "KEY_SCROLLLOCK"               # hold to speak or tap to toggle
-# hold_key = "Ctrl+KEY_F6"
+# key = "KEY_SCROLLLOCK"               # hold to speak or tap to toggle; or a chord such as "Ctrl+KEY_F8"
+# hold_key = "Ctrl+KEY_F6"             # chords: Ctrl, Alt, Shift or Super before a KEY_ name
 # toggle_key = "Ctrl+KEY_F7"
-# cancel_key = "Ctrl+KEY_F8"
+# cancel_key = "Ctrl+KEY_RIGHTMETA"    # Ctrl+Win: modifiers alone, either Win key, pressed in any order
 # raw_key = "Ctrl+KEY_F9"
 # repaste_key = "Ctrl+KEY_F10"
 mode = ""                              # plain press; empty uses `voiceless daemon --mode`
-ctrl_mode = "prompt-optimize"          # press with Ctrl held
+ctrl_mode = "prompt-optimize"          # a single key pressed with Ctrl held
 hold_threshold_ms = 350
 
 [audio]

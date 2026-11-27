@@ -234,14 +234,14 @@ hotword_threshold = 0.9                # 1.0 = 音节完全相同；zh/z、n/l�
 # replace = "$1:$2"
 
 [hotkey]                               # daemon 通过 evdev 读取的按键（用户需在 `input` 组）
-# key = "KEY_SCROLLLOCK"               # 按住说话，点按开始或停止
-# hold_key = "Ctrl+KEY_F6"
+# key = "KEY_SCROLLLOCK"               # 按住说话，点按开始或停止；也可以是组合键，如 "Ctrl+KEY_F8"
+# hold_key = "Ctrl+KEY_F6"             # 组合键：Ctrl、Alt、Shift、Super 之一或多个，加一个 KEY_
 # toggle_key = "Ctrl+KEY_F7"
-# cancel_key = "Ctrl+KEY_F8"
+# cancel_key = "Ctrl+KEY_RIGHTMETA"    # Ctrl+Win：只含修饰键的组合，左右 Win 均可，先按哪个都行
 # raw_key = "Ctrl+KEY_F9"
 # repaste_key = "Ctrl+KEY_F10"
 mode = ""                              # 直接按下时的模式；为空则用 `voiceless daemon --mode`
-ctrl_mode = "prompt-optimize"          # 按住 Ctrl 再按时的模式
+ctrl_mode = "prompt-optimize"          # 按住 Ctrl 再按单键时的模式
 hold_threshold_ms = 350
 
 [audio]
