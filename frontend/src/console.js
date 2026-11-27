@@ -258,8 +258,13 @@ function fmtUptime(seconds) {
   return t(`${min}分`);
 }
 
-/** evdev name -> the short key name shown on the keycap ("ScrollLock"). */
-const keyName = (evdev) => (evdev ? evdev.replace(/^KEY_/, "").replace(/_/g, " ") : "—");
+/** Either Meta key, named as the keyboard names it: Win, or Cmd on a Mac. */
+const META_KEYS = new Set(["KEY_LEFTMETA", "KEY_RIGHTMETA"]);
+const META_KEY_NAME = PLATFORM === "macos" ? "Cmd" : "Win";
+/** A key of a chord as configured: the Win key, or the evdev name without `KEY_`. */
+export const keyName = (evdev) => META_KEYS.has(evdev) ? META_KEY_NAME : evdev ? evdev.replace(/^KEY_/, "").replace(/_/g, " ") : "—";
+/** A configured shortcut with each of its keys named. */
+export const chordName = (shortcut) => shortcut.split("+").map(keyName).join("+");
 
 /** Streaming backends in menu order: id, label, icon, one-word tag. */
 const BACKENDS = [
@@ -1405,7 +1410,7 @@ const deck = {
     e.ptt.disabled = down || stopping || next == null || this.paused;
     e.ptt.replaceChildren(
       icon(recording ? "square" : stopping ? "refresh-cw" : "mic"),
-      h("span", { class: "k" }, this.hotkey ? keyName(this.hotkey) : "PTT"),
+      h("span", { class: "k" }, this.hotkey ? chordName(this.hotkey) : "PTT"),
     );
     tip(e.ptt, recording ? t("停止并识别") : this.paused ? t("听写已暂停") : down ? t("后台未运行") : t("开始录音"), "r");
     e.ptt.setAttribute("aria-label", recording ? t("停止并识别") : t("开始录音"));
@@ -3239,11 +3244,22 @@ function ModesPage() {
 /* page: 快捷键与上屏                                                       */
 /* ====================================================================== */
 
+/** Keys that only modify the key still to be pressed while a shortcut is recorded; AltGraph is ignored altogether. */
+const MODIFIER_KEYS = ["Control", "Shift", "Alt", "Meta", "AltGraph"];
+/** The modifier each modifier key is, as a chord names it. */
+const MODIFIER_CODES = { ControlLeft: "Ctrl", ControlRight: "Ctrl", ShiftLeft: "Shift", ShiftRight: "Shift", AltLeft: "Alt", AltRight: "Alt", MetaLeft: "Super", MetaRight: "Super" };
+/**
+ * A chord made of modifiers alone, such as Ctrl+Win, has the first of these
+ * it contains as its key, named by the right-hand key: the evdev listener
+ * takes either side and presses the chord whichever modifier went down last.
+ */
+const MODIFIER_CHORD_KEYS = { Super: "KEY_RIGHTMETA", Shift: "KEY_RIGHTSHIFT", Alt: "KEY_RIGHTALT" };
 /**
  * Hotkey & injection page: [hotkey], [inject], [audio] as one draft. The
  * key-capture widget listens for one keydown and maps KeyboardEvent.code
- * to an evdev name via /api/hotkey/keys; the test button shows a 3 s
- * countdown while the server's POST /api/inject/test waits before typing.
+ * to an evdev name via /api/hotkey/keys, or for modifiers released without
+ * a key; the test button shows a 3 s countdown while the server's POST
+ * /api/inject/test waits before typing.
  */
 function HotkeyPage() {
   const SECTIONS = ["hotkey", "inject", "audio"];
@@ -3278,7 +3294,7 @@ function HotkeyPage() {
 
   function keyLabel(chord) {
     if (!chord) return "—";
-    return chord.split("+").map((part) => keymap.find((item) => item.evdev === part)?.code ?? keyName(part)).join("+");
+    return chord.split("+").map((part) => META_KEYS.has(part) ? keyName(part) : keymap.find((item) => item.evdev === part)?.code ?? keyName(part)).join("+");
   }
 
   function stopCapture() {
@@ -3308,36 +3324,72 @@ function HotkeyPage() {
       display.textContent = t("按键…");
       record.replaceChildren(icon("x"));
       record.setAttribute("aria-label", t("取消录制快捷键"));
-      const onKey = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.repeat || ["Control", "Shift", "Alt", "Meta", "AltGraph"].includes(event.key)) return;
-        stopCapture();
-        const modifiers = [[event.ctrlKey, "Ctrl"], [event.altKey, "Alt"], [event.shiftKey, "Shift"], [event.metaKey, "Super"]]
-          .filter(([held]) => held).map(([, name]) => name);
-        if (event.key === "Escape" && field !== "cancel_key" && !modifiers.length) return;
-        const entry = keymap.find((item) => item.code === event.code);
-        if (!entry || (field === "key" && modifiers.length)) {
-          toast(field === "key" ? t("按住或点按请录制单键") : t(`无法录制 ${event.code || event.key}`), "warn");
-          return;
-        }
-        const chord = [...modifiers, entry.evdev].join("+");
+      /** The modifiers down at a key event, as a chord names them. */
+      const modifiersOf = (event) => [[event.ctrlKey, "Ctrl"], [event.altKey, "Alt"], [event.shiftKey, "Shift"], [event.metaKey, "Super"]]
+        .filter(([down]) => down).map(([, name]) => name);
+      /** Saves the chord unless another shortcut is pressed by the same keys. */
+      const commit = (key, modifiers) => {
+        // The single key of 按住或点按 is pressed with any modifiers held, so it overlaps every shortcut on that key.
+        const bare = (name, parts) => name === "key" && parts.length === 0;
         const conflict = KEYS.find(([other]) => {
           if (field === other || !keys[other]) return false;
           const parts = keys[other].split("+");
-          if (parts.pop() !== entry.evdev) return false;
-          return field === "key" || other === "key" || same(parts.sort(), [...modifiers].sort());
+          if (parts.pop() !== key) return false;
+          return bare(field, modifiers) || bare(other, parts) || same(parts.sort(), [...modifiers].sort());
         });
+        const chord = [...modifiers, key].join("+");
         if (conflict) {
           toast(t(`${keyLabel(chord)} 已用于${conflict[1]}`), "warn");
           return;
         }
         setChord(chord);
       };
+      // Modifiers are held while the key of the chord is awaited. A chord of
+      // modifiers alone is complete once the first of them is released.
+      let held = [];
+      const onKeyUp = (event) => {
+        if (held.length === 0 || !["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+        const pressed = held;
+        held = [];
+        // Ctrl on its own only modifies the key still to come.
+        if (pressed.length === 1 && pressed[0] === "Ctrl") return;
+        // One right Alt, Shift or Win key is a key of its own.
+        const lone = pressed.length === 1 && !event.code.startsWith("Control") && keymap.find((item) => item.code === event.code);
+        // A native listener presses a chord only once its own key went down,
+        // so a chord of modifiers is not offered there.
+        const chord = pressed.length > 1 && !NATIVE && Object.entries(MODIFIER_CHORD_KEYS)
+          .find(([name, evdev]) => pressed.includes(name) && keymap.some((item) => item.evdev === evdev));
+        const key = lone ? lone.evdev : chord?.[1];
+        stopCapture();
+        if (!key) {
+          toast(t(`无法录制 ${event.code || event.key}`), "warn");
+          return;
+        }
+        commit(key, lone ? [] : pressed.filter((name) => name !== chord[0]));
+      };
+      const onKey = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.repeat || event.key === "AltGraph") return;
+        if (MODIFIER_KEYS.includes(event.key)) {
+          held = [...new Set([...modifiersOf(event), MODIFIER_CODES[event.code]])].filter(Boolean);
+          return;
+        }
+        stopCapture();
+        const modifiers = modifiersOf(event);
+        if (event.key === "Escape" && field !== "cancel_key" && !modifiers.length) return;
+        const entry = keymap.find((item) => item.code === event.code);
+        if (!entry) {
+          toast(t(`无法录制 ${event.code || event.key}`), "warn");
+          return;
+        }
+        commit(entry.evdev, modifiers);
+      };
       capturing = {
         field,
         close() {
           window.removeEventListener("keydown", onKey, true);
+          window.removeEventListener("keyup", onKeyUp, true);
           display.classList.remove("listening");
           display.textContent = keyLabel(keys[field]);
           record.replaceChildren(icon("mic"));
@@ -3345,6 +3397,7 @@ function HotkeyPage() {
         },
       };
       window.addEventListener("keydown", onKey, true);
+      window.addEventListener("keyup", onKeyUp, true);
     });
     return row(title, h("div", { class: "inline" }, display, record, clear, active));
   }

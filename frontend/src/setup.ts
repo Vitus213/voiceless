@@ -1,5 +1,5 @@
 import { t } from './i18n';
-import { api, app, btn, deliveryText, fetchStatus, group, h, humanError, icon, live, note, pageHead, row, setChildren } from './console.js';
+import { api, app, btn, chordName, deliveryText, fetchStatus, group, h, humanError, icon, live, note, pageHead, row, setChildren } from './console.js';
 
 type Microphone = { id: string; label: string };
 type AudioDevices = { microphones: Microphone[]; system_default: string | null; effective: string | null; error?: string };
@@ -170,7 +170,7 @@ export function SetupPage() {
     if (modelStatus.textContent !== modelMessage) setChildren(modelStatus, note('cpu', modelMessage, failed ? 'err' : ''));
     if (shownShortcut !== shortcut) {
       shownShortcut = shortcut;
-      setChildren(shortcutStatus, shortcut ? h('kbd', { class: 'keycap', text: shortcut.replaceAll('KEY_', '') })
+      setChildren(shortcutStatus, shortcut ? h('kbd', { class: 'keycap', text: chordName(shortcut) })
         : h('a', { href: '#hotkey', text: t('设置快捷键') }));
     }
     setChildren(actionStatus, actionError ? note('circle-alert', actionError, 'err') : null);
