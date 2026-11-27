@@ -4,6 +4,9 @@ use crate::hotkey::{Action, KeyEvent, Transition};
 
 pub(super) struct Gestures {
     legacy: HotkeyMachine,
+    /// Whether `[hotkey] key` is a chord: Ctrl is then part of the chord and
+    /// never the `ctrl_mode` gesture.
+    legacy_chord: bool,
     mode: String,
     held: Option<(Action, u64)>,
 }
@@ -16,6 +19,7 @@ impl Gestures {
                 config.mode.clone(),
                 config.ctrl_mode.clone(),
             ),
+            legacy_chord: config.key.as_deref().is_some_and(crate::config::is_chord),
             mode: config.mode.clone(),
             held: None,
         }
@@ -28,7 +32,11 @@ impl Gestures {
     ) -> Option<DaemonCommand> {
         if let Transition::Press { ctrl } = event.transition {
             return match event.action {
-                Action::Legacy => match self.legacy.on_press(gateway.state(), ctrl, event.at) {
+                Action::Legacy => match self.legacy.on_press(
+                    gateway.state(),
+                    ctrl && !self.legacy_chord,
+                    event.at,
+                ) {
                     KeyAction::Start(mode) => {
                         Some(self.start(event.action, gateway.last_session_id + 1, mode))
                     }

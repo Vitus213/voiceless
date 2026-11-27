@@ -343,3 +343,20 @@ fn shortcut_conflicts_are_rejected_only_when_chords_overlap() {
         Some("Shift+KEY_F6")
     );
 }
+
+/// `[hotkey] key` takes a chord too, for the combined hold and tap gestures.
+#[test]
+fn the_combined_gesture_key_can_be_a_chord() {
+    use voiceless::config::AppConfig;
+
+    let chord = AppConfig::from_toml("[hotkey]\nkey = 'Ctrl+KEY_RIGHTMETA'\n").unwrap();
+    assert_eq!(chord.hotkey.key.as_deref(), Some("Ctrl+KEY_RIGHTMETA"));
+
+    // It overlaps another shortcut only when both name the same chord.
+    assert!(AppConfig::from_toml("[hotkey]\nkey = 'Ctrl+KEY_F8'\nhold_key = 'KEY_F8'\n").is_ok());
+    let same = AppConfig::from_toml("[hotkey]\nkey = 'Ctrl+KEY_F8'\ntoggle_key = 'Ctrl+KEY_F8'\n")
+        .unwrap_err();
+    assert!(same
+        .to_string()
+        .contains("hotkey.toggle_key conflicts with hotkey.key"));
+}

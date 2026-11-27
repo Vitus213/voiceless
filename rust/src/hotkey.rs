@@ -105,15 +105,14 @@ pub(crate) fn bindings(config: &crate::config::HotkeyConfig) -> Result<Vec<Bindi
     let names = configured_keys(config);
     for (action, name) in ACTIONS.into_iter().zip(names) {
         let Some(name) = name else { continue };
-        let (key, modifiers) = if action == Action::Legacy {
-            (
-                parse_key(name).map_err(|error| format!("hotkey.key: {error}"))?,
-                None,
-            )
+        let field = action.field();
+        let error = |error| format!("hotkey.{field}: {error}");
+        let (key, modifiers) = if action == Action::Legacy && !crate::config::is_chord(name) {
+            (parse_key(name).map_err(error)?, None)
         } else {
-            let (key, modifiers) =
-                parse_chord(name).map_err(|error| format!("hotkey.{}: {error}", action.field()))?;
-            (key, Some(modifiers))
+            parse_chord(name)
+                .map_err(error)
+                .map(|(key, modifiers)| (key, Some(modifiers)))?
         };
         if let Some(other) = bindings.iter().find(|other| {
             other.key == key && (other.modifiers == modifiers || other.modifiers.is_none())
@@ -150,7 +149,67 @@ fn parse_chord(name: &str) -> Result<(KeyCode, u8), String> {
         }
         modifiers |= bit;
     }
-    Ok((key, modifiers))
+    // A chord of modifiers alone (`Ctrl+Super`) names modifiers, not one key
+    // of them: either Win key is the key, so every spelling of the chord is
+    // one binding.
+    if modifiers == 0 {
+        return Ok((key, 0));
+    }
+    match modifier_bit(key) {
+        Some(own) => {
+            let set = modifiers | own;
+            let main = 1 << (7 - set.leading_zeros());
+            Ok((modifier_key(main), set & !main))
+        }
+        None => Ok((key, modifiers)),
+    }
+}
+
+/// The modifier a key itself is: its bit in the modifier mask.
+fn modifier_bit(key: KeyCode) -> Option<u8> {
+    modifier_side(key).map(|side| 1 << (side / 2))
+}
+
+/// The left key of the modifier a bit of the mask stands for.
+fn modifier_key(bit: u8) -> KeyCode {
+    match bit {
+        CTRL => KeyCode::KEY_LEFTCTRL,
+        ALT => KeyCode::KEY_LEFTALT,
+        SHIFT => KeyCode::KEY_LEFTSHIFT,
+        _ => KeyCode::KEY_LEFTMETA,
+    }
+}
+
+impl Binding {
+    /// Whether a press of `key` is this chord. `before` and `after` are the
+    /// modifiers down before and after the key changed. A chord of modifiers
+    /// alone has no key to press last: it is also pressed by the modifier
+    /// that completes it, whichever of them went down last.
+    fn pressed_by(&self, key: KeyCode, before: u8, after: u8) -> bool {
+        if self.key == key {
+            return self.modifiers.is_none_or(|required| required == before);
+        }
+        match (modifier_bit(self.key), modifier_bit(key), self.modifiers) {
+            (Some(own), Some(completing), Some(required @ 1..)) => {
+                before & completing == 0 && after == (required | own)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `key` going up releases this chord: its own key, or either
+    /// Win key of a chord of modifiers that the left one names.
+    fn released_by(&self, key: KeyCode) -> bool {
+        self.key == key || (self.is_modifiers_only() && modifier_bit(key) == modifier_bit(self.key))
+    }
+
+    /// Whether this chord is made of modifiers alone, such as `Ctrl+Super`.
+    fn is_modifiers_only(&self) -> bool {
+        matches!(
+            (modifier_bit(self.key), self.modifiers),
+            (Some(_), Some(1..))
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -391,14 +450,15 @@ impl DeviceKeys {
         if value != 0 && value != 1 {
             return None;
         }
-        let modifiers = pressed.modifier_mask();
+        // A chord is matched without counting the modifier its own key is.
+        let before = pressed.modifier_mask();
         if let Some(side) = modifier_side(key) {
             self.update_modifier(side, value == 1, pressed);
         }
-        let mut same_key = bindings.iter().filter(|binding| binding.key == key);
         if value == 0 {
-            let action = same_key
-                .find(|binding| self.actions[binding.action as usize])?
+            let action = bindings
+                .iter()
+                .find(|binding| self.actions[binding.action as usize] && binding.released_by(key))?
                 .action;
             return self.release(action, pressed).then_some(KeyEvent {
                 action,
@@ -406,27 +466,18 @@ impl DeviceKeys {
                 transition: Transition::Release,
             });
         }
-        if same_key
-            .clone()
-            .any(|binding| self.actions[binding.action as usize])
-        {
-            return None;
-        }
-        let action = same_key
-            .find(|binding| {
-                binding
-                    .modifiers
-                    .is_none_or(|required| required == modifiers)
-            })?
-            .action;
-        let index = action as usize;
+        let binding = bindings.iter().find(|binding| {
+            !self.actions[binding.action as usize]
+                && binding.pressed_by(key, before, pressed.modifier_mask())
+        })?;
+        let index = binding.action as usize;
         self.actions[index] = true;
         pressed.actions[index] += 1;
         (pressed.actions[index] == 1).then_some(KeyEvent {
-            action,
+            action: binding.action,
             at,
             transition: Transition::Press {
-                ctrl: modifiers & CTRL != 0,
+                ctrl: before & CTRL != 0,
             },
         })
     }
@@ -603,6 +654,89 @@ mod tests {
                 at: now,
                 transition: Transition::Release
             }),
+        );
+    }
+
+    #[test]
+    fn a_chord_of_modifiers_is_pressed_in_either_order_and_released_with_its_key() {
+        let config = crate::config::HotkeyConfig {
+            toggle_key: Some("Ctrl+KEY_RIGHTMETA".to_owned()),
+            ..Default::default()
+        };
+        let bindings = bindings(&config).unwrap();
+        let mut pressed = PressedKeys::default();
+        let mut keys = DeviceKeys::default();
+        let now = Instant::now();
+        let toggle = |transition| {
+            Some(KeyEvent {
+                action: Action::Toggle,
+                at: now,
+                transition,
+            })
+        };
+        let step = |keys: &mut DeviceKeys, pressed: &mut PressedKeys, key, value| {
+            keys.transition(&bindings, pressed, key, value, now)
+        };
+
+        // The left Win key completes the chord that names the right one.
+        step(&mut keys, &mut pressed, KeyCode::KEY_LEFTCTRL, 1);
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_LEFTMETA, 1),
+            toggle(Transition::Press { ctrl: true })
+        );
+        // Ctrl going up first keeps the chord pressed until its key goes up.
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_LEFTCTRL, 0),
+            None
+        );
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_LEFTMETA, 0),
+            toggle(Transition::Release)
+        );
+
+        // Ctrl pressed after Win is the same chord, and pressing it again
+        // while Win is held is not a second press.
+        step(&mut keys, &mut pressed, KeyCode::KEY_RIGHTMETA, 1);
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_RIGHTCTRL, 1),
+            toggle(Transition::Press { ctrl: false })
+        );
+        step(&mut keys, &mut pressed, KeyCode::KEY_RIGHTCTRL, 0);
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_RIGHTCTRL, 1),
+            None
+        );
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_RIGHTMETA, 0),
+            toggle(Transition::Release)
+        );
+        step(&mut keys, &mut pressed, KeyCode::KEY_RIGHTCTRL, 0);
+
+        // Other modifiers are not the chord: Win alone, then Win with Shift.
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_LEFTMETA, 1),
+            None
+        );
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_LEFTSHIFT, 1),
+            None
+        );
+        assert_eq!(
+            step(&mut keys, &mut pressed, KeyCode::KEY_LEFTCTRL, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn spellings_of_one_chord_of_modifiers_are_one_binding() {
+        let config = crate::config::HotkeyConfig {
+            key: Some("Ctrl+KEY_RIGHTMETA".to_owned()),
+            hold_key: Some("Super+KEY_LEFTCTRL".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            bindings(&config).unwrap_err(),
+            "hotkey.hold_key conflicts with hotkey.key on Super+KEY_LEFTCTRL"
         );
     }
 

@@ -412,6 +412,35 @@ async fn release_cannot_stop_a_session_started_after_the_hold_was_cancelled() {
     gateway.cancel().await;
 }
 
+#[tokio::test]
+async fn a_chord_key_starts_in_its_plain_mode_though_ctrl_is_part_of_it() {
+    use crate::hotkey::{Action, KeyEvent, Transition};
+
+    let gateway = Gateway::new(HeldSession(Arc::new(AtomicUsize::new(0))));
+    let started_mode = |key: &str| {
+        let config = crate::config::HotkeyConfig {
+            key: Some(key.to_owned()),
+            mode: "voice-polish".to_owned(),
+            ctrl_mode: "prompt-optimize".to_owned(),
+            ..Default::default()
+        };
+        let mut gestures = shortcuts::Gestures::new(&config);
+        let press = KeyEvent {
+            action: Action::Legacy,
+            transition: Transition::Press { ctrl: true },
+            at: std::time::Instant::now(),
+        };
+        match gestures.command(press, &gateway) {
+            Some(DaemonCommand::Start { mode, .. }) => mode,
+            _ => panic!("the key must start a session"),
+        }
+    };
+    // A single key pressed with Ctrl chooses the Ctrl mode; a chord that
+    // contains Ctrl was pressed as configured.
+    assert_eq!(started_mode("KEY_F8"), "prompt-optimize");
+    assert_eq!(started_mode("Ctrl+KEY_F8"), "voice-polish");
+}
+
 /// A daemon over a private bus whose console took a free port: the bus
 /// process and the runtime directory live as long as this does.
 struct Running {

@@ -234,7 +234,9 @@ impl Default for CloudConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HotkeyConfig {
-    /// Legacy evdev key for combined hold and tap gestures.
+    /// Key for the combined hold and tap gestures, or a chord such as
+    /// `Ctrl+KEY_F8`. A chord needs exactly its modifiers, so `ctrl_mode`
+    /// only applies to a single key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// Optional action-specific Linux shortcuts such as `Ctrl+Shift+KEY_F9`.
@@ -271,6 +273,11 @@ impl Default for HotkeyConfig {
             hold_threshold_ms: 350,
         }
     }
+}
+
+/// Whether a shortcut names a chord (`Ctrl+KEY_F8`) rather than one key.
+pub(crate) fn is_chord(shortcut: &str) -> bool {
+    shortcut.contains('+')
 }
 
 /// Loopback web console served by the daemon.

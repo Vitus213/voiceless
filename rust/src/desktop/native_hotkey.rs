@@ -96,7 +96,7 @@ pub(crate) fn bindings(config: &crate::config::HotkeyConfig) -> Result<Vec<Bindi
 }
 
 fn parse_binding(name: &str, action: Action) -> Result<(u16, Option<u8>), String> {
-    if action == Action::Legacy {
+    if action == Action::Legacy && !crate::config::is_chord(name) {
         return parse_key(name).map(|key| (key, None));
     }
     let mut parts = name.rsplit('+');
