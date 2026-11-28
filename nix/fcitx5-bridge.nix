@@ -23,7 +23,7 @@
 
 stdenv.mkDerivation {
   pname = "voiceless-fcitx5-bridge";
-  version = "0.2.0";
+  version = "0.2.1";
   src = ../fcitx5-bridge;
 
   nativeBuildInputs = [

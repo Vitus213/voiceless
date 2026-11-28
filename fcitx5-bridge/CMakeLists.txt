@@ -3,7 +3,7 @@
 # prefix); the version here is what @PROJECT_VERSION@ in the descriptor
 # becomes and mirrors the Nix package version.
 cmake_minimum_required(VERSION 3.16)
-project(voiceless-fcitx5-bridge VERSION 0.2.0 LANGUAGES CXX)
+project(voiceless-fcitx5-bridge VERSION 0.2.1 LANGUAGES CXX)
 
 # Fcitx5's CMake config files need extra-cmake-modules on the module path;
 # Core 5.1 is the API floor, the DBus component provides the bus module
