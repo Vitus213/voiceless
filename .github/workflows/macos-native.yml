@@ -12,6 +12,10 @@ jobs:
   package:
     runs-on: macos-15
     timeout-minutes: 90
+    # A tag without a certificate produces the same ad-hoc candidates as a
+    # manual build. Configuring a certificate opts into signing and notarization.
+    env:
+      SIGN_RELEASE: ${{ github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,13 +29,13 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal
           echo 'RUSTUP_TOOLCHAIN=1.99.1' >> "$GITHUB_ENV"
       - name: Import the Developer ID Application certificate
-        if: github.ref_type == 'tag'
+        if: env.SIGN_RELEASE == 'true'
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       - name: Configure notarization for the tagged candidate
-        if: github.ref_type == 'tag'
+        if: env.SIGN_RELEASE == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -42,7 +46,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           flags=()
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then flags+=(--sign); fi
+          if [[ "$SIGN_RELEASE" == true ]]; then flags+=(--sign); fi
           python3 scripts/release/macos/package.py "$RUNNER_TEMP/candidates" ${flags[@]+"${flags[@]}"}
       - uses: actions/upload-artifact@v4
         with:
