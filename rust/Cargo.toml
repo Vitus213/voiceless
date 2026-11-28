@@ -1,6 +1,6 @@
 [package]
 name = "voiceless"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Fast realtime voice input for Linux"
 license = "MIT"

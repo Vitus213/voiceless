@@ -4,6 +4,24 @@ Releases are tagged `v<major>.<minor>.<patch>`. Entries up to 0.1.0 are grouped 
 the day the work landed on `main`; commit hashes refer to
 <https://github.com/Vitus213/voiceless>.
 
+## 0.2.1 - 2026-11-28
+
+Linux shortcuts can now use Ctrl+Win without an extra key. In the console,
+release either modifier to finish recording, then save and apply the binding.
+
+### Fixed
+
+- Record modifier-only chords on Linux with either Win key and in either
+  press order. Right Alt, Shift and Win keys can also be recorded alone.
+- The combined hold-and-tap `hotkey.key` accepts chords. Ctrl within a
+  configured chord no longer selects the alternate Ctrl mode.
+- Display Ctrl+Win consistently in shortcut settings, the session strip
+  and first-run setup. Reject duplicate bindings before saving.
+- Export Windows test endpoint IDs before running meeting acceptance.
+
+This release publishes Linux x86-64 and ARM64 packages to npm. macOS and
+Windows installers remain candidates; modifier-only recording is Linux-only.
+
 ## 0.2.0 - 2026-11-26
 
 This release ships the CLI and its embedded web console through npm for
@@ -52,9 +70,6 @@ The macOS and Windows installers are release candidates.
   changes keep the last working settings active.
 
 ### Fixed
-- Shortcuts made of modifiers alone, such as Ctrl+Win, record once one of
-  them is released and work in any press order on Linux. The combined
-  hold-and-tap key accepts a chord.
 - Stopping `pw-record` on PipeWire 1.6 preserves the final transcript and WAV.
   A disconnected recorder still fails the session.
 - On Linux, `voiceless doctor` checks the same PipeWire or GStreamer tools
